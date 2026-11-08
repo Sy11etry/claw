@@ -1,0 +1,6 @@
+// error: E0120
+fn main() {
+    match 1 {
+        1: print(1)
+    }
+}

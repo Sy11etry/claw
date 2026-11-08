@@ -1,0 +1,6 @@
+// error: E0128
+fn Foo() {
+}
+
+fn main() {
+}

@@ -1,5 +1,4 @@
 // error: E0900
 fn main() {
-    match 1 {
-    }
+    defer print(1)
 }

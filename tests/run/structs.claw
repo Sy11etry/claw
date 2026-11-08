@@ -1,0 +1,23 @@
+// expect: 11
+// expect: 22
+// expect: Point{11, 22}
+// expect: Point{100, 23}
+// expect: Point{11, 22}
+type Point { x int, y int }
+
+fn add(a Point, b Point) Point {
+    ret Point{a.x + b.x, a.y + b.y}
+}
+
+fn main() {
+    p := Point{1, 2}
+    q := add(p, Point{10, 20})
+    print(q.x)
+    print(q.y)
+    print(q)
+    mut r := q
+    r.x = 100
+    r.y += 1
+    print(r)
+    print(q)
+}

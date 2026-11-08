@@ -8,7 +8,7 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "out"
 CLAW = HERE.parent / "compiler/target/release/claw"
-BENCHES = ["fib", "primes", "collatz"]
+BENCHES = ["fib", "primes", "collatz", "sieve", "mandel"]
 RUNS = 5
 
 
@@ -28,11 +28,11 @@ def measure_compile_speed():
     parts = []
     for i in range(n):
         parts.append(
-            f"fn f{i}(a int, b int) int {{\n    mut s := a\n"
+            f"fn work{i}(a int, b int) int {{\n    mut s := a\n"
             f"    for j in 0..b {{\n        if j % 2 == 0 {{\n            s += j\n        }}\n    }}\n"
             f"    ret s + {i}\n}}\n"
         )
-    parts.append("fn main() {\n    print(f0(1, 2))\n}\n")
+    parts.append("fn main() {\n    print(work0(1, 2))\n}\n")
     src = "\n".join(parts)
     path = OUT / "big.claw"
     path.write_text(src)

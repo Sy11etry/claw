@@ -1,0 +1,17 @@
+// expect: a = 5, twice = 10
+// expect: point P{1, 2} x 1
+// expect: {literal} 5
+// expect: float 1.5 bool true
+// expect: arr [1, 2] first 1
+type P { x int, y int }
+
+fn main() {
+    a := 5
+    p := P{1, 2}
+    print("a = {a}, twice = {a * 2}")
+    print("point {p} x {p.x}")
+    print("{{literal}} {a}")
+    print("float {1.5} bool {a > 1}")
+    arr := [1, 2]
+    print("arr {arr} first {arr[0]}")
+}

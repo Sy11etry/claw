@@ -1,0 +1,21 @@
+// expect: P{5, 5}
+// expect: fail(Bad{P{1, 2}, 3})
+// expect: P{9, 9}
+type P { x int, y int }
+type E = Bad{p P, code int}
+
+fn f(n int) P ! E {
+    if n == 0 { fail Bad{P{1, 2}, 3} }
+    ret P{n, n}
+}
+
+fn g(n int) P ! E {
+    ret f(n)
+}
+
+fn main() {
+    print(g(5))
+    print(g(0))
+    p := g(0) else P{9, 9}
+    print(p)
+}

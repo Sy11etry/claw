@@ -1,5 +1,6 @@
 // error: E0900
-fn f() +mem {
+fn f(own a int) {
+    print(a)
 }
 
 fn main() {

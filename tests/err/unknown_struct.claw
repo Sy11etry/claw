@@ -1,0 +1,4 @@
+// error: E0112
+fn main() {
+    print(Nope{1})
+}

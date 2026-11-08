@@ -1,0 +1,15 @@
+// expect: Config{1, 2, 3}
+type Config {
+    width int
+    height int,
+    depth int
+}
+
+fn main() {
+    c := Config{
+        1,
+        2,
+        3,
+    }
+    print(c)
+}

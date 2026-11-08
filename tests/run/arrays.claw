@@ -1,0 +1,29 @@
+// expect: 1
+// expect: [1, 2, 30, 5]
+// expect: 38
+// expect: 4
+// expect: 0
+// expect: 2
+// expect: 60
+// expect: 15
+// expect: [false, false, false]
+fn sum(a [4]int) int {
+    mut s := 0
+    for x in a { s += x }
+    ret s
+}
+
+fn main() {
+    mut a := [1, 2, 3, 4]
+    print(a[0])
+    a[2] = 30
+    a[3] += 1
+    print(a)
+    print(sum(a))
+    print(len(a))
+    for x, i in a {
+        print(x * i)
+    }
+    b [3]bool = [false...]
+    print(b)
+}

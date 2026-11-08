@@ -1,0 +1,18 @@
+// expect: 1.75
+// expect: 6
+// expect: 6
+// expect: -0.25
+// expect: true
+fn scale(x f32, k f32) f32 {
+    ret x * k
+}
+
+fn main() {
+    a f32 = 1.5
+    b f32 = 0.25
+    print(a + b)
+    print(scale(a, 4))
+    print(a / b)
+    print(-b)
+    print(a > b)
+}

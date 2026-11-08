@@ -1,0 +1,8 @@
+// error: E0205
+type P { x int }
+
+fn main() {
+    if P{1}.x == 1 {
+        print(1)
+    }
+}

@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: trap: integer overflow at trap_i32.claw:8:11
+fn v(n i32) i32 {
+    ret n
+}
+
+fn main() {
+    print(v(2147483647) + 1)
+}

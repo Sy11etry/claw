@@ -1,0 +1,13 @@
+// error: E0124
+fn g() ?int {
+    ret 1
+}
+
+fn f() int {
+    x := g()?
+    ret x
+}
+
+fn main() {
+    print(f())
+}

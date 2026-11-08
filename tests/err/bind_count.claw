@@ -1,0 +1,9 @@
+// error: E0119
+type T = A{x int, y int}
+
+fn main() {
+    t := A{1, 2}
+    match t {
+        A{x}: print(x)
+    }
+}

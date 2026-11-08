@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: trap: integer overflow at trap_i8.claw:8:11
+fn v(n i8) i8 {
+    ret n
+}
+
+fn main() {
+    print(v(127) + 1)
+}

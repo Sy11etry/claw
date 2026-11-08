@@ -1,0 +1,6 @@
+// error: E0110
+type A { x int }
+type A { y int }
+
+fn main() {
+}

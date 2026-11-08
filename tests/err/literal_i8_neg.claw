@@ -1,0 +1,5 @@
+// error: E0115
+fn main() {
+    x i8 = -129
+    print(x)
+}

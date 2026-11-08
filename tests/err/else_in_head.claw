@@ -1,0 +1,10 @@
+// error: E0201
+fn f() ?bool {
+    ret true
+}
+
+fn main() {
+    if f() else false {
+        print(1)
+    }
+}

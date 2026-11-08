@@ -1,0 +1,6 @@
+// error: E0104
+type P { x int }
+
+fn main() {
+    print(int(P{1}))
+}

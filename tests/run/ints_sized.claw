@@ -1,0 +1,36 @@
+// expect: 127
+// expect: -30000
+// expect: 1000000000
+// expect: 5
+// expect: 200
+// expect: 65535
+// expect: 4000000000
+// expect: 18446744073709551615
+// expect: 6148914691236517205
+// expect: 5
+// expect: true
+// expect: 15
+fn main() {
+    a i8 = 100
+    b i8 = 27
+    print(a + b)
+    c i16 = -30000
+    print(c)
+    d i32 = 2000000000
+    print(d / 2)
+    e i64 = 5
+    x int = e
+    print(x)
+    f u8 = 200
+    print(f)
+    g u16 = 65535
+    print(g)
+    h u32 = 4000000000
+    print(h)
+    i u64 = 18446744073709551615
+    print(i)
+    print(i / 3)
+    print(i % 10)
+    print(i > 1)
+    print(i >> 60)
+}

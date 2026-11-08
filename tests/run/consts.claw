@@ -1,0 +1,21 @@
+// expect: 20
+// expect: 10
+// expect: 1.5
+// expect: true
+// expect: 200
+// expect: 21
+const limit = 10
+const twice = limit * 2
+const rate = 1.5
+const on = true
+const small u8 = 200
+
+fn main() {
+    a [twice]int = [1...]
+    print(len(a))
+    print(limit)
+    print(rate)
+    print(on)
+    print(small)
+    print(twice + 1)
+}

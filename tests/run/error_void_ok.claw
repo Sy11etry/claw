@@ -1,0 +1,22 @@
+// expect: fine
+// expect: failed
+type E = Nope
+
+fn check(n int) ! E {
+    if n < 0 { fail Nope }
+}
+
+fn outer(n int) ! E {
+    check(n)?
+    print("fine")
+    ret
+}
+
+fn main() {
+    outer(1)?
+    outer(-1) else {
+        print("failed")
+        ret
+    }
+    print("unreachable")
+}

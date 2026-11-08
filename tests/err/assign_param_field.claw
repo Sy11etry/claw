@@ -1,0 +1,11 @@
+// error: E0103
+type P { x int }
+
+fn f(p P) int {
+    p.x = 1
+    ret p.x
+}
+
+fn main() {
+    print(f(P{1}))
+}

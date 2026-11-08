@@ -1,0 +1,35 @@
+// expect: 4
+// expect: 254
+// expect: 3410065408
+// expect: 65520
+// expect: 1
+// expect: 250
+fn add(a u8, b u8) u8 {
+    ret a + b
+}
+
+fn sub(a u8, b u8) u8 {
+    ret a - b
+}
+
+fn mul32(a u32, b u32) u32 {
+    ret a * b
+}
+
+fn shl16(a u16, b u16) u16 {
+    ret a << b
+}
+
+fn big(a u64, b u64) u64 {
+    ret a + b
+}
+
+fn main() {
+    print(add(250, 10))
+    print(sub(3, 5))
+    print(mul32(4000000000, 3))
+    print(shl16(65535, 4))
+    print(big(18446744073709551615, 2))
+    x u8 = 5
+    print(~x)
+}

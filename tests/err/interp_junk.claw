@@ -1,0 +1,6 @@
+// error: E0133
+fn main() {
+    a := 1
+    print("{a b}")
+    print(a)
+}

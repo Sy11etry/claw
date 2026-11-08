@@ -1,0 +1,5 @@
+// error: E0127
+type A { b [2]A }
+
+fn main() {
+}

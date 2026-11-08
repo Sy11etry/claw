@@ -1,0 +1,4 @@
+// error: E0005
+fn main() {
+    print('ab')
+}

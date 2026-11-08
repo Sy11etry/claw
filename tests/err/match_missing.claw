@@ -1,0 +1,9 @@
+// error: E0120
+type T = A | B | C
+
+fn main() {
+    t := A
+    match t {
+        A: print(1)
+    }
+}

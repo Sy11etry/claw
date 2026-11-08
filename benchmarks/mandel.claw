@@ -1,0 +1,22 @@
+fn iterations(cx f64, cy f64) int {
+    mut x := 0.0
+    mut y := 0.0
+    mut n := 0
+    for n < 200 and x * x + y * y <= 4.0 {
+        t := x * x - y * y + cx
+        y = 2.0 * x * y + cy
+        x = t
+        n += 1
+    }
+    ret n
+}
+
+fn main() {
+    mut total := 0
+    for py in 0..1000 {
+        for px in 0..1000 {
+            total += iterations(f64(px) / 400.0 - 2.0, f64(py) / 500.0 - 1.0)
+        }
+    }
+    print(total)
+}

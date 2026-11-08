@@ -1,0 +1,6 @@
+// error: E0110
+type A = X
+type B = X
+
+fn main() {
+}

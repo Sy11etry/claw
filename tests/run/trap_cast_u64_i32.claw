@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: trap: value does not fit the target type at trap_cast_u64_i32.claw:8:11
+fn v(n u64) u64 {
+    ret n
+}
+
+fn main() {
+    print(i32(v(18446744073709551615)))
+}

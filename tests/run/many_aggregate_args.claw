@@ -1,0 +1,11 @@
+// expect: P{3208}
+type P { x int }
+
+fn f(a P, b P, c P, d P, e P, g P, h P, i P, j P, k P) P {
+    ret P{a.x + b.x + c.x + d.x + e.x + g.x + h.x + i.x + j.x * 100 + k.x * 1000}
+}
+
+fn main() {
+    p := P{1}
+    print(f(p, p, p, p, p, p, p, p, P{2}, P{3}))
+}

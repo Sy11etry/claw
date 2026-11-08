@@ -1,0 +1,40 @@
+// expect: 123
+// expect: 12
+// expect: fail(Empty)
+// expect: fail(BadChar{1})
+// expect: 0
+// expect: 124
+// expect: BadChar{1}
+type ParseErr = Empty | BadChar{at int}
+
+fn digit(c u8, at int) int ! ParseErr {
+    if c < '0' or c > '9' { fail BadChar{at} }
+    ret int(c - '0')
+}
+
+fn parse(a [3]u8, n int) int ! ParseErr {
+    if n == 0 { fail Empty }
+    mut v := 0
+    for c, i in a {
+        if i == n { break }
+        v = v * 10 + digit(c, i)?
+    }
+    ret v
+}
+
+fn main() {
+    good := ['1', '2', '3']
+    bad := ['1', 'x', '3']
+    print(parse(good, 3))
+    print(parse(good, 2))
+    print(parse(good, 0))
+    print(parse(bad, 3))
+    print(parse(bad, 3) else 0)
+    x := parse(good, 3)?
+    print(x + 1)
+    y := parse(bad, 3) else e {
+        print("{e}")
+        ret
+    }
+    print(y)
+}

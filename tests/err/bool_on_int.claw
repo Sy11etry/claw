@@ -1,0 +1,7 @@
+// error: E0118
+fn main() {
+    match 1 {
+        true: print(1)
+        _: print(2)
+    }
+}

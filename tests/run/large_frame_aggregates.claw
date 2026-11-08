@@ -1,0 +1,13 @@
+// expect: 42
+// expect: 8
+// expect: 0.75
+fn main() {
+    mut a [100000]int = [0...]
+    a[99999] = 42
+    mut b [100000]u8 = [1...]
+    b[0] = 7
+    x := 0.5 + 0.25
+    print(a[99999])
+    print(b[0] + b[99999])
+    print(x)
+}

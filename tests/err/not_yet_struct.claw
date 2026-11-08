@@ -1,5 +1,5 @@
 // error: E0900
-type P { x int }
+use fs
 
 fn main() {
 }

@@ -1,0 +1,22 @@
+const size = 5000000
+
+fn count() int {
+    mut composite [size]bool = [false...]
+    mut found := 0
+    for i in 2..size {
+        if composite[i] { continue }
+        found += 1
+        mut j := i * i
+        for j < size {
+            composite[j] = true
+            j += i
+        }
+    }
+    ret found
+}
+
+fn main() {
+    mut total := 0
+    for _ in 0..10 { total += count() }
+    print(total)
+}

@@ -1,0 +1,15 @@
+// expect: 1
+type Op = Inc | Dec | Stop
+
+fn main() {
+    ops := [Inc, Inc, Dec, Stop, Inc]
+    mut n := 0
+    for op in ops {
+        match op {
+            Inc: n += 1
+            Dec: n -= 1
+            Stop: break
+        }
+    }
+    print(n)
+}

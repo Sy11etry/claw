@@ -1,0 +1,34 @@
+// expect: 7
+// expect: was A
+// expect: other
+// expect: 2
+// expect: 3
+// expect: 2
+type T = A{x int} | B | C{p [2]int, q u8}
+
+fn show(t T) {
+    match t {
+        A{x}: {
+            print(x)
+            print("was A")
+        }
+        C{p, _}: print(p[1])
+        _: print("other")
+    }
+}
+
+fn skip(t T) int {
+    match t {
+        A: ret 1
+        B: ret 2
+        C: ret 3
+    }
+}
+
+fn main() {
+    show(A{7})
+    show(B)
+    show(C{[1, 2], 3})
+    print(skip(C{[0, 0], 0}))
+    print(skip(B))
+}

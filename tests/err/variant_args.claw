@@ -1,0 +1,6 @@
+// error: E0106
+type T = A{x int}
+
+fn main() {
+    print(A{1, 2})
+}

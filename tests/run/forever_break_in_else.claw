@@ -1,0 +1,20 @@
+// expect: 2
+fn f(n int) ?int {
+    if n > 1 { ret none }
+    ret n
+}
+
+fn count() int {
+    mut n := 0
+    for {
+        _ = f(n) else {
+            break
+        }
+        n += 1
+    }
+    ret n
+}
+
+fn main() {
+    print(count())
+}

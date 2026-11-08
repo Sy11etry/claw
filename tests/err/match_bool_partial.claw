@@ -1,0 +1,6 @@
+// error: E0120
+fn main() {
+    match true {
+        true: print(1)
+    }
+}

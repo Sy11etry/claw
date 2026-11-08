@@ -1,0 +1,7 @@
+// error: E0134
+fn f(a ??int) {
+    print(a)
+}
+
+fn main() {
+}

@@ -1,4 +1,5 @@
 // error: E0900
 fn main() {
-    print("{x}")
+    s str = "a"
+    print(s)
 }

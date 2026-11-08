@@ -1,0 +1,11 @@
+// exit: 101
+// stderr: trap: index out of bounds at trap_bounds_write.claw:9:5
+fn v(n int) int {
+    ret n
+}
+
+fn main() {
+    mut a := [1, 2, 3]
+    a[v(9)] = 1
+    print(a)
+}

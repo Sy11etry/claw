@@ -1,0 +1,12 @@
+// expect: 16654208175385433931
+fn step(h u64, c u8) u64 {
+    ret (h ^ u64(c)) * 1099511628211
+}
+
+fn main() {
+    mut h u64 = 14695981039346656037
+    for c in ['a', 'b', 'c'] {
+        h = step(h, c)
+    }
+    print(h)
+}

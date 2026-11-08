@@ -1,0 +1,10 @@
+// exit: 1
+// stderr: error: none at main_try_none.claw:
+fn f() ?int {
+    ret none
+}
+
+fn main() {
+    x := f()?
+    print(x)
+}

@@ -1,0 +1,13 @@
+// expect: [P{0, 0}, P{5, 0}, P{0, 200}]
+// expect: 205
+type P { x int, y u8 }
+
+fn main() {
+    mut a [3]P = [P{0, 0}...]
+    a[1].x = 5
+    a[2].y = 200
+    print(a)
+    mut total := 0
+    for p in a { total += p.x + int(p.y) }
+    print(total)
+}

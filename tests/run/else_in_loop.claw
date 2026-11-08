@@ -1,0 +1,24 @@
+// expect: 8
+// expect: 0
+// expect: 1
+fn f(n int) ?int {
+    if n == 2 { ret none }
+    ret n
+}
+
+fn main() {
+    mut s := 0
+    for i in 0..5 {
+        v := f(i) else {
+            continue
+        }
+        s += v
+    }
+    print(s)
+    for i in 0..5 {
+        v := f(i) else {
+            break
+        }
+        print(v)
+    }
+}

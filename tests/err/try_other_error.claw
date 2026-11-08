@@ -1,0 +1,16 @@
+// error: E0124
+type A = X
+type B = Y
+
+fn g() int ! A {
+    ret 1
+}
+
+fn f() int ! B {
+    x := g()?
+    ret x
+}
+
+fn main() {
+    print(f())
+}

@@ -12,6 +12,11 @@ pub const X11: Reg = 11;
 pub const X12: Reg = 12;
 pub const X13: Reg = 13;
 pub const X16: Reg = 16;
+pub const X19: Reg = 19;
+pub const X20: Reg = 20;
+pub const X21: Reg = 21;
+pub const D0: Reg = 0;
+pub const D1: Reg = 1;
 pub const FP: Reg = 29;
 pub const LR: Reg = 30;
 /// Register number 31 is SP or XZR depending on the instruction.
@@ -23,8 +28,12 @@ pub enum Cond {
     Eq = 0,
     Ne = 1,
     Hs = 2,
+    Lo = 3,
+    Mi = 4,
     Vs = 6,
     Vc = 7,
+    Hi = 8,
+    Ls = 9,
     Ge = 10,
     Lt = 11,
     Gt = 12,
@@ -161,6 +170,125 @@ pub fn ldp_post(rt: Reg, rt2: Reg, rn: Reg, off: i32) -> u32 {
     0xA8C0_0000 | (((off / 8) as u32 & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt
 }
 
+pub fn add(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x8B00_0000, rd, rn, rm)
+}
+/// `add rd, rn, rm` where rn may be SP.
+pub fn add_ext(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x8B20_6000, rd, rn, rm)
+}
+pub fn lsr(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x9AC0_2400, rd, rn, rm)
+}
+/// `sbfx rd, rn, #0, #bits`: sign-extend the low bits.
+pub fn sbfx(rd: Reg, rn: Reg, bits: u32) -> u32 {
+    0x9340_0000 | ((bits - 1) << 10) | (rn << 5) | rd
+}
+/// `ubfx rd, rn, #0, #bits`: zero-extend the low bits.
+pub fn ubfx(rd: Reg, rn: Reg, bits: u32) -> u32 {
+    0xD340_0000 | ((bits - 1) << 10) | (rn << 5) | rd
+}
+
+fn ls(base: u32, rt: Reg, rn: Reg, scaled: u32) -> u32 {
+    base | (scaled << 10) | (rn << 5) | rt
+}
+pub fn ldrb(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0x3940_0000, rt, rn, off)
+}
+pub fn ldrsb(rt: Reg, rn: Reg) -> u32 {
+    ls(0x3980_0000, rt, rn, 0)
+}
+pub fn ldrh(rt: Reg, rn: Reg) -> u32 {
+    ls(0x7940_0000, rt, rn, 0)
+}
+pub fn ldrsh(rt: Reg, rn: Reg) -> u32 {
+    ls(0x7980_0000, rt, rn, 0)
+}
+pub fn ldr_w(rt: Reg, rn: Reg) -> u32 {
+    ls(0xB940_0000, rt, rn, 0)
+}
+pub fn ldrsw(rt: Reg, rn: Reg) -> u32 {
+    ls(0xB980_0000, rt, rn, 0)
+}
+pub fn strh(rt: Reg, rn: Reg) -> u32 {
+    ls(0x7900_0000, rt, rn, 0)
+}
+pub fn str_w(rt: Reg, rn: Reg) -> u32 {
+    ls(0xB900_0000, rt, rn, 0)
+}
+pub fn strb_reg(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x3820_6800, rt, rn, rm)
+}
+/// `stp rt, rt2, [rn, #off]`
+pub fn stp(rt: Reg, rt2: Reg, rn: Reg, off: u32) -> u32 {
+    0xA900_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+/// `ldp rt, rt2, [rn, #off]`
+pub fn ldp(rt: Reg, rt2: Reg, rn: Reg, off: u32) -> u32 {
+    0xA940_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+
+pub fn ldr_d(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0xFD40_0000, rt, rn, off / 8)
+}
+pub fn str_d(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0xFD00_0000, rt, rn, off / 8)
+}
+pub fn ldr_s(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0xBD40_0000, rt, rn, off / 4)
+}
+pub fn str_s(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0xBD00_0000, rt, rn, off / 4)
+}
+
+/// The float size bit: `ftype` 01 for double, 00 for single.
+fn ft(bits: u8) -> u32 {
+    if bits == 64 {
+        0x0040_0000
+    } else {
+        0
+    }
+}
+pub fn fadd(rd: Reg, rn: Reg, rm: Reg, bits: u8) -> u32 {
+    rrr(0x1E20_2800 | ft(bits), rd, rn, rm)
+}
+pub fn fsub(rd: Reg, rn: Reg, rm: Reg, bits: u8) -> u32 {
+    rrr(0x1E20_3800 | ft(bits), rd, rn, rm)
+}
+pub fn fmul(rd: Reg, rn: Reg, rm: Reg, bits: u8) -> u32 {
+    rrr(0x1E20_0800 | ft(bits), rd, rn, rm)
+}
+pub fn fdiv(rd: Reg, rn: Reg, rm: Reg, bits: u8) -> u32 {
+    rrr(0x1E20_1800 | ft(bits), rd, rn, rm)
+}
+pub fn fneg(rd: Reg, rn: Reg, bits: u8) -> u32 {
+    0x1E21_4000 | ft(bits) | (rn << 5) | rd
+}
+pub fn fcmp(rn: Reg, rm: Reg, bits: u8) -> u32 {
+    0x1E20_2000 | ft(bits) | (rm << 16) | (rn << 5)
+}
+pub fn fcvt_s_to_d(rd: Reg, rn: Reg) -> u32 {
+    0x1E22_C000 | (rn << 5) | rd
+}
+pub fn fcvt_d_to_s(rd: Reg, rn: Reg) -> u32 {
+    0x1E62_4000 | (rn << 5) | rd
+}
+pub fn scvtf(rd: Reg, rn: Reg, bits: u8) -> u32 {
+    0x9E22_0000 | ft(bits) | (rn << 5) | rd
+}
+pub fn ucvtf(rd: Reg, rn: Reg, bits: u8) -> u32 {
+    0x9E23_0000 | ft(bits) | (rn << 5) | rd
+}
+pub fn fcvtzs(rd: Reg, rn: Reg) -> u32 {
+    0x9E78_0000 | (rn << 5) | rd
+}
+pub fn fcvtzu(rd: Reg, rn: Reg) -> u32 {
+    0x9E79_0000 | (rn << 5) | rd
+}
+pub fn fmov_d_x(rd: Reg, rn: Reg) -> u32 {
+    0x9E67_0000 | (rn << 5) | rd
+}
+
 // Branch encoders take the displacement in instructions, not bytes.
 pub const B: u32 = 0x1400_0000;
 pub const BL: u32 = 0x9400_0000;
@@ -255,5 +383,57 @@ pub fn golden() -> Vec<(u32, String)> {
         s(br(X16), "br x16"),
         s(ret(), "ret"),
         s(brk(1), "brk #1"),
+        s(add(X9, X9, X16), "add x9, x9, x16"),
+        s(add_ext(X9, SP, X16), "add x9, sp, x16"),
+        s(lsr(X11, X9, X10), "lsr x11, x9, x10"),
+        s(sbfx(X12, X11, 8), "sbfx x12, x11, #0, #8"),
+        s(sbfx(X12, X11, 32), "sbfx x12, x11, #0, #32"),
+        s(ubfx(X11, X11, 16), "ubfx x11, x11, #0, #16"),
+        s(ldrb(X10, X9, 0), "ldrb w10, [x9]"),
+        s(ldrb(X10, X9, 63), "ldrb w10, [x9, #63]"),
+        s(ldrsb(X10, X9), "ldrsb x10, [x9]"),
+        s(ldrh(X10, X9), "ldrh w10, [x9]"),
+        s(ldrsh(X10, X9), "ldrsh x10, [x9]"),
+        s(ldr_w(X10, X9), "ldr w10, [x9]"),
+        s(ldrsw(X10, X9), "ldrsw x10, [x9]"),
+        s(strh(X10, X9), "strh w10, [x9]"),
+        s(str_w(X10, X9), "str w10, [x9]"),
+        s(strb_reg(X13, X12, X10), "strb w13, [x12, x10]"),
+        s(stp(X19, X20, SP, 16), "stp x19, x20, [sp, #16]"),
+        s(ldp(X19, X20, SP, 16), "ldp x19, x20, [sp, #16]"),
+        s(ldr_d(D0, SP, 8), "ldr d0, [sp, #8]"),
+        s(str_d(D0, SP, 32760), "str d0, [sp, #32760]"),
+        s(ldr_s(D1, SP, 4), "ldr s1, [sp, #4]"),
+        s(str_s(D0, X16, 0), "str s0, [x16]"),
+        s(fadd(D0, D0, D1, 64), "fadd d0, d0, d1"),
+        s(fsub(D0, D0, D1, 64), "fsub d0, d0, d1"),
+        s(fmul(D0, D0, D1, 64), "fmul d0, d0, d1"),
+        s(fdiv(D0, D0, D1, 64), "fdiv d0, d0, d1"),
+        s(fadd(D0, D0, D1, 32), "fadd s0, s0, s1"),
+        s(fsub(D0, D0, D1, 32), "fsub s0, s0, s1"),
+        s(fmul(D0, D0, D1, 32), "fmul s0, s0, s1"),
+        s(fdiv(D0, D0, D1, 32), "fdiv s0, s0, s1"),
+        s(fneg(D0, D0, 64), "fneg d0, d0"),
+        s(fneg(D0, D0, 32), "fneg s0, s0"),
+        s(fcmp(D0, D1, 64), "fcmp d0, d1"),
+        s(fcmp(D0, D1, 32), "fcmp s0, s1"),
+        s(fcvt_s_to_d(D0, D0), "fcvt d0, s0"),
+        s(fcvt_d_to_s(D0, D0), "fcvt s0, d0"),
+        s(scvtf(D0, X9, 64), "scvtf d0, x9"),
+        s(scvtf(D0, X9, 32), "scvtf s0, x9"),
+        s(ucvtf(D0, X9, 64), "ucvtf d0, x9"),
+        s(ucvtf(D0, X9, 32), "ucvtf s0, x9"),
+        s(fcvtzs(X11, D0), "fcvtzs x11, d0"),
+        s(fcvtzu(X11, D0), "fcvtzu x11, d0"),
+        s(fmov_d_x(D1, X16), "fmov d1, x16"),
+        s(b_cond(Cond::Lo, 4), "b.lo #16"),
+        s(b_cond(Cond::Mi, 4), "b.mi #16"),
+        s(b_cond(Cond::Hi, 4), "b.hi #16"),
+        s(b_cond(Cond::Ls, 4), "b.ls #16"),
+        s(cset(X11, Cond::Lo as u32), "cset x11, lo"),
+        s(cset(X11, Cond::Ls as u32), "cset x11, ls"),
+        s(cset(X11, Cond::Hi as u32), "cset x11, hi"),
+        s(cset(X11, Cond::Hs as u32), "cset x11, hs"),
+        s(cset(X11, Cond::Mi as u32), "cset x11, mi"),
     ]
 }

@@ -1,0 +1,23 @@
+// expect: Outer{1, Mixed{2, -3, 4, -5, true, 1.5}, 65000}
+// expect: -3
+// expect: -5
+// expect: true
+// expect: 1.5
+// expect: 65000
+type Mixed { a u8, b i32, c u8, d int, e bool, f f32 }
+
+type Outer { head u8, m Mixed, tail u16 }
+
+fn make() Outer {
+    ret Outer{1, Mixed{2, -3, 4, -5, true, 1.5}, 65000}
+}
+
+fn main() {
+    o := make()
+    print(o)
+    print(o.m.b)
+    print(o.m.d)
+    print(o.m.e)
+    print(o.m.f)
+    print(o.tail)
+}

@@ -1,0 +1,14 @@
+// expect: before
+// exit: 1
+// stderr: error: Boom{3} at main_try_error.claw:
+type E = Boom{n int}
+
+fn f() int ! E {
+    fail Boom{3}
+}
+
+fn main() {
+    print("before")
+    x := f()?
+    print(x)
+}

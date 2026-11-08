@@ -1,0 +1,33 @@
+// expect: 1
+// expect: none
+// expect: 2
+// expect: -1
+// expect: 2
+// expect: none
+// expect: gone
+fn find(a [3]int, x int) ?int {
+    for v, i in a {
+        if v == x { ret i }
+    }
+    ret none
+}
+
+fn twice(a [3]int, x int) ?int {
+    i := find(a, x)?
+    ret i * 2
+}
+
+fn main() {
+    a := [5, 6, 7]
+    print(find(a, 6))
+    print(find(a, 9))
+    print(find(a, 7) else -1)
+    print(find(a, 9) else -1)
+    print(twice(a, 6))
+    print(twice(a, 9))
+    r := find(a, 9) else {
+        print("gone")
+        ret
+    }
+    print(r)
+}

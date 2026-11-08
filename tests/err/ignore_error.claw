@@ -1,0 +1,10 @@
+// error: E0125
+type E = X
+
+fn f() ! E {
+    ret
+}
+
+fn main() {
+    _ = f()
+}

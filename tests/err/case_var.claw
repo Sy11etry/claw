@@ -1,0 +1,5 @@
+// error: E0128
+fn main() {
+    Big := 1
+    print(Big)
+}

@@ -1,0 +1,30 @@
+// expect: 100
+// expect: 200
+// expect: 300
+// expect: 400
+// expect: x
+// expect: yes
+fn name(n int) int {
+    match n {
+        0: ret 100
+        1: ret 200
+        -1: ret 300
+        _: ret 400
+    }
+}
+
+fn main() {
+    print(name(0))
+    print(name(1))
+    print(name(-1))
+    print(name(5))
+    match 'x' {
+        'a': print("a")
+        'x': print("x")
+        _: print("?")
+    }
+    match 3 > 2 {
+        true: print("yes")
+        false: print("no")
+    }
+}

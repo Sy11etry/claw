@@ -1,14 +1,34 @@
 //! CIR, the Claw intermediate representation: typed instructions over virtual
-//! registers, grouped into basic blocks. In 0.1 every vreg lives on the stack.
+//! registers, grouped into basic blocks. Until 0.6 every vreg lives on the stack.
+//! A vreg holds a scalar (integers kept sign- or zero-extended to 64 bits, floats
+//! as raw bits) or the address of an aggregate.
 
 pub type VReg = u32;
 pub type BlockId = usize;
 pub type FuncId = usize;
+pub type ObjId = usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Loc {
     pub line: u32,
     pub col: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Num {
+    pub bits: u8,
+    pub signed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mem {
+    I8,
+    I16,
+    I32,
+    U8,
+    U16,
+    U32,
+    X64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +46,14 @@ pub enum Arith {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FArith {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cc {
     Eq,
     Ne,
@@ -39,17 +67,34 @@ pub enum Cc {
 pub enum Inst {
     Const { d: VReg, v: i64 },
     Mov { d: VReg, s: VReg },
-    Bin { op: Arith, d: VReg, a: VReg, b: VReg, loc: Loc },
-    Neg { d: VReg, s: VReg, loc: Loc },
-    BitNot { d: VReg, s: VReg },
+    Bin { op: Arith, d: VReg, a: VReg, b: VReg, num: Num, loc: Loc },
+    Neg { d: VReg, s: VReg, num: Num, loc: Loc },
+    BitNot { d: VReg, s: VReg, num: Num },
     BoolNot { d: VReg, s: VReg },
     /// `d += 1` for a loop counter already known to be below its limit.
     Inc { d: VReg },
-    Cmp { cc: Cc, d: VReg, a: VReg, b: VReg },
+    Cmp { cc: Cc, d: VReg, a: VReg, b: VReg, unsigned: bool },
+    FBin { op: FArith, d: VReg, a: VReg, b: VReg, bits: u8 },
+    FNeg { d: VReg, s: VReg, bits: u8 },
+    FCmp { cc: Cc, d: VReg, a: VReg, b: VReg, bits: u8 },
+    IntCast { d: VReg, s: VReg, from: Num, to: Num, loc: Loc },
+    IntToFloat { d: VReg, s: VReg, signed: bool, bits: u8 },
+    FloatToInt { d: VReg, s: VReg, bits: u8, to: Num, loc: Loc },
+    FloatCast { d: VReg, s: VReg, to_bits: u8 },
     Call { d: Option<VReg>, f: FuncId, args: Vec<VReg> },
-    PrintInt { s: VReg },
-    PrintBool { s: VReg },
-    PrintStr { text: String },
+    ObjAddr { d: VReg, obj: ObjId },
+    AddImm { d: VReg, s: VReg, imm: u64 },
+    Load { d: VReg, p: VReg, off: u64, mem: Mem },
+    Store { p: VReg, off: u64, s: VReg, mem: Mem },
+    MemCopy { dst: VReg, src: VReg, size: u64 },
+    IndexAddr { d: VReg, base: VReg, idx: VReg, size: u64 },
+    Bounds { idx: VReg, len: u64, loc: Loc },
+    BufStr { text: String },
+    BufInt { s: VReg, signed: bool },
+    BufBool { s: VReg },
+    BufFloat { s: VReg, bits: u8 },
+    Flush { fd: u32 },
+    Exit { code: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +117,8 @@ pub struct Func {
     pub name: String,
     pub nparams: usize,
     pub nvregs: u32,
+    /// Stack objects: (size, alignment).
+    pub objects: Vec<(u64, u64)>,
     pub blocks: Vec<Block>,
 }
 
@@ -84,7 +131,7 @@ pub struct Module {
 pub fn dump(m: &Module) -> String {
     let mut out = String::new();
     for f in &m.funcs {
-        out.push_str(&format!("fn {} params={} vregs={}\n", f.name, f.nparams, f.nvregs));
+        out.push_str(&format!("fn {} params={} vregs={} objects={:?}\n", f.name, f.nparams, f.nvregs, f.objects));
         for (i, b) in f.blocks.iter().enumerate() {
             out.push_str(&format!("  b{i}:\n"));
             for inst in &b.insts {

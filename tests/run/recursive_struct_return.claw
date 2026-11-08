@@ -1,0 +1,12 @@
+// expect: P{832040, 1346269}
+type P { a int, b int }
+
+fn step(n int) P {
+    if n == 0 { ret P{0, 1} }
+    p := step(n - 1)
+    ret P{p.b, p.a + p.b}
+}
+
+fn main() {
+    print(step(30))
+}

@@ -1,0 +1,13 @@
+// expect: [[0, 3, 0], [0, 0, 7]]
+// expect: 10
+// expect: 2
+// expect: 3
+fn main() {
+    mut m [2][3]int = [[0...]...]
+    m[1][2] = 7
+    m[0][1] = 3
+    print(m)
+    print(m[1][2] + m[0][1])
+    print(len(m))
+    print(len(m[0]))
+}

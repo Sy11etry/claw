@@ -1,0 +1,5 @@
+// exit: 101
+// stderr: trap: value does not fit the target type at trap_float_neg_u8.claw:4:11
+fn main() {
+    print(u8(-1.0))
+}

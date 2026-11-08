@@ -1,0 +1,8 @@
+// error: E0104
+fn f(a [2]int) int {
+    ret a[0]
+}
+
+fn main() {
+    print(f([1, 2, 3]))
+}

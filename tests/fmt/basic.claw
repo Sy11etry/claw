@@ -1,0 +1,33 @@
+type   Point{x int,y int}
+type Shape=Circle{r f64}|Rect{w f64,h f64}
+
+  fn add( a Point,b Point )Point{
+ret Point{a.x+b.x,a.y+b.y}   // keep me
+}
+
+
+// a comment
+fn f(a [3]int, b ?int) int ! E +mem
+need a[0]>0
+sure ret>=-1
+{
+ x:=-a[0]*2
+ mut y [2]int=[0...]
+ for v,i in a {y[0]+=v+i}
+ if x<1 and not (x==2){
+ ret b? +1
+ }else{
+ print("a  {x}  // not a comment")
+ }
+ match s{
+ Circle{r}:ret r
+ _:{
+ ret 1 +
+ 2
+ }
+ }
+ z := foo(
+ 1,
+ 2,
+ )
+}

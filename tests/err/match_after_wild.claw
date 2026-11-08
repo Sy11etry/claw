@@ -1,0 +1,7 @@
+// error: E0113
+fn main() {
+    match 1 {
+        _: print(1)
+        1: print(2)
+    }
+}

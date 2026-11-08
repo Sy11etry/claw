@@ -1,0 +1,6 @@
+// error: E0104
+type P { x int }
+
+fn main() {
+    print(P{1} == P{1})
+}

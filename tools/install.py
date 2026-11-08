@@ -13,6 +13,7 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BUILD = ROOT / "compiler/target/release/claw"
 HOME = pathlib.Path.home() / ".claw"
+SHARED_BIN = pathlib.Path("/opt/homebrew/bin")
 PATH_LINE = 'export PATH="$HOME/.claw/bin:$PATH"  # claw'
 
 
@@ -38,12 +39,27 @@ def main():
         tmp_link.symlink_to(target)
         os.replace(tmp_link, link)
 
-    zshrc = pathlib.Path.home() / ".zshrc"
-    existing = zshrc.read_text() if zshrc.exists() else ""
-    if ".claw/bin" not in existing:
-        with zshrc.open("a") as f:
-            f.write(f"\n{PATH_LINE}\n")
-        print(f"added ~/.claw/bin to PATH in {zshrc}")
+    # .zshrc covers interactive shells, .zshenv every zsh, Homebrew's bin
+    # everything that already has it on PATH (including other shells).
+    for rc in (".zshrc", ".zshenv"):
+        path = pathlib.Path.home() / rc
+        existing = path.read_text() if path.exists() else ""
+        if ".claw/bin" not in existing:
+            with path.open("a") as f:
+                f.write(f"\n{PATH_LINE}\n")
+            print(f"added ~/.claw/bin to PATH in {path}")
+
+    if SHARED_BIN.is_dir():
+        for name in (f"claw-{short}", "claw"):
+            link = SHARED_BIN / name
+            if link.exists() and not link.is_symlink():
+                print(f"left {link} alone: it is not ours")
+                continue
+            tmp_link = SHARED_BIN / (name + ".tmp")
+            if tmp_link.is_symlink():
+                tmp_link.unlink()
+            tmp_link.symlink_to(bin_dir / name)
+            os.replace(tmp_link, link)
 
     installed = sorted(p.name for p in (HOME / "versions").iterdir())
     print(f"installed claw {full} as claw-{short}; versions on disk: {', '.join(installed)}")

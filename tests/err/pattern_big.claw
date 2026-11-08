@@ -1,0 +1,11 @@
+// error: E0115
+fn f(x u8) int {
+    match x {
+        300: ret 1
+        _: ret 2
+    }
+}
+
+fn main() {
+    print(f(1))
+}

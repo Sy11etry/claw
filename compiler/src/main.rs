@@ -5,12 +5,14 @@ mod ast;
 mod cir;
 mod codegen;
 mod diag;
+mod fmt;
 mod lexer;
 mod lower;
 mod macho;
 mod parser;
 mod sema;
 mod sha256;
+mod types;
 
 use diag::Diag;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "claw run <file.claw>            compile with all checks and run
 claw build <file.claw> [-o out] compile to an executable
 claw check <file.claw>          report errors only
+claw fmt <file.claw> [--check]  put a file into the one standard format
 claw --version
 flags: --json (errors as JSON), --emit-cir (print the IR)
 ";
@@ -30,15 +33,17 @@ struct Options {
     out: Option<String>,
     json: bool,
     emit_cir: bool,
+    check_only: bool,
 }
 
 fn parse_options(args: &[String]) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => o.json = true,
             "--emit-cir" => o.emit_cir = true,
+            "--check" => o.check_only = true,
             "-o" => {
                 i += 1;
                 match args.get(i) {
@@ -92,11 +97,43 @@ fn compile_to_cir(o: &Options) -> cir::Module {
     if !diags.is_empty() {
         report(o, diags);
     }
-    sema::check(&program, &mut diags);
+    let checked = sema::check(&program, &mut diags);
     if !diags.is_empty() {
         report(o, diags);
     }
-    lower::lower(&program)
+    let contracts: usize = program.funcs.iter().map(|f| f.contracts.len()).sum();
+    let effects: usize = program.funcs.iter().map(|f| f.effects.len()).sum();
+    if contracts + effects > 0 {
+        eprintln!("claw: note: {contracts} contracts and {effects} effects were parsed but NOT checked; checking arrives in 0.5");
+    }
+    let base = Path::new(&o.file).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    lower::lower(&program, &checked, &base)
+}
+
+fn format_file(o: &Options) -> ! {
+    let src = match std::fs::read_to_string(&o.file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("claw: cannot read {}: {e}", o.file);
+            exit(2);
+        }
+    };
+    let out = match fmt::format(&src) {
+        Ok(s) => s,
+        Err(diags) => report(o, diags),
+    };
+    if out == src {
+        exit(0);
+    }
+    if o.check_only {
+        eprintln!("{}: not formatted; run `claw fmt`", o.file);
+        exit(1);
+    }
+    if let Err(e) = std::fs::write(&o.file, out) {
+        eprintln!("claw: cannot write {}: {e}", o.file);
+        exit(2);
+    }
+    exit(0);
 }
 
 fn compile(o: &Options, out: &Path) {
@@ -179,6 +216,7 @@ fn real_main() {
             let out = o.out.as_ref().map(PathBuf::from).unwrap_or_else(|| default_out(&o.file));
             compile(&o, &out);
         }
+        Some("fmt") => format_file(&parse_options(&args[1..])),
         Some("check") => {
             let o = parse_options(&args[1..]);
             compile_to_cir(&o);

@@ -6,6 +6,8 @@ use crate::diag::{Diag, Span};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tok {
     Int(i128),
+    Float(f64),
+    Char(u8),
     Str(String),
     Ident(String),
     Kw(&'static str),
@@ -27,7 +29,7 @@ pub const KEYWORDS: &[&str] = &[
 ];
 
 const OPS: &[&str] = &[
-    "<<=", ">>=", ":=", "==", "!=", "<=", ">=", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=",
+    "<<=", ">>=", "...", ":=", "==", "!=", "<=", ">=", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=",
     "|=", "^=", "..", "+", "-", "*", "/", "%", "&", "|", "^", "~", "<", ">", "=", "(", ")", "{",
     "}", "[", "]", ",", ".", ":", "!", "?",
 ];
@@ -35,7 +37,7 @@ const OPS: &[&str] = &[
 fn continues_line(t: &Tok) -> bool {
     match t {
         Tok::Kw(k) => matches!(*k, "and" | "or" | "not"),
-        Tok::Op(o) => !matches!(*o, ")" | "]" | "}" | "?" | "!" | "."),
+        Tok::Op(o) => !matches!(*o, ")" | "]" | "}" | "?" | "!" | "." | "..."),
         _ => false,
     }
 }
@@ -102,6 +104,7 @@ pub fn lex(src: &str, diags: &mut Vec<Diag>) -> Vec<Token> {
             }
             b'0'..=b'9' => out.push(lex_number(&mut l, diags)),
             b'"' => out.push(lex_string(&mut l, diags)),
+            b'\'' => out.push(lex_char(&mut l, diags)),
             c if c == b'_' || c.is_ascii_alphabetic() => {
                 while l.peek(0) == b'_' || l.peek(0).is_ascii_alphanumeric() {
                     l.bump();
@@ -184,14 +187,31 @@ fn lex_number(l: &mut Lexer, diags: &mut Vec<Diag>) -> Token {
             None => overflow = true,
         }
     }
-    if radix == 10 && l.peek(0) == b'.' && l.peek(1).is_ascii_digit() {
-        l.bump();
-        while l.peek(0).is_ascii_digit() {
-            l.bump();
+    if radix == 10 {
+        let frac = l.peek(0) == b'.' && l.peek(1).is_ascii_digit();
+        let next_after_e = if matches!(l.peek(1), b'+' | b'-') { l.peek(2) } else { l.peek(1) };
+        let exp_now = matches!(l.peek(0), b'e' | b'E') && next_after_e.is_ascii_digit();
+        if frac || exp_now {
+            if frac {
+                l.bump();
+                while l.peek(0).is_ascii_digit() || l.peek(0) == b'_' {
+                    l.bump();
+                }
+            }
+            let next_after_e = if matches!(l.peek(1), b'+' | b'-') { l.peek(2) } else { l.peek(1) };
+            if matches!(l.peek(0), b'e' | b'E') && next_after_e.is_ascii_digit() {
+                l.bump();
+                if matches!(l.peek(0), b'+' | b'-') {
+                    l.bump();
+                }
+                while l.peek(0).is_ascii_digit() {
+                    l.bump();
+                }
+            }
+            let span = l.span_from(start, line, col);
+            let text: String = std::str::from_utf8(&l.src[start..l.pos]).unwrap_or("0").chars().filter(|c| *c != '_').collect();
+            return Token { tok: Tok::Float(text.parse().unwrap_or(0.0)), span };
         }
-        let span = l.span_from(start, line, col);
-        diags.push(Diag::new("E0900", span, "float literals are not available in claw 0.1"));
-        return Token { tok: Tok::Int(0), span };
     }
     let span = l.span_from(start, line, col);
     if digits == 0 {
@@ -238,4 +258,38 @@ fn lex_string(l: &mut Lexer, diags: &mut Vec<Diag>) -> Token {
     }
     let text = String::from_utf8_lossy(&bytes).into_owned();
     Token { tok: Tok::Str(text), span: l.span_from(start, line, col) }
+}
+
+fn lex_char(l: &mut Lexer, diags: &mut Vec<Diag>) -> Token {
+    let (start, line, col) = (l.pos, l.line, l.col);
+    l.bump();
+    let c = l.bump();
+    let value = if c == b'\\' {
+        match l.bump() {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'0' => 0,
+            b'\\' => b'\\',
+            b'\'' => b'\'',
+            _ => {
+                let span = l.span_from(start, line, col);
+                diags.push(Diag::new("E0004", span, "unknown escape; use \\n \\t \\r \\0 \\\\ \\'"));
+                0
+            }
+        }
+    } else {
+        c
+    };
+    if l.peek(0) != b'\'' || c >= 0x80 {
+        let span = l.span_from(start, line, col);
+        diags.push(Diag::new("E0005", span, "a character literal holds exactly one ASCII character; close it with `'`"));
+        while l.pos < l.src.len() && l.peek(0) != b'\'' && l.peek(0) != b'\n' {
+            l.bump();
+        }
+    }
+    if l.peek(0) == b'\'' {
+        l.bump();
+    }
+    Token { tok: Tok::Char(value), span: l.span_from(start, line, col) }
 }

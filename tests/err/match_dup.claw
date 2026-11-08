@@ -1,0 +1,11 @@
+// error: E0121
+type T = A | B
+
+fn main() {
+    t := A
+    match t {
+        A: print(1)
+        A: print(2)
+        B: print(3)
+    }
+}

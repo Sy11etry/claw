@@ -1,0 +1,5 @@
+// error: E0900
+fn main() {
+    x := "{1}"
+    print(x)
+}

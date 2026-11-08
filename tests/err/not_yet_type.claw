@@ -1,6 +1,6 @@
 // error: E0900
-fn f(a i32) {
-    print(a)
+fn f(a []int) {
+    print(1)
 }
 
 fn main() {

@@ -1,0 +1,13 @@
+// expect: 65
+// expect: 66
+// expect: 10
+// expect: 0
+// expect: true
+fn main() {
+    c := 'A'
+    print(c)
+    print(c + 1)
+    print('\n')
+    print(int(c - 'A'))
+    print('z' > 'a')
+}

@@ -1,0 +1,22 @@
+// expect: P{1, [10, 20, 30]}
+// expect: P{2, [10, 99, 30]}
+// expect: 21
+// expect: 2
+type P { x int, a [3]int }
+
+fn read(p P) int {
+    ret p.x + p.a[1]
+}
+
+fn main() {
+    mut a := P{1, [10, 20, 30]}
+    mut b := a
+    b.x = 2
+    b.a[1] = 99
+    print(a)
+    print(b)
+    print(read(a))
+    a = b
+    b.x = 7
+    print(a.x)
+}

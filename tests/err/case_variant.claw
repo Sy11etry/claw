@@ -1,0 +1,5 @@
+// error: E0128
+type T = a | B
+
+fn main() {
+}

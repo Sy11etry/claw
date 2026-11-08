@@ -1,0 +1,6 @@
+// error: E0132
+fn f() +net {
+}
+
+fn main() {
+}

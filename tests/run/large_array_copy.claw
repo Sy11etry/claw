@@ -1,0 +1,16 @@
+// expect: 42
+// expect: 21
+type Big { a [100]int, tag int }
+
+fn make(v int) Big {
+    mut b := Big{[0...], v}
+    b.a[99] = v * 2
+    ret b
+}
+
+fn main() {
+    x := make(21)
+    y := x
+    print(y.a[99])
+    print(y.tag)
+}

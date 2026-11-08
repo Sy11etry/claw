@@ -1,0 +1,11 @@
+// error: E0117
+fn f() ?int {
+    ret none
+}
+
+fn main() {
+    x := f() else {
+        print(1)
+    }
+    print(x)
+}

@@ -1,0 +1,10 @@
+// error: E0112
+// error: E0105
+type T = A
+
+fn f(a A) {
+    print(1)
+}
+
+fn main() {
+}

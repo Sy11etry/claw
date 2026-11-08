@@ -1,4 +1,5 @@
 // error: E0900
 fn main() {
-    print(1.5)
+    a []int = []
+    print(len(a))
 }

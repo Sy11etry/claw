@@ -1,7 +1,5 @@
 // error: E0900
-fn f(a int) int
-    need a > 0
-{
+fn f[T](a T) T {
     ret a
 }
 

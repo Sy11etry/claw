@@ -1,0 +1,38 @@
+// expect: 127
+// expect: -5
+// expect: 44
+// expect: 255
+// expect: 4294967295
+// expect: 18446744073709551615
+// expect: 200
+// expect: 1
+// expect: 3
+// expect: 3
+// expect: -3
+// expect: 200
+// expect: 1.5
+// expect: 0.25
+// expect: 1.84467440737096e+19
+// expect: 7
+fn id(x int) int {
+    ret x
+}
+
+fn main() {
+    print(i8(id(127)))
+    print(i32(id(-5)))
+    print(u8(id(300)))
+    print(u8(id(-1)))
+    print(u32(id(-1)))
+    print(u64(id(-1)))
+    print(int(u8(id(200))))
+    print(int(true))
+    print(f64(id(3)))
+    print(int(3.9))
+    print(int(-3.9))
+    print(u8(200.5))
+    print(f32(1.5))
+    print(f64(f32(0.25)))
+    print(f64(u64(18446744073709551615)))
+    print(int(u32(7)))
+}

@@ -1,0 +1,15 @@
+// expect: P{2, 1}
+// expect: P{1, 2}
+type P { x int, y int }
+
+fn swap(p P) P {
+    ret P{p.y, p.x}
+}
+
+fn main() {
+    mut p := P{1, 2}
+    p = swap(p)
+    print(p)
+    p = P{p.y, p.x}
+    print(p)
+}

@@ -101,7 +101,7 @@ fn linkedit_cmd(w: &mut W, cmd: u32, off: u64, size: u64) {
 
 /// Chained fixups: every GOT slot binds to a libSystem symbol.
 fn chained_fixups(imports: &[String], got_seg_offset: u64) -> Vec<u8> {
-    const SEG_COUNT: u32 = 4;
+    const SEG_COUNT: u32 = 5;
     const GOT_SEG_INDEX: usize = 2;
     let starts_offset = 32u32;
     let image_size = 4 + 4 * SEG_COUNT;
@@ -220,10 +220,10 @@ fn sign(file: &[u8], ident: &str, text_filesize: u64) -> Vec<u8> {
 }
 
 pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
-    let sizeofcmds: u64 = 72 + (72 + 160) + (72 + 80) + 72 // segments
+    let sizeofcmds: u64 = 72 + (72 + 160) + (72 + 80) + (72 + 80) + 72 // segments
         + 16 + 16 + 24 + 80 // fixups, trie, symtab, dysymtab
         + 32 + 24 + 24 + 24 + 56 + 16; // dylinker, uuid, build, main, dylib, signature
-    const NCMDS: u32 = 14;
+    const NCMDS: u32 = 15;
 
     let text_off = align(32 + sizeofcmds, 16);
     let code_size = obj.code.len() as u64 * 4;
@@ -236,6 +236,9 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     let got_size = obj.imports.len() as u64 * 8;
     let data_size = PAGE;
     let linkedit_off = got_off + data_size;
+    // Zero-filled writable memory: takes address space, not file space.
+    let bss_addr = got_addr + data_size;
+    let bss_vmsize = align(obj.bss_size.max(1), PAGE);
 
     let fixups = chained_fixups(&obj.imports, got_off);
     let trie = exports_trie();
@@ -271,6 +274,11 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
         code[*at] = page_patch(code[*at], pc, target);
         code[*at + 1] |= ((target & 0xFFF) as u32) << 10;
     }
+    for at in &obj.bss_refs {
+        let pc = code_addr + *at as u64 * 4;
+        code[*at] = page_patch(code[*at], pc, bss_addr);
+        code[*at + 1] |= ((bss_addr & 0xFFF) as u32) << 10;
+    }
     for (at, slot) in &obj.got_refs {
         let target = got_addr + *slot as u64 * 8;
         let pc = code_addr + *at as u64 * 4;
@@ -294,9 +302,11 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     section(&mut w, "__const", "__TEXT", rodata_addr, obj.rodata.len() as u64, rodata_off as u32, 3, 0);
     segment(&mut w, &Seg { name: "__DATA_CONST", vmaddr: got_addr, vmsize: data_size, fileoff: got_off, filesize: data_size, maxprot: 3, initprot: 3, flags: 0x10, nsects: 1 });
     section(&mut w, "__got", "__DATA_CONST", got_addr, got_size, got_off as u32, 3, 0);
+    segment(&mut w, &Seg { name: "__DATA", vmaddr: bss_addr, vmsize: bss_vmsize, fileoff: linkedit_off, filesize: 0, maxprot: 3, initprot: 3, flags: 0, nsects: 1 });
+    section(&mut w, "__bss", "__DATA", bss_addr, obj.bss_size, 0, 3, 1);
     segment(&mut w, &Seg {
         name: "__LINKEDIT",
-        vmaddr: got_addr + data_size,
+        vmaddr: bss_addr + bss_vmsize,
         vmsize: align(linkedit_filesize, PAGE),
         fileoff: linkedit_off,
         filesize: linkedit_filesize,

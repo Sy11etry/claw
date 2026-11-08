@@ -1,0 +1,11 @@
+// error: E0138
+fn f() ?int {
+    ret 1
+}
+
+fn main() {
+    x := f() else e {
+        ret
+    }
+    print(x)
+}

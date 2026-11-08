@@ -1,0 +1,17 @@
+// expect: 168
+const size = 1000
+
+fn main() {
+    mut composite [size]bool = [false...]
+    mut count := 0
+    for i in 2..size {
+        if composite[i] { continue }
+        count += 1
+        mut j := i * i
+        for j < size {
+            composite[j] = true
+            j += i
+        }
+    }
+    print(count)
+}

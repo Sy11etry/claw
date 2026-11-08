@@ -1,0 +1,23 @@
+// expect: false
+// expect: true
+// expect: false
+// expect: false
+// expect: false
+// expect: false
+// expect: inf
+// expect: -inf
+fn div(a f64, b f64) f64 {
+    ret a / b
+}
+
+fn main() {
+    nan := div(0, 0)
+    print(nan == nan)
+    print(nan != nan)
+    print(nan < 1.0)
+    print(nan > 1.0)
+    print(nan <= 1.0)
+    print(nan >= 1.0)
+    print(div(1, 0))
+    print(div(-1, 0))
+}

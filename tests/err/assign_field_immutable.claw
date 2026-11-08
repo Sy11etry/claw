@@ -1,0 +1,8 @@
+// error: E0103
+type P { x int }
+
+fn main() {
+    p := P{1}
+    p.x = 2
+    print(p)
+}

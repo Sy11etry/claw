@@ -1,0 +1,10 @@
+// error: E0124
+type E = X
+
+fn f() int {
+    fail X
+}
+
+fn main() {
+    print(f())
+}

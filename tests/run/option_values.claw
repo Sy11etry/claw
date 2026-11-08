@@ -1,0 +1,22 @@
+// expect: 5
+// expect: none
+// expect: P{1}
+// expect: 3
+// expect: none
+// expect: P{1}
+type P { x int }
+
+fn main() {
+    a ?int = 5
+    b ?int = none
+    c ?P = P{1}
+    print(a)
+    print(b)
+    print(c)
+    mut d ?int = none
+    d = 3
+    print(d)
+    d = none
+    print(d)
+    print(c? )
+}

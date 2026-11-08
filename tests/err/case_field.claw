@@ -1,0 +1,5 @@
+// error: E0128
+type P { X int }
+
+fn main() {
+}

@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: trap: integer overflow at trap_i16_mul.claw:8:11
+fn v(n i16) i16 {
+    ret n
+}
+
+fn main() {
+    print(v(300) * v(300))
+}
