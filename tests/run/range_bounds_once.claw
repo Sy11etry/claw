@@ -1,0 +1,12 @@
+// expect: once
+// expect: 3
+fn limit() int {
+    print("once")
+    ret 3
+}
+
+fn main() {
+    mut total := 0
+    for i in 0..limit() { total += i }
+    print(total)
+}

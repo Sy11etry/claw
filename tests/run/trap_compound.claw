@@ -1,0 +1,7 @@
+// exit: 101
+// stderr: trap: integer overflow at trap_compound.claw:5:5
+fn main() {
+    mut x := 9223372036854775807
+    x += 1
+    print(x)
+}

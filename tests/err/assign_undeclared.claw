@@ -1,0 +1,4 @@
+// error: E0101
+fn main() {
+    y = 1
+}

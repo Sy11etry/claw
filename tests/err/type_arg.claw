@@ -1,0 +1,8 @@
+// error: E0104
+fn f(a int) int {
+    ret a
+}
+
+fn main() {
+    print(f(true))
+}

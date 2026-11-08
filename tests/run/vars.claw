@@ -1,0 +1,25 @@
+// expect: 4
+// expect: true
+// expect: 22
+fn main() {
+    x := 5
+    y int = 7
+    mut z := x + y
+    z = z * 2
+    z += 1
+    z -= 2
+    z *= 3
+    z /= 2
+    z %= 10
+    print(z)
+    mut b bool = false
+    b = not b
+    print(b)
+    mut m := 6
+    m &= 3
+    m |= 8
+    m ^= 1
+    m <<= 2
+    m >>= 1
+    print(m)
+}

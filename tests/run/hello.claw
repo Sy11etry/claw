@@ -1,0 +1,4 @@
+// expect: Hello, Claw!
+fn main() {
+    print("Hello, Claw!")
+}

@@ -1,0 +1,24 @@
+// expect: 1
+// expect: false
+// expect: 3
+// expect: true
+// expect: 5
+// expect: 6
+// expect: ok
+fn yes(n int) bool {
+    print(n)
+    ret true
+}
+
+fn no(n int) bool {
+    print(n)
+    ret false
+}
+
+fn main() {
+    a := no(1) and yes(2)
+    print(a)
+    b := yes(3) or no(4)
+    print(b)
+    if not no(5) and yes(6) { print("ok") }
+}

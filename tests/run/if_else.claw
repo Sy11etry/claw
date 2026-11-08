@@ -1,0 +1,24 @@
+// expect: 5
+// expect: 4
+// expect: 3
+// expect: 2
+// expect: two
+fn grade(n int) int {
+    if n > 90 {
+        ret 5
+    } else if n > 70 {
+        ret 4
+    } else if n > 50 {
+        ret 3
+    } else {
+        ret 2
+    }
+}
+
+fn main() {
+    print(grade(95))
+    print(grade(75))
+    print(grade(55))
+    print(grade(5))
+    if grade(1) == 2 { print("two") }
+}

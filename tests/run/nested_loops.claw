@@ -1,0 +1,11 @@
+// expect: 10
+fn main() {
+    mut c := 0
+    for i in 0..4 {
+        for j in 0..4 {
+            if j > i { break }
+            c += 1
+        }
+    }
+    print(c)
+}

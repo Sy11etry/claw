@@ -1,0 +1,21 @@
+// expect: 1
+// expect: 2
+// expect: 3
+// expect: 7
+// expect: 4
+// expect: 5
+// expect: 6
+// expect: -7
+fn show(n int) int {
+    print(n)
+    ret n
+}
+
+fn sub3(a int, b int, c int) int {
+    ret a - b - c
+}
+
+fn main() {
+    print(show(1) + show(2) * show(3))
+    print(sub3(show(4), show(5), show(6)))
+}

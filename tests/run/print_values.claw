@@ -1,0 +1,20 @@
+// expect: 0
+// expect: 7
+// expect: -42
+// expect: 9223372036854775807
+// expect: -9223372036854775808
+// expect: true
+// expect: false
+// expect: tab	here
+// expect: 
+fn main() {
+    print(0)
+    print(7)
+    print(-42)
+    print(9223372036854775807)
+    print(-9223372036854775808)
+    print(true)
+    print(false)
+    print("tab\there")
+    print("")
+}

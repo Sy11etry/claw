@@ -1,0 +1,5 @@
+// error: E0105
+fn main() {
+    for i in 0..3 {
+    }
+}

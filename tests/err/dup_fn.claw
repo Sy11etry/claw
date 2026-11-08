@@ -1,0 +1,9 @@
+// error: E0110
+fn f() {
+}
+
+fn f() {
+}
+
+fn main() {
+}

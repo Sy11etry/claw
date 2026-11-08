@@ -1,0 +1,10 @@
+// error: E0107
+fn f() int {
+    for {
+        break
+    }
+}
+
+fn main() {
+    print(f())
+}

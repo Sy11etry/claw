@@ -1,0 +1,24 @@
+// expect: 3
+// expect: 3
+// expect: true
+fn add(
+    a int,
+    b int,
+) int {
+    ret a +
+        b
+}
+
+fn main() {
+    x := add(
+        1,
+        2,
+    )
+    print(x)
+    y := (1
+        + 2)
+    print(y)
+    ok := x == 3 and
+        y == 3
+    print(ok)
+}

@@ -1,0 +1,4 @@
+// error: E0201
+fn main() {
+    for := 1
+}

@@ -1,0 +1,24 @@
+// expect: 14
+// expect: 20
+// expect: 3
+// expect: -3
+// expect: 1
+// expect: -1
+// expect: 5
+// expect: -7
+// expect: 1000000
+// expect: 255
+// expect: 5
+fn main() {
+    print(2 + 3 * 4)
+    print((2 + 3) * 4)
+    print(7 / 2)
+    print(-7 / 2)
+    print(7 % 3)
+    print(-7 % 3)
+    print(10 - 2 - 3)
+    print(-(3 + 4))
+    print(1_000_000)
+    print(0xff)
+    print(0b101)
+}

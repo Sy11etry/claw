@@ -1,0 +1,14 @@
+[package]
+name = "claw"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "claw"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = false

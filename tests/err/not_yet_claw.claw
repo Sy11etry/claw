@@ -1,0 +1,6 @@
+// error: E0900
+claw fn f() {
+}
+
+fn main() {
+}

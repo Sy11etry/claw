@@ -1,0 +1,9 @@
+// error: E0103
+fn f(a int) int {
+    a = 2
+    ret a
+}
+
+fn main() {
+    print(f(1))
+}

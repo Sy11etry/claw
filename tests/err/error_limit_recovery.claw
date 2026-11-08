@@ -1,0 +1,7 @@
+// error: E0201
+fn a( {
+}
+
+fn main() {
+    print(y)
+}

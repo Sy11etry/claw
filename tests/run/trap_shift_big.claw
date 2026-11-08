@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: trap: shift out of range at trap_shift_big.claw:8:11
+fn v(n int) int {
+    ret n
+}
+
+fn main() {
+    print(v(1) << v(64))
+}

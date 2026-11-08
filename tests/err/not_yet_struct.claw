@@ -1,0 +1,5 @@
+// error: E0900
+type P { x int }
+
+fn main() {
+}

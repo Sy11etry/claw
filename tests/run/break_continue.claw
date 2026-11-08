@@ -1,0 +1,19 @@
+// expect: 9
+// expect: 13
+fn main() {
+    mut s := 0
+    for i in 0..10 {
+        if i == 7 { break }
+        if i % 2 == 0 { continue }
+        s += i
+    }
+    print(s)
+    mut j := 0
+    mut t := 0
+    for j < 5 {
+        j += 1
+        if j == 2 { continue }
+        t += j
+    }
+    print(t)
+}

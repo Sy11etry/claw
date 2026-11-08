@@ -1,0 +1,5 @@
+// error: E0116
+fn main() {
+    mut x := 1
+    print(x)
+}

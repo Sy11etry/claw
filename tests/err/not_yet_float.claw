@@ -1,0 +1,4 @@
+// error: E0900
+fn main() {
+    print(1.5)
+}

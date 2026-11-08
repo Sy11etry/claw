@@ -1,0 +1,15 @@
+// expect: pos
+// expect: other
+fn maybe(n int) {
+    if n > 0 {
+        print("pos")
+        ret
+    }
+    print("other")
+}
+
+fn main() {
+    maybe(1)
+    maybe(0)
+    ret
+}

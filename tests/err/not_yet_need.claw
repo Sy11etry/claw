@@ -1,0 +1,9 @@
+// error: E0900
+fn f(a int) int
+    need a > 0
+{
+    ret a
+}
+
+fn main() {
+}

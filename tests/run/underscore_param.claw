@@ -1,0 +1,9 @@
+// expect: 3
+fn first(a int, _ int) int {
+    ret a
+}
+
+fn main() {
+    print(first(3, 4))
+    _ = first(1, 2)
+}

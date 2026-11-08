@@ -1,0 +1,7 @@
+// error: E0900
+fn f(a i32) {
+    print(a)
+}
+
+fn main() {
+}

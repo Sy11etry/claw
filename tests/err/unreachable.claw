@@ -1,0 +1,5 @@
+// error: E0113
+fn main() {
+    ret
+    print(1)
+}

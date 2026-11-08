@@ -1,0 +1,29 @@
+// expect: 75025
+// expect: 9
+// expect: true
+fn fib(n int) int {
+    if n < 2 { ret n }
+    ret fib(n - 1) + fib(n - 2)
+}
+
+fn ack(m int, n int) int {
+    if m == 0 { ret n + 1 }
+    if n == 0 { ret ack(m - 1, 1) }
+    ret ack(m - 1, ack(m, n - 1))
+}
+
+fn even(n int) bool {
+    if n == 0 { ret true }
+    ret odd(n - 1)
+}
+
+fn odd(n int) bool {
+    if n == 0 { ret false }
+    ret even(n - 1)
+}
+
+fn main() {
+    print(fib(25))
+    print(ack(2, 3))
+    print(even(10))
+}

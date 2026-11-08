@@ -1,0 +1,16 @@
+// expect: 0
+// expect: -9223372036854775808
+// expect: 0
+// expect: -6
+// expect: -1
+fn m() int {
+    ret -9223372036854775808
+}
+
+fn main() {
+    print(m() % -1)
+    print(m() / 1)
+    print(0 / -1)
+    print(6 / -1)
+    print(m() + 9223372036854775807)
+}

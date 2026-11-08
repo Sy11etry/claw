@@ -1,0 +1,11 @@
+// expect: 5
+// expect: -5
+// expect: 5
+fn main() {
+    a := 5
+    print(a)
+    print(-a)
+    mut b := 1
+    b = a
+    print(b)
+}
