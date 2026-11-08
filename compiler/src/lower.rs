@@ -3,8 +3,9 @@
 use crate::ast::{self, BinOp, Coerce, Else, ElseKind, Expr, ExprKind, Part, Pat, Res, Stmt, StmtKind, UnOp};
 use crate::cir::*;
 use crate::diag::Span;
+use crate::effects::{has_call, short_name};
 use crate::modules::Unit;
-use crate::sema::{Checked, ConstVal};
+use crate::sema::{walk, Checked, ConstVal};
 use crate::types::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -42,11 +43,45 @@ impl Synth {
     }
 }
 
+/// What a build is for.
+#[derive(Clone, Copy)]
+pub struct Opts {
+    /// Every contract, and the memory checker.
+    pub check: bool,
+    /// Build the `test` blocks of the root file.
+    pub test: bool,
+}
+
+/// What every function being lowered shares.
+struct Env<'a, 'i> {
+    c: &'a Checked,
+    files: &'a [String],
+    ids: &'i HashMap<String, FuncId>,
+    funcs: &'i HashMap<String, &'a ast::Func>,
+    synth: &'i RefCell<Synth>,
+    check: bool,
+}
+
+/// Word 0 of the runtime's state: set while a contract with calls is running.
+const GUARD: u64 = 0;
+
 struct FnLower<'a, 'i> {
     c: &'a Checked,
     files: &'a [String],
     ids: &'i HashMap<String, FuncId>,
+    funcs: &'i HashMap<String, &'a ast::Func>,
     synth: &'i RefCell<Synth>,
+    /// Every contract runs, not only the cheap ones.
+    check: bool,
+    /// Raw memory goes through the checker.
+    instrument: bool,
+    is_claw: bool,
+    in_contract: bool,
+    ret_val: Option<VReg>,
+    /// `old(e)` values saved on entry.
+    olds: HashMap<*const Expr, VReg>,
+    sures: Vec<&'a ast::Contract>,
+    cur_name: String,
     vars: HashMap<String, VReg>,
     /// Is this local still holding its value? Only for values that need dropping.
     flags: HashMap<String, VReg>,
@@ -75,10 +110,11 @@ fn loc(s: Span) -> Loc {
     Loc { line: s.line, col: s.col, file: s.file }
 }
 
-pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String]) -> Module {
+pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: Opts) -> Module {
     let mut list: Vec<(String, &'a ast::Func)> = Vec::new();
-    for u in units {
-        for f in u.program.funcs.iter().filter(|f| f.tparams.is_empty()) {
+    let root = units.len() - 1;
+    for (i, u) in units.iter().enumerate() {
+        for f in u.program.funcs.iter().filter(|f| f.tparams.is_empty() && (f.test.is_none() || (opts.test && i == root))) {
             list.push((format!("{}{}", u.prefix, f.name), f));
         }
     }
@@ -87,24 +123,37 @@ pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String]) -> Modu
     }
     let ids: HashMap<String, FuncId> = list.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
     let synth = RefCell::new(Synth { base: list.len(), jobs: Vec::new(), known: HashMap::new() });
-    let mut funcs: Vec<Func> = list.iter().map(|(n, f)| lower_func(n, f, c, &ids, &synth, files)).collect();
+    let by_name: HashMap<String, &'a ast::Func> = list.iter().map(|(n, f)| (n.clone(), *f)).collect();
+    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check };
+    let mut funcs: Vec<Func> = list.iter().map(|(n, f)| lower_func(n, f, &env)).collect();
     // Each generated function may ask for more, so the queue can grow as it runs.
     let mut next = 0;
     loop {
         let job = synth.borrow().jobs.get(next).copied();
         let Some((kind, ty)) = job else { break };
-        funcs.push(build_synth(kind, ty, c, &ids, &synth, files));
+        funcs.push(build_synth(kind, ty, &env));
         next += 1;
     }
-    Module { funcs, main: ids["main"] }
+    let check = opts.check.then(|| CheckRt { alloc: ids["__check.on_alloc"], free: ids["__check.on_free"], finish: ids["__check.finish"] });
+    let tests = list.iter().filter_map(|(n, f)| f.test.clone().map(|t| (t, ids[n]))).collect();
+    Module { funcs, main: ids.get("main").copied().unwrap_or(0), check, tests }
 }
 
-fn new_lower<'a, 'i>(c: &'a Checked, ids: &'i HashMap<String, FuncId>, synth: &'i RefCell<Synth>, files: &'a [String], ret: Ty, is_main: bool) -> FnLower<'a, 'i> {
+fn new_lower<'a, 'i>(env: &Env<'a, 'i>, ret: Ty, is_main: bool) -> FnLower<'a, 'i> {
     let mut l = FnLower {
-        c,
-        files,
-        ids,
-        synth,
+        c: env.c,
+        files: env.files,
+        ids: env.ids,
+        funcs: env.funcs,
+        synth: env.synth,
+        check: env.check,
+        instrument: env.check,
+        is_claw: false,
+        in_contract: false,
+        ret_val: None,
+        olds: HashMap::new(),
+        sures: Vec::new(),
+        cur_name: String::new(),
         vars: HashMap::new(),
         flags: HashMap::new(),
         all_flags: Vec::new(),
@@ -123,9 +172,13 @@ fn new_lower<'a, 'i>(c: &'a Checked, ids: &'i HashMap<String, FuncId>, synth: &'
     l
 }
 
-fn lower_func<'a>(full: &str, f: &'a ast::Func, c: &'a Checked, ids: &HashMap<String, FuncId>, synth: &RefCell<Synth>, files: &'a [String]) -> Func {
+fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
+    let c = env.c;
     let sig = &c.sigs[full];
-    let mut l = new_lower(c, ids, synth, files, sig.ret, full == "main");
+    let mut l = new_lower(env, sig.ret, full == "main" || f.test.is_some());
+    l.instrument = env.check && !full.starts_with("__check.");
+    l.is_claw = f.claw;
+    l.cur_name = full.to_string();
     l.addressed = f.addressed.borrow().clone();
     if c.types.is_aggregate(sig.ret) {
         l.sret = Some(l.vreg());
@@ -144,8 +197,13 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, c: &'a Checked, ids: &HashMap<St
         }
     }
     let nparams = f.params.len() + l.sret.is_some() as usize;
+    l.sures = f.contracts.iter().filter(|x| x.sure && (env.check || !has_call(&x.e))).collect();
+    l.save_olds();
     l.block(&f.body);
     l.run_defers(0);
+    if sig.ret == VOID || matches!(c.types.kind(sig.ret), Kind::Result(VOID, _)) {
+        l.check_sures(None);
+    }
     l.defers.pop();
     if sig.ret == VOID {
         l.finish(Term::Ret(None));
@@ -157,8 +215,9 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, c: &'a Checked, ids: &HashMap<St
     l.into_func(full.to_string(), nparams)
 }
 
-fn build_synth(kind: JobKind, ty: Ty, c: &Checked, ids: &HashMap<String, FuncId>, synth: &RefCell<Synth>, files: &[String]) -> Func {
-    let mut l = new_lower(c, ids, synth, files, VOID, false);
+fn build_synth<'a>(kind: JobKind, ty: Ty, env: &Env<'a, '_>) -> Func {
+    let c = env.c;
+    let mut l = new_lower(env, VOID, false);
     let (name, nparams) = match kind {
         JobKind::Drop => {
             let v = l.vreg();
@@ -179,6 +238,299 @@ fn build_synth(kind: JobKind, ty: Ty, c: &Checked, ids: &HashMap<String, FuncId>
 impl<'a, 'i> FnLower<'a, 'i> {
     fn t(&self) -> &'a Types {
         &self.c.types
+    }
+
+    fn place_text(&self, s: Span) -> String {
+        format!("{}:{}:{}", self.files[s.file as usize], s.line, s.col)
+    }
+
+    /// Tells the checker where the next allocation or release comes from.
+    fn set_site(&mut self, s: Span) {
+        if self.instrument {
+            let text = self.place_text(s);
+            self.emit(Inst::SetSite { text });
+        }
+    }
+
+    /// In check mode: `size` bytes at `addr` must belong to the program.
+    fn guard_mem(&mut self, addr: VReg, size: u64, s: Span) {
+        if !self.instrument {
+            return;
+        }
+        let site = self.vreg();
+        let text = self.place_text(s);
+        self.emit(Inst::StrAddr { d: site, text });
+        let n = self.constant(size as i64);
+        self.emit(Inst::Call { d: None, f: self.ids["__check.access"], args: vec![addr, n, site] });
+    }
+
+    /// Does this assignment target or read land in memory only a `claw fn` can get wrong?
+    fn is_raw(&self, e: &Expr) -> bool {
+        through_pointer(e, self.t())
+            || (self.is_claw && matches!(&e.kind, ExprKind::Index { e: b, .. } if matches!(self.t().kind(b.ty.get()), Kind::Slice(_) | Kind::Str)))
+    }
+
+    fn guard_on(&mut self) -> (VReg, BlockId) {
+        let a = self.vreg();
+        self.emit(Inst::RtState { d: a });
+        let v = self.vreg();
+        self.emit(Inst::Load { d: v, p: a, off: GUARD, mem: Mem::X64 });
+        let (run, done) = (self.new_block(), self.new_block());
+        self.finish(Term::Br { c: v, t: done, f: run });
+        self.switch(run);
+        let one = self.constant(1);
+        self.emit(Inst::Store { p: a, off: GUARD, s: one, mem: Mem::X64 });
+        (a, done)
+    }
+
+    fn guard_off(&mut self, (a, done): (VReg, BlockId)) {
+        let zero = self.constant(0);
+        self.emit(Inst::Store { p: a, off: GUARD, s: zero, mem: Mem::X64 });
+        self.finish(Term::Jmp(done));
+        self.switch(done);
+    }
+
+    /// Records `old(...)` values before the body can change anything.
+    fn save_olds(&mut self) {
+        for c in self.sures.clone() {
+            let mut found: Vec<&'a Expr> = Vec::new();
+            walk(&c.e, &mut |x| {
+                if matches!(x.kind, ExprKind::Old(_)) {
+                    found.push(x);
+                }
+            });
+            for x in found {
+                let ExprKind::Old(inner) = &x.kind else { continue };
+                let slot = self.vreg();
+                self.all_flags.push(slot);
+                let guard = has_call(inner).then(|| self.guard_on());
+                self.defers.push(Vec::new());
+                let v = self.expr_value(inner);
+                self.emit(Inst::Mov { d: slot, s: v });
+                let depth = self.defers.len() - 1;
+                self.run_defers(depth);
+                self.defers.pop();
+                if let Some(g) = guard {
+                    self.guard_off(g);
+                }
+                self.olds.insert(x as *const Expr, slot);
+            }
+        }
+    }
+
+    /// `r` is the scalar result, if any; aggregates are already in the result slot.
+    fn check_sures(&mut self, r: Option<VReg>) {
+        if self.sures.is_empty() {
+            return;
+        }
+        let payload = match self.t().kind(self.ret) {
+            Kind::Option(p) => Some(p),
+            Kind::Result(ok, _) if ok != VOID => Some(ok),
+            _ => None,
+        };
+        let Some(p) = payload else {
+            self.ret_val = r.or(self.sret);
+            return self.run_sures();
+        };
+        // A `sure` speaks about a value that was returned, not about `none` or `fail`.
+        let sret = self.sret.expect("?T and T ! E return in memory");
+        let tag = self.load_tag(sret);
+        let want = self.success_tag(self.ret);
+        let (yes, join) = (self.new_block(), self.new_block());
+        self.eq_branch(tag, want, yes, join);
+        self.switch(yes);
+        self.ret_val = Some(self.load(sret, TAG_SIZE, p));
+        self.run_sures();
+        self.finish(Term::Jmp(join));
+        self.switch(join);
+    }
+
+    fn run_sures(&mut self) {
+        for c in self.sures.clone() {
+            let at = self.place_text(c.e.span);
+            let name = short_name(&self.cur_name).to_string();
+            self.check_cond(&c.e, format!("trap: sure failed: `{}` in {name} at {at}\n", c.text));
+        }
+    }
+
+    /// Evaluates the callee's `need` clauses here, so a failure names this call.
+    fn check_needs(&mut self, full: &str, args: &[VReg], at: Span) {
+        let Some(&f) = self.funcs.get(full) else { return };
+        let check = self.check;
+        let needs: Vec<&'a ast::Contract> = f.contracts.iter().filter(|c| !c.sure && (check || !has_call(&c.e))).collect();
+        if needs.is_empty() {
+            return;
+        }
+        let sig = &self.c.sigs[full];
+        let saved = (std::mem::take(&mut self.vars), std::mem::take(&mut self.addressed), std::mem::take(&mut self.flags));
+        for ((p, t), v) in f.params.iter().zip(&sig.params).zip(args) {
+            self.vars.insert(p.name.clone(), *v);
+            if self.t().is_ref(*t) {
+                self.addressed.insert(p.name.clone());
+            }
+        }
+        let place = self.place_text(at);
+        for c in needs {
+            self.check_cond(&c.e, format!("trap: need failed: `{}` in {} at {place}\n", c.text, short_name(full)));
+        }
+        (self.vars, self.addressed, self.flags) = saved;
+    }
+
+    /// Stops the program with a report if `e` is false.
+    fn check_cond(&mut self, e: &'a Expr, header: String) {
+        let guard = has_call(e).then(|| self.guard_on());
+        let was = std::mem::replace(&mut self.in_contract, true);
+        self.defers.push(Vec::new());
+        let (c, shown) = self.eval_cond(e);
+        let (ok, bad) = (self.new_block(), self.new_block());
+        self.finish(Term::Br { c, t: ok, f: bad });
+
+        self.switch(bad);
+        self.emit(Inst::BufStr { text: header });
+        for (label, v, ty) in shown {
+            self.lit(&format!("  {label} = "));
+            self.print_value(v, ty);
+            self.lit("\n");
+        }
+        for x in self.names_in(e) {
+            let ty = x.ty.get();
+            let (label, v) = match &x.kind {
+                ExprKind::Var(n) => (n.clone(), self.var(x, n, ty)),
+                _ => ("ret".to_string(), self.ret_val.expect("`ret` was bound")),
+            };
+            self.lit(&format!("  {label} = "));
+            self.print_value(v, ty);
+            self.lit("\n");
+        }
+        self.emit(Inst::Flush { fd: 2 });
+        self.emit(Inst::Exit { code: 101 });
+        self.finish(Term::Unreachable);
+
+        self.switch(ok);
+        let depth = self.defers.len() - 1;
+        self.run_defers(depth);
+        self.defers.pop();
+        self.in_contract = was;
+        if let Some(g) = guard {
+            self.guard_off(g);
+        }
+    }
+
+    /// Variables a failed condition should show, each once; what `old` saw is not there now.
+    fn names_in(&self, e: &'a Expr) -> Vec<&'a Expr> {
+        let mut under_old: HashSet<*const Expr> = HashSet::new();
+        walk(e, &mut |x| {
+            if let ExprKind::Old(inner) = &x.kind {
+                walk(inner, &mut |y| {
+                    under_old.insert(y as *const Expr);
+                });
+            }
+        });
+        let mut out: Vec<&'a Expr> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        walk(e, &mut |x| {
+            let key = match &x.kind {
+                ExprKind::Var(n) if self.vars.contains_key(n) => n.clone(),
+                ExprKind::RetVal => "ret".to_string(),
+                _ => return,
+            };
+            if !under_old.contains(&(x as *const Expr)) && seen.insert(key) {
+                out.push(x);
+            }
+        });
+        out
+    }
+
+    /// The condition, and the values of a comparison worth showing if it fails.
+    fn eval_cond(&mut self, e: &'a Expr) -> (VReg, Vec<(&'static str, VReg, Ty)>) {
+        if let ExprKind::Binary { op, l, r } = &e.kind {
+            if is_comparison(*op) {
+                let (d, operands) = self.compare_exprs(*op, l, r);
+                let mut shown = Vec::new();
+                if let Some((a, b)) = operands {
+                    if !plain(l) {
+                        shown.push(("left", a, l.ty.get()));
+                    }
+                    if !plain(r) {
+                        shown.push(("right", b, r.ty.get()));
+                    }
+                }
+                return (d, shown);
+            }
+        }
+        (self.expr_value(e), Vec::new())
+    }
+
+    /// Compares; in a contract, integer `+ - *` is exact rather than overflowing.
+    fn compare_exprs(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> (VReg, Option<(VReg, VReg)>) {
+        let operand = l.ty.get();
+        if self.in_contract && self.t().is_int(operand) && (self.is_wide(l) || self.is_wide(r)) {
+            let (alo, ahi) = self.wide(l);
+            let (blo, bhi) = self.wide(r);
+            let d = self.vreg();
+            self.emit(Inst::WideCmp { cc: cc(op), d, alo, ahi, blo, bhi });
+            return (d, None);
+        }
+        let a = self.expr_value(l);
+        let b = self.expr_value(r);
+        (self.compare(op, a, b, operand), Some((a, b)))
+    }
+
+    fn compare(&mut self, op: BinOp, a: VReg, b: VReg, operand: Ty) -> VReg {
+        if operand == STR {
+            return self.compare_str(op, a, b);
+        }
+        let d = self.vreg();
+        if let Some(bits) = self.float_bits(operand) {
+            self.emit(Inst::FCmp { cc: cc(op), d, a, b, bits });
+        } else {
+            let unsigned = !self.num_of(operand).signed;
+            self.emit(Inst::Cmp { cc: cc(op), d, a, b, unsigned });
+        }
+        d
+    }
+
+    fn is_wide(&self, e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, .. } | ExprKind::Unary { op: UnOp::Neg, .. }) && self.t().is_int(e.ty.get())
+    }
+
+    fn wide(&mut self, e: &'a Expr) -> (VReg, VReg) {
+        if self.is_wide(e) {
+            let (alo, ahi, blo, bhi, op) = match &e.kind {
+                ExprKind::Binary { op, l, r } => {
+                    let (alo, ahi) = self.wide(l);
+                    let (blo, bhi) = self.wide(r);
+                    let op = match op {
+                        BinOp::Add => WideOp::Add,
+                        BinOp::Sub => WideOp::Sub,
+                        _ => WideOp::Mul,
+                    };
+                    (alo, ahi, blo, bhi, op)
+                }
+                ExprKind::Unary { e: x, .. } => {
+                    let zero = self.constant(0);
+                    let (blo, bhi) = self.wide(x);
+                    (zero, zero, blo, bhi, WideOp::Sub)
+                }
+                _ => unreachable!("is_wide checked this"),
+            };
+            let (dlo, dhi) = (self.vreg(), self.vreg());
+            self.emit(Inst::WideBin { op, dlo, dhi, alo, ahi, blo, bhi, loc: loc(e.span) });
+            return (dlo, dhi);
+        }
+        if let ExprKind::Int(v) = e.kind {
+            return (self.constant(v as i64), self.constant((v >> 64) as i64));
+        }
+        let v = self.expr_value(e);
+        let hi = if self.num_of(e.ty.get()).signed {
+            let k = self.constant(63);
+            let d = self.vreg();
+            self.emit(Inst::Bin { op: Arith::Shr, d, a: v, b: k, num: Num { bits: 64, signed: true }, loc: loc(e.span) });
+            d
+        } else {
+            self.constant(0)
+        };
+        (v, hi)
     }
 
     fn needs(&self, ty: Ty) -> bool {
@@ -307,6 +659,9 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 if self.needs(elem) {
                     let size = self.t().size(elem);
                     self.for_each(p, n, size, |l, item| l.drop_now(item, elem));
+                }
+                if self.instrument {
+                    self.emit(Inst::SetSite { text: "automatic release".to_string() });
                 }
                 self.emit(Inst::Free { p });
                 self.finish(Term::Jmp(done));
@@ -771,6 +1126,12 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 self.switch(exit);
             }
             StmtKind::Match { subject, arms } => self.match_stmt(subject, arms),
+            StmtKind::Sure(e, text) => {
+                if self.check || !has_call(e) {
+                    let at = self.place_text(s.span);
+                    self.check_cond(e, format!("trap: sure failed: `{text}` at {at}\n"));
+                }
+            }
             StmtKind::Ret(v) => self.ret_stmt(v.as_ref()),
             StmtKind::Fail(e) => {
                 let Kind::Result(_, err) = self.t().kind(self.ret) else { unreachable!("sema checked `fail`") };
@@ -856,6 +1217,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         match v {
             None => {
                 self.run_defers(0);
+                self.check_sures(None);
                 if matches!(self.t().kind(self.ret), Kind::Result(VOID, _)) {
                     self.return_ok_void();
                     let dead = self.new_block();
@@ -870,10 +1232,12 @@ impl<'a, 'i> FnLower<'a, 'i> {
                     let sret = self.sret.expect("aggregates are returned in memory");
                     self.store(sret, 0, r, self.ret);
                     self.run_defers(0);
+                    self.check_sures(None);
                     self.finish_dead(Term::Ret(None));
                 } else {
                     // The value is computed first: a `defer` must not change what is returned.
                     self.run_defers(0);
+                    self.check_sures(Some(r));
                     self.finish_dead(Term::Ret(Some(r)));
                 }
             }
@@ -886,6 +1250,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         match op {
             None => {
                 let v = self.owned_value(value);
+                self.guard_target(&p, target, ty);
                 if self.needs(ty) && !through_pointer(target, self.t()) {
                     let old = match p {
                         Place::Mem(a, o) => self.offset_addr(a, o),
@@ -917,6 +1282,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 self.write_place(p, v, ty);
             }
             Some(op) => {
+                self.guard_target(&p, target, ty);
                 let old = match p {
                     Place::Reg(r) => r,
                     Place::Mem(a, o) => self.load(a, o, ty),
@@ -924,6 +1290,15 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 let v = self.expr_value(value);
                 let d = self.arith(op, old, v, ty, target.span);
                 self.write_place(p, d, ty);
+            }
+        }
+    }
+
+    fn guard_target(&mut self, p: &Place, target: &Expr, ty: Ty) {
+        if self.instrument && self.is_raw(target) {
+            if let Place::Mem(a, o) = *p {
+                let addr = self.offset_addr(a, o);
+                self.guard_mem(addr, self.t().size(ty), target.span);
             }
         }
     }
@@ -1172,6 +1547,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 let pieces = self.pieces(parts);
                 self.emit(Inst::CaptureStart);
                 self.emit_pieces(pieces);
+                self.set_site(e.span);
                 let (ptr, len) = (self.vreg(), self.vreg());
                 self.emit(Inst::CaptureTake { ptr, len });
                 let a = self.temp_obj(STR);
@@ -1184,9 +1560,11 @@ impl<'a, 'i> FnLower<'a, 'i> {
             }
             ExprKind::Deref(inner) => {
                 let p = self.expr_value(inner);
+                self.guard_mem(p, self.t().size(ty), e.span);
                 self.load(p, 0, ty)
             }
-            ExprKind::RetVal => unreachable!("contracts are not lowered in 0.2"),
+            ExprKind::RetVal => return self.ret_val,
+            ExprKind::Old(_) => return self.olds.get(&(e as *const Expr)).copied(),
             ExprKind::None if self.t().is_ptr(ty) => self.constant(0),
             ExprKind::None => {
                 let a = self.temp_obj(ty);
@@ -1197,22 +1575,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             ExprKind::Unary { op, e: inner } => self.unary(*op, inner, ty, e.span),
             ExprKind::Binary { op, l, r } => match op {
                 BinOp::And | BinOp::Or => return Some(self.short_circuit(e)),
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                    let operand = l.ty.get();
-                    let a = self.expr_value(l);
-                    let b = self.expr_value(r);
-                    if operand == STR {
-                        return Some(self.compare_str(*op, a, b));
-                    }
-                    let d = self.vreg();
-                    if let Some(bits) = self.float_bits(operand) {
-                        self.emit(Inst::FCmp { cc: cc(*op), d, a, b, bits });
-                    } else {
-                        let unsigned = !self.num_of(operand).signed;
-                        self.emit(Inst::Cmp { cc: cc(*op), d, a, b, unsigned });
-                    }
-                    d
-                }
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => self.compare_exprs(*op, l, r).0,
                 _ => {
                     let a = self.expr_value(l);
                     let b = self.expr_value(r);
@@ -1235,6 +1598,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                     let zero = self.constant(0);
                     self.store_seq(a, zero, zero, zero);
                 } else {
+                    self.set_site(e.span);
                     let p = self.vreg();
                     self.emit(Inst::Alloc { d: p, n, elem: size, loc: at });
                     for (i, it) in items.iter().enumerate() {
@@ -1273,11 +1637,18 @@ impl<'a, 'i> FnLower<'a, 'i> {
             ExprKind::Field { e: base, name, .. } => {
                 let off = self.field_offset(base.ty.get(), name);
                 let a = self.expr_value(base);
+                if self.instrument && self.t().is_ptr(base.ty.get()) {
+                    let at = self.offset_addr(a, off);
+                    self.guard_mem(at, self.t().size(ty), e.span);
+                }
                 self.load(a, off, ty)
             }
             ExprKind::Index { e: base, i } => {
                 let a = self.expr_value(base);
                 let d = self.element_addr(base.ty.get(), a, i, e.span);
+                if self.instrument && (self.t().is_ptr(base.ty.get()) || self.is_raw(e)) {
+                    self.guard_mem(d, self.t().size(ty), e.span);
+                }
                 self.load(d, 0, ty)
             }
             ExprKind::Slice { e: base, lo, hi } => self.slice_expr(base, lo.as_deref(), hi.as_deref(), ty, e.span),
@@ -1404,6 +1775,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             let v = if *own { self.owned_value(a) } else { self.expr_value(a) };
             vals.push(v);
         }
+        self.check_needs(&full, &vals[sret.is_some() as usize..], e.span);
         let d = if ty == VOID || aggregate { None } else { Some(self.vreg()) };
         self.emit(Inst::Call { d, f: self.ids[&full], args: vals });
         if aggregate {
@@ -1441,14 +1813,21 @@ impl<'a, 'i> FnLower<'a, 'i> {
             "alloc" => {
                 let Kind::Pointer(elem) = self.t().kind(ty) else { unreachable!("sema checked `alloc`") };
                 let n = self.expr_value(&args[0]);
+                self.set_site(e.span);
                 let d = self.vreg();
                 self.emit(Inst::Alloc { d, n, elem: self.t().size(elem), loc: loc(e.span) });
                 Some(d)
             }
             "free" => {
                 let p = self.expr_value(&args[0]);
+                self.set_site(e.span);
                 self.emit(Inst::Free { p });
                 None
+            }
+            "__state" => {
+                let d = self.vreg();
+                self.emit(Inst::RtState { d });
+                Some(d)
             }
             "cast" => {
                 let s = self.expr_value(&args[0]);
@@ -1831,6 +2210,15 @@ impl<'a, 'i> FnLower<'a, 'i> {
 enum Piece<'a> {
     Lit(&'a str),
     Val(VReg, Ty),
+}
+
+fn is_comparison(op: BinOp) -> bool {
+    matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+}
+
+/// Its value is already on the page or shown under its own name.
+fn plain(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) | ExprKind::Bool(_) | ExprKind::Str(_) | ExprKind::Var(_) | ExprKind::RetVal)
 }
 
 /// Produces a value nobody owns yet.

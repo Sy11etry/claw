@@ -1,0 +1,10 @@
+// expect: 1
+// build-only: `claw run` does run this check
+fn no() bool {
+    ret false
+}
+
+fn main() {
+    sure no()
+    print(1)
+}

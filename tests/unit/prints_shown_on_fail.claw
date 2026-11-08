@@ -1,0 +1,10 @@
+// expect: FAIL x
+// expect:   trap: sure failed: `false` at prints_shown_on_fail.claw:9:5
+// expect:   printed:
+// expect:   hello
+// expect: 0 passed, 1 failed
+// exit: 1
+test "x" {
+    print("hello")
+    sure false
+}

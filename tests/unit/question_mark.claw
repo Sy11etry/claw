@@ -1,0 +1,8 @@
+// expect: FAIL parse
+// expect:   error: BadChar{0} at question_mark.claw:6:10
+// expect: 0 passed, 1 failed
+// exit: 1
+test "parse" {
+    n := to_int("x")?
+    print(n)
+}

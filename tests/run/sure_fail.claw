@@ -1,0 +1,12 @@
+// exit: 101
+// stderr: trap: sure failed: `ret > 0` in f at sure_fail.claw:5:10
+// stderr: ret = -1
+fn f() int
+    sure ret > 0
+{
+    ret -1
+}
+
+fn main() {
+    print(f())
+}

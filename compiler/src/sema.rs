@@ -610,7 +610,7 @@ fn declare_types<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
                 check_case(n, true, "type parameter", *sp, diags);
             }
             if matches!(d.body, TypeBody::Variants(_)) {
-                diags.push(Diag::new("E0900", d.span, "generic variants are not available in claw 0.4; use a generic struct or `?T`"));
+                diags.push(Diag::new("E0900", d.span, "generic variants are not available in claw 0.5; use a generic struct or `?T`"));
             } else {
                 let m = &mut g.mods[g.cur];
                 if m.names.contains_key(&d.name) || m.gtypes.contains_key(&d.name) {
@@ -766,6 +766,9 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
         in_defer: false,
         moved: HashMap::new(),
         flows: Vec::new(),
+        in_contract: false,
+        sure_clause: false,
+        in_old: false,
     };
     for (x, ty) in f.params.iter().zip(sig.params) {
         if x.name == "_" {
@@ -781,6 +784,16 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
             v.by_ref = mutable;
         }
     }
+    if !f.contracts.is_empty() && (is_main || f.name == "drop") {
+        cx.diags.push(Diag::new("E0166", f.name_span, format!("`{}` is called by the compiler, so it cannot have contracts", f.name)));
+    }
+    cx.in_contract = true;
+    for c in &f.contracts {
+        cx.sure_clause = c.sure;
+        cx.check(&c.e, BOOL);
+    }
+    cx.in_contract = false;
+    cx.sure_clause = false;
     let ends = cx.block(&f.body);
     cx.pop_scope();
     if !ends && sig.ret != VOID && sig.ret != ERR && !matches!(cx.kind(sig.ret), Kind::Result(VOID, _)) {
@@ -789,7 +802,8 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
     }
 }
 
-pub fn check(units: &[Unit], core: usize, diags: &mut Vec<Diag>) -> Checked {
+/// `tests_only`: there is no program to start, so `main` is optional.
+pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag>) -> Checked {
     let mut g = Global {
         types: Types::new(),
         mods: units
@@ -850,7 +864,11 @@ pub fn check(units: &[Unit], core: usize, diags: &mut Vec<Diag>) -> Checked {
 
     let root = units.len() - 1;
     match units[root].program.funcs.iter().find(|f| f.name == "main") {
-        None => diags.push(Diag::new("E0109", Span { start: 0, end: 0, line: 1, col: 1, file: 0 }, "no `fn main()`; every program needs one")),
+        None if tests_only => {}
+        None => {
+            let at = Span { start: 0, end: 0, line: 1, col: 1, file: 0 };
+            diags.push(Diag::new("E0109", at, "no `fn main()`; every program needs one"));
+        }
         Some(f) => {
             if !f.params.is_empty() || f.ret.is_some() || !f.tparams.is_empty() {
                 diags.push(Diag::new("E0109", f.name_span, "`main` takes no parameters and returns nothing"));
@@ -858,10 +876,19 @@ pub fn check(units: &[Unit], core: usize, diags: &mut Vec<Diag>) -> Checked {
         }
     }
 
+    let mut titles: HashSet<&str> = HashSet::new();
+    for f in &units[root].program.funcs {
+        if let Some(t) = &f.test {
+            if !titles.insert(t) {
+                diags.push(Diag::new("E0167", f.name_span, format!("there is already a test named \"{t}\"")));
+            }
+        }
+    }
+
     for (i, u) in units.iter().enumerate() {
         for f in u.program.funcs.iter().filter(|f| f.tparams.is_empty()) {
             let full = format!("{}{}", u.prefix, f.name);
-            check_body(&mut g, diags, f, i, &full, i == root && f.name == "main");
+            check_body(&mut g, diags, f, i, &full, (i == root && f.name == "main") || f.test.is_some());
         }
     }
 
@@ -901,6 +928,11 @@ struct Ctx<'a, 'b> {
     /// Variables whose value has left, and where it left.
     moved: HashMap<String, Span>,
     flows: Vec<LoopFlow>,
+    /// Inside a `need`, a `sure` or a `sure` statement: nothing may change.
+    in_contract: bool,
+    /// Inside a `sure` clause of a signature, where `ret` and `old` mean something.
+    sure_clause: bool,
+    in_old: bool,
 }
 
 /// What `moved` looked like at each jump out of a loop body.
@@ -940,10 +972,10 @@ fn overlap(a: &(String, Vec<Comp>), b: &(String, Vec<Comp>)) -> bool {
 }
 
 /// Visits an expression and everything nested in it.
-fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+pub fn walk<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
     f(e);
     match &e.kind {
-        ExprKind::Unary { e: x, .. } | ExprKind::AddrOf(x) | ExprKind::Deref(x) | ExprKind::Field { e: x, .. } | ExprKind::Try(x) | ExprKind::ArrayFill(x) => walk(x, f),
+        ExprKind::Old(x) | ExprKind::Unary { e: x, .. } | ExprKind::AddrOf(x) | ExprKind::Deref(x) | ExprKind::Field { e: x, .. } | ExprKind::Try(x) | ExprKind::ArrayFill(x) => walk(x, f),
         ExprKind::Binary { l, r, .. } => {
             walk(l, f);
             walk(r, f);
@@ -1469,6 +1501,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 !has_break(body)
             }
             StmtKind::Match { subject, arms } => self.match_stmt(s.span, subject, arms),
+            StmtKind::Sure(e, _) => {
+                self.in_contract = true;
+                self.check(e, BOOL);
+                self.in_contract = false;
+                false
+            }
             StmtKind::Defer(body) => {
                 if !self.func.claw {
                     self.diags.push(Diag::new("E0142", s.span, "`defer` only exists inside `claw fn`"));
@@ -1600,6 +1638,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
     fn consume(&mut self, e: &Expr) {
         let t = e.ty.get();
         if t == ERR || !self.g.types.needs_drop(t) {
+            return;
+        }
+        if self.in_contract {
+            if matches!(e.kind, ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Deref(_) | ExprKind::Slice { .. }) {
+                self.diags.push(Diag::new("E0164", e.span, "a contract only looks: it cannot move a value"));
+            }
             return;
         }
         match &e.kind {
@@ -1826,7 +1870,32 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 Some(Kind::Err) => ERR,
                 _ => self.err("E0123", e.span, "cannot tell which `?T` this `none` is; give the variable a type"),
             },
-            ExprKind::RetVal => ERR,
+            ExprKind::RetVal => {
+                if !self.sure_clause {
+                    return self.err("E0162", e.span, "`ret` only means the result inside `sure`");
+                }
+                match self.kind(self.ret) {
+                    Kind::Void => self.err("E0162", e.span, "this function returns nothing, so `sure` has no `ret` to look at"),
+                    Kind::Result(VOID, _) => self.err("E0162", e.span, "this function has no success value, so `sure` has no `ret` to look at"),
+                    Kind::Option(p) => p,
+                    Kind::Result(ok, _) => ok,
+                    _ => self.ret,
+                }
+            }
+            ExprKind::Old(inner) => {
+                if !self.sure_clause || self.in_old {
+                    self.expr(inner, None);
+                    return self.err("E0163", e.span, "`old(...)` only works in `sure`, and not inside another `old`");
+                }
+                self.in_old = true;
+                let t = self.expr(inner, None);
+                self.in_old = false;
+                if t != ERR && !self.g.types.is_num(t) && t != BOOL {
+                    let n = self.tname(t);
+                    return self.err("E0163", inner.span, format!("`old` remembers numbers and bool, not {n}; try `old(len(x))`"));
+                }
+                t
+            }
             ExprKind::Var(name) => self.var(e, name),
             ExprKind::AddrOf(inner) => self.addr_of(e, inner, hint),
             ExprKind::Deref(inner) => self.deref_type(e, inner),
@@ -1890,7 +1959,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
             self.check_live(name, e.span);
             let v = self.lookup(name).unwrap();
             v.read = true;
-            return v.ty;
+            let (ty, view) = (v.ty, v.view);
+            if self.sure_clause && !self.in_old && !view && self.g.types.needs_drop(ty) {
+                let d = Diag::new("E0165", e.span, format!("`{name}` was taken over with `own`, so it may be gone when `sure` runs; use `old(...)`"));
+                self.diags.push(d);
+            }
+            return ty;
         }
         let m = self.g.cur;
         if self.g.mods[m].consts.contains_key(name) || self.g.mods[m].names.contains_key(name) {
@@ -1929,6 +2003,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
     }
 
     fn addr_of(&mut self, e: &Expr, inner: &Expr, hint: Option<Ty>) -> Ty {
+        if self.in_contract {
+            self.expr(inner, None);
+            return self.err("E0164", e.span, "a contract only looks: it cannot take `&`");
+        }
         if !self.func.claw {
             if !matches!(hint.map(|h| self.g.types.kind(h)), Some(Kind::Ref(_)) | None) {
                 self.expr(inner, None);
@@ -2116,6 +2194,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     }
                 }
             }
+            "__state" if self.g.mods[self.g.cur].prefix == "__check." => self.g.types.intern(Kind::Pointer(INT)),
             "copy" => {
                 if args.len() != 1 {
                     return Some(self.err("E0106", span, format!("`copy` takes 1 value, found {}", args.len())));
@@ -2529,6 +2608,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
     }
 
     fn try_expr(&mut self, e: &Expr, inner: &Expr) -> Ty {
+        if self.in_contract {
+            self.expr(inner, None);
+            return self.err("E0164", e.span, "`?` would leave in the middle of a contract; get the value first");
+        }
         if self.in_defer {
             self.diags.push(Diag::new("E0143", e.span, "`defer` cannot leave the function"));
         }
@@ -2586,6 +2669,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
             }
             ElseKind::Block(binder, b) => {
+                if self.in_contract {
+                    self.diags.push(Diag::new("E0164", e.span, "a contract cannot contain an `else` block; use `else value`"));
+                }
                 let before = self.moved.clone();
                 self.scopes.push(HashMap::new());
                 if let Some((n, sp)) = binder {

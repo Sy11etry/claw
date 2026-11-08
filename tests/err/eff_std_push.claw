@@ -1,0 +1,10 @@
+// error: E0160
+pub fn f(a &[]int) {
+    push(&a, 1)
+}
+
+fn main() {
+    mut a []int = []
+    f(&a)
+    print(a)
+}

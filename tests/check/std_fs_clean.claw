@@ -1,0 +1,9 @@
+// expect: hello
+use fs
+
+fn main() {
+    fs.write("/tmp/claw_check_rt_test.txt", "hello")?
+    s := fs.read("/tmp/claw_check_rt_test.txt")?
+    print(s)
+    fs.remove("/tmp/claw_check_rt_test.txt")?
+}

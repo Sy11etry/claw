@@ -1,0 +1,6 @@
+// error: E0201
+test {
+}
+
+fn main() {
+}

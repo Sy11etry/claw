@@ -1,6 +1,5 @@
 // error: E0900
-test "a" {
-}
+type E[T] = Some{v T} | Nope
 
 fn main() {
 }

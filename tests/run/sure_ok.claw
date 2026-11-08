@@ -1,0 +1,11 @@
+// expect: 5
+fn abs_of(x int) int
+    sure ret >= 0
+{
+    if x < 0 { ret -x }
+    ret x
+}
+
+fn main() {
+    print(abs_of(-5))
+}

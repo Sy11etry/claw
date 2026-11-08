@@ -1,0 +1,10 @@
+// expect: true
+fn f(a int) bool
+    need a + 1 != a and a + 1 > a and a + 1 >= a and a < a + 1 and a <= a + 1 and a + 1 == 1 + a
+{
+    ret true
+}
+
+fn main() {
+    print(f(9223372036854775807))
+}

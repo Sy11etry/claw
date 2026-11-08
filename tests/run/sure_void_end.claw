@@ -1,0 +1,12 @@
+// exit: 101
+// stderr: `a > 1`
+fn f(a &int)
+    sure a > 1
+{
+    a = 0
+}
+
+fn main() {
+    mut x := 1
+    f(&x)
+}

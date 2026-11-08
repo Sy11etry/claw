@@ -1,0 +1,9 @@
+// error: E0160
+pub claw fn f() {
+    p := alloc[int](1)
+    free(p)
+}
+
+fn main() {
+    f()
+}

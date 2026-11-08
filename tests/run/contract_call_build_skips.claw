@@ -1,0 +1,16 @@
+// expect: 1
+// build-only: `claw run` does run this check
+// stderr: 1 checks that call functions are left out
+fn no(_ int) bool {
+    ret false
+}
+
+fn f(x int) int
+    need no(x)
+{
+    ret x
+}
+
+fn main() {
+    print(f(1))
+}

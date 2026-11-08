@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: use after free
+claw fn main() {
+    mut b []int = []
+    push(&b, 1)
+    free(b.ptr)
+    print(b[0])
+    b.cap = 0
+}

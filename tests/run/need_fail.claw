@@ -1,0 +1,12 @@
+// exit: 101
+// stderr: trap: need failed: `b != 0` in div at need_fail.claw:11:11
+// stderr: b = 0
+fn div(a int, b int) int
+    need b != 0
+{
+    ret a / b
+}
+
+fn main() {
+    print(div(6, 0))
+}

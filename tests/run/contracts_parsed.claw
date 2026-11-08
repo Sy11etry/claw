@@ -1,5 +1,4 @@
 // expect: 3
-// stderr: parsed but NOT checked
 fn div(a int, b int) int +mem
     need b != 0
     sure ret * b <= a

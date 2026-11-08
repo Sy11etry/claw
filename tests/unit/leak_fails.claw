@@ -1,0 +1,13 @@
+// expect: FAIL leaky
+// expect:   trap: memory leak: 1 blocks, 8 bytes never released
+// expect:     block of 8 bytes made at leak_fails.claw:7:10
+// expect: 0 passed, 1 failed
+// exit: 1
+claw fn leak() {
+    p := alloc[int](1)
+    *p = 1
+}
+
+test "leaky" {
+    leak()
+}

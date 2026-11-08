@@ -1,0 +1,5 @@
+// error: E0166
+fn main()
+    need 1 > 0
+{
+}

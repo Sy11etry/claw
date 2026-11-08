@@ -15,6 +15,9 @@ pub struct Parser<'a> {
     /// In `if`/`for`/`match` heads a bare `Name{` or `else` would be ambiguous.
     in_head: bool,
     in_contract: bool,
+    /// The source text, for quoting contracts in their failure messages.
+    src: String,
+    tests: usize,
 }
 
 fn join(a: Span, b: Span) -> Span {
@@ -22,7 +25,7 @@ fn join(a: Span, b: Span) -> Span {
 }
 
 fn not_yet(what: &str) -> String {
-    format!("{what} is not available in claw 0.4")
+    format!("{what} is not available in claw 0.5")
 }
 
 fn is_type_name(s: &str) -> bool {
@@ -31,7 +34,41 @@ fn is_type_name(s: &str) -> bool {
 
 impl<'a> Parser<'a> {
     pub fn new(toks: Vec<Token>, diags: &'a mut Vec<Diag>) -> Parser<'a> {
-        Parser { toks, pos: 0, diags, in_head: false, in_contract: false }
+        Parser { toks, pos: 0, diags, in_head: false, in_contract: false, src: String::new(), tests: 0 }
+    }
+
+    pub fn with_source(mut self, src: &str) -> Parser<'a> {
+        self.src = src.to_string();
+        self
+    }
+
+    /// The source between a starting span and the last token consumed, on one line.
+    fn text_since(&self, start: Span) -> String {
+        let end = self.toks[self.pos.saturating_sub(1)].span.end as usize;
+        let raw = self.src.get(start.start as usize..end).unwrap_or("");
+        raw.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn parse_test(&mut self, index: usize) -> PResult<Func> {
+        let span = self.bump().span;
+        let Tok::Str(title) = self.peek().clone() else { return self.expected("the test's name in quotes") };
+        self.bump();
+        let body = self.parse_block()?;
+        Ok(Func {
+            name: format!("test {index}"),
+            name_span: span,
+            public: false,
+            claw: false,
+            tparams: Vec::new(),
+            addressed: RefCell::new(HashSet::new()),
+            params: Vec::new(),
+            ret: None,
+            contracts: Vec::new(),
+            effects: Vec::new(),
+            sig_end: span,
+            test: Some(title),
+            body,
+        })
     }
 
     fn peek(&self) -> &Tok {
@@ -132,7 +169,6 @@ impl<'a> Parser<'a> {
             if *self.peek() == Tok::Eof {
                 break;
             }
-            let span = self.span();
             let public = self.at_kw("pub");
             if public {
                 self.bump();
@@ -151,8 +187,12 @@ impl<'a> Parser<'a> {
                 Tok::Kw("const") => self.parse_const(public).map(|c| p.consts.push(c)),
                 Tok::Kw("extern") => self.parse_extern(public).map(|e| p.externs.push(e)),
                 Tok::Kw("use") if !public => self.parse_use().map(|u| p.uses.push(u)),
-                Tok::Kw("test") => self.error("E0900", span, not_yet("`test`")),
-                _ => self.expected("`fn`, `claw fn`, `type`, `const`, `extern` or `use`"),
+                Tok::Kw("test") if !public => {
+                    self.tests += 1;
+                    let index = self.tests;
+                    self.parse_test(index).map(|f| p.funcs.push(f))
+                }
+                _ => self.expected("`fn`, `claw fn`, `type`, `const`, `extern`, `use` or `test`"),
             };
             if result.is_err() {
                 self.bump();
@@ -167,7 +207,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 Tok::Eof => return,
-                Tok::Kw("fn") | Tok::Kw("type") | Tok::Kw("const") | Tok::Kw("claw") | Tok::Kw("extern") | Tok::Kw("use") | Tok::Kw("pub")
+                Tok::Kw("fn") | Tok::Kw("type") | Tok::Kw("const") | Tok::Kw("claw") | Tok::Kw("extern") | Tok::Kw("use") | Tok::Kw("pub") | Tok::Kw("test")
                     if self.pos == 0 || self.toks[self.pos - 1].tok == Tok::Newline =>
                 {
                     return
@@ -416,19 +456,27 @@ impl<'a> Parser<'a> {
             }
             effects.push(e);
         }
+        let last = self.toks[self.pos.saturating_sub(1)].span;
+        let sig_end = Span { start: last.end, end: last.end, line: last.line, col: last.col, file: last.file };
 
         let mut contracts = Vec::new();
         self.skip_newlines();
         while self.at_kw("need") || self.at_kw("sure") {
+            let sure = self.at_kw("sure");
             self.bump();
+            let start = self.span();
             self.in_contract = true;
+            // `need x == Empty {`: the brace opens the body, not a struct.
+            let head = std::mem::replace(&mut self.in_head, true);
             let e = self.parse_expr(0);
+            self.in_head = head;
             self.in_contract = false;
-            contracts.push(e?);
+            let text = self.text_since(start);
+            contracts.push(Contract { sure, e: e?, text });
             self.skip_newlines();
         }
         let body = self.parse_block()?;
-        Ok(Func { name, name_span, public, claw, tparams, addressed: RefCell::new(HashSet::new()), params, ret, contracts, effects, body })
+        Ok(Func { name, name_span, public, claw, tparams, addressed: RefCell::new(HashSet::new()), params, ret, contracts, effects, sig_end, test: None, body })
     }
 
     fn parse_block(&mut self) -> PResult<Block> {
@@ -538,9 +586,14 @@ impl<'a> Parser<'a> {
                 };
                 Ok(Stmt { kind: StmtKind::Defer(body), span: start })
             }
-            Tok::Kw(k) if matches!(k, "need" | "sure") => {
-                self.error("E0900", start, not_yet(&format!("`{k}` here")))
+            Tok::Kw("sure") => {
+                self.bump();
+                let at = self.span();
+                let e = self.parse_expr(0)?;
+                let text = self.text_since(at);
+                Ok(Stmt { kind: StmtKind::Sure(e, text), span: start })
             }
+            Tok::Kw("need") => self.error("E0168", start, "`need` belongs in a signature; inside a body write `sure`".to_string()),
             Tok::Ident(name) => {
                 if matches!(self.peek_at(1), Tok::Op(":=")) || self.is_typed_let() {
                     return self.parse_let(start, false);
@@ -1021,6 +1074,13 @@ impl<'a> Parser<'a> {
             Tok::Kw("ret") if self.in_contract => {
                 self.bump();
                 Ok(Expr::new(ExprKind::RetVal, span))
+            }
+            Tok::Ident(name) if self.in_contract && name == "old" && matches!(self.peek_at(1), Tok::Op("(")) => {
+                self.bump();
+                self.bump();
+                let inner = self.parse_expr(0)?;
+                self.expect_op(")")?;
+                Ok(Expr::new(ExprKind::Old(Box::new(inner)), span))
             }
             Tok::Ident(name) => {
                 self.bump();

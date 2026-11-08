@@ -1,0 +1,6 @@
+// exit: 101
+// stderr: trap: null pointer at mem_null.claw:5:11
+claw fn main() {
+    p *int = none
+    print(*p)
+}

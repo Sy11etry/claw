@@ -1,0 +1,14 @@
+// error: E0164
+fn g() ?bool {
+    ret true
+}
+
+fn f() ?int
+    need g()?
+{
+    ret 1
+}
+
+fn main() {
+    print(f())
+}

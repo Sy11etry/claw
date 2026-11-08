@@ -1,0 +1,9 @@
+// expect: 1
+// exit: 101
+// stderr: trap: sure failed: `x == 2` at sure_stmt_fail.claw:8:5
+// stderr: x = 1
+fn main() {
+    x := 1
+    print(x)
+    sure x == 2
+}

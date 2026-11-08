@@ -1,0 +1,8 @@
+// exit: 101
+// stderr: left = 3
+type P { x int }
+
+fn main() {
+    p := P{3}
+    sure p.x == 4
+}

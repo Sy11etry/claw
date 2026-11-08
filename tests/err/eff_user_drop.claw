@@ -1,0 +1,16 @@
+// error: E0160
+type F { n int }
+
+fn drop(x &F) +io {
+    print(x.n)
+}
+
+pub fn f() {
+    a := F{1}
+    print(0)
+    _ = a
+}
+
+fn main() {
+    f()
+}

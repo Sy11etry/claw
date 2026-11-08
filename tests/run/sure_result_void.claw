@@ -1,0 +1,18 @@
+// expect: ok
+// exit: 101
+// stderr: `a > 1`
+type E = Bad
+
+fn f(a &int) ! E
+    sure a > 1
+{
+    a += 1
+    ret
+}
+
+fn main() {
+    mut x := 1
+    print(f(&x))
+    x = -5
+    print(f(&x))
+}

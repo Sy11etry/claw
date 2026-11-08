@@ -107,10 +107,22 @@ pub struct Func {
     pub addressed: RefCell<HashSet<String>>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
-    /// Parsed since 0.2, checked from 0.5.
-    pub contracts: Vec<Expr>,
+    pub contracts: Vec<Contract>,
     pub effects: Vec<String>,
+    /// Where a missing `+effect` would be written.
+    pub sig_end: Span,
+    /// The name of a `test` block; such a function is only built by `claw test`.
+    pub test: Option<String>,
     pub body: Block,
+}
+
+/// One `need` or `sure` clause of a signature.
+#[derive(Debug, Clone)]
+pub struct Contract {
+    pub sure: bool,
+    pub e: Expr,
+    /// The clause as written, for the message when it fails.
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +182,8 @@ pub enum StmtKind {
     Ret(Option<Expr>),
     Fail(Expr),
     Defer(Block),
+    /// `sure x` inside a body; the text is for the message when it fails.
+    Sure(Expr, String),
     Break,
     Continue,
 }
@@ -284,6 +298,8 @@ pub enum ExprKind {
     None,
     /// `ret` inside a `sure` contract.
     RetVal,
+    /// `old(e)` inside a `sure` contract: `e` as it was on entry.
+    Old(Box<Expr>),
     Var(String),
     Unary { op: UnOp, e: Box<Expr> },
     Binary { op: BinOp, l: Box<Expr>, r: Box<Expr> },

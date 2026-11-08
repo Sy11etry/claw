@@ -39,8 +39,9 @@ pub claw fn pop[T](a &[]T) ?T {
     ret a.ptr[a.len]
 }
 
-pub claw fn insert[T](a &[]T, i int, own x T) +mem {
-    if i != a.len { _ = a[i] }
+pub claw fn insert[T](a &[]T, i int, own x T) +mem
+    need i >= 0 and i <= len(a)
+{
     grow(&a, a.len + 1)
     from := a.ptr + i
     _ = c_memmove(raw(from + 1), raw(from), u64((a.len - i) * sizeof[T]()))
@@ -48,8 +49,9 @@ pub claw fn insert[T](a &[]T, i int, own x T) +mem {
     a.len += 1
 }
 
-pub claw fn remove[T](a &[]T, i int) T {
-    _ = a[i]
+pub claw fn remove[T](a &[]T, i int) T
+    need i >= 0 and i < len(a)
+{
     x := a.ptr[i]
     from := a.ptr + i
     _ = c_memmove(raw(from), raw(from + 1), u64((a.len - i - 1) * sizeof[T]()))

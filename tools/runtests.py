@@ -8,6 +8,9 @@ tests/run/*.claw  compiled and executed. Headers:
 tests/err/*.claw  must be rejected. Header:
     // error: E####              (repeatable; all must appear, nothing else)
 tests/own/*.claw  like run, built with --alloc-stats: allocations must equal frees.
+tests/check/*.claw  like run, but through `claw run`: every contract and the memory checker.
+tests/unit/*.claw  through `claw test`: the headers describe its report.
+tests/run again, in check mode: the checker must not complain about correct programs.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
@@ -49,6 +52,46 @@ def run_test(path, tmp):
     for s in headers(text, "stderr"):
         if s not in p.stderr + r.stderr:
             return f"stderr lacks {s!r}: {p.stderr + r.stderr!r}"
+    return None
+
+
+def check_test(path):
+    """`claw run`: the mode with every contract and the memory checker."""
+    text = path.read_text()
+    p = subprocess.run([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+    want_exit = int((headers(text, "exit") or ["0"])[0])
+    if p.returncode != want_exit:
+        return f"exit code {p.returncode}, wanted {want_exit}\nstderr: {p.stderr}"
+    if p.stdout.splitlines() != headers(text, "expect"):
+        return f"stdout mismatch\n  got:  {p.stdout.splitlines()}\n  want: {headers(text, 'expect')}"
+    for s in headers(text, "stderr"):
+        if s not in p.stderr:
+            return f"stderr lacks {s!r}: {p.stderr!r}"
+    return None
+
+
+def run_again_checked(path):
+    """A correct program behaves the same with the checker switched on."""
+    text = path.read_text()
+    if headers(text, "build-only"):
+        return None
+    p = subprocess.run([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=120)
+    want_exit = int((headers(text, "checked-exit") or headers(text, "exit") or ["0"])[0])
+    if p.returncode != want_exit:
+        return f"exit code {p.returncode}, wanted {want_exit}\nstderr: {p.stderr}"
+    if p.stdout.splitlines() != headers(text, "expect"):
+        return f"stdout differs: {p.stdout.splitlines()}"
+    return None
+
+
+def unit_test(path):
+    text = path.read_text()
+    p = subprocess.run([CLAW, "test", path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+    want_exit = int((headers(text, "exit") or ["0"])[0])
+    if p.returncode != want_exit:
+        return f"exit code {p.returncode}, wanted {want_exit}\nstdout: {p.stdout}\nstderr: {p.stderr}"
+    if p.stdout.splitlines() != headers(text, "expect"):
+        return f"report differs\n  got:  {p.stdout.splitlines()}\n  want: {headers(text, 'expect')}"
     return None
 
 
@@ -133,6 +176,24 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL run/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/check").glob("*.claw")):
+            total += 1
+            msg = check_test(path)
+            if msg:
+                failures += 1
+                print(f"FAIL check/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/unit").glob("*.claw")):
+            total += 1
+            msg = unit_test(path)
+            if msg:
+                failures += 1
+                print(f"FAIL unit/{path.name}: {msg}")
+        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw"))):
+            total += 1
+            msg = run_again_checked(path)
+            if msg:
+                failures += 1
+                print(f"FAIL checked/{path.name}: {msg}")
         for path in sorted((ROOT / "tests/own").glob("*.claw")):
             total += 1
             msg = own_test(path, tmp)
@@ -145,7 +206,7 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL fmt/{path.name}: {msg}")
-        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
+        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "tests/check").glob("*.claw")) + list((ROOT / "tests/unit").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
             total += 1
             msg = fmt_stable(path, tmp)
             if msg:

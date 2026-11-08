@@ -1,0 +1,15 @@
+// expect: FAIL boom
+// expect:   trap: division by zero at trap_isolated.claw:10:11
+// expect: 1 passed, 1 failed
+// exit: 1
+fn zero() int {
+    ret 0
+}
+
+test "boom" {
+    print(1 / zero())
+}
+
+test "after" {
+    sure true
+}

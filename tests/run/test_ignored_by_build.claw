@@ -1,0 +1,8 @@
+// expect: 1
+test "never built" {
+    sure 1 == 2
+}
+
+fn main() {
+    print(1)
+}

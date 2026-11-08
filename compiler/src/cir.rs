@@ -46,6 +46,14 @@ pub enum Arith {
     Shr,
 }
 
+/// Exact arithmetic inside contracts, on 128-bit (lo, hi) pairs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WideOp {
+    Add,
+    Sub,
+    Mul,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FArith {
     Add,
@@ -123,6 +131,12 @@ pub enum Inst {
     BufFloat { s: VReg, bits: u8 },
     Flush { fd: u32 },
     Exit { code: u32 },
+    WideBin { op: WideOp, dlo: VReg, dhi: VReg, alo: VReg, ahi: VReg, blo: VReg, bhi: VReg, loc: Loc },
+    WideCmp { cc: Cc, d: VReg, alo: VReg, ahi: VReg, blo: VReg, bhi: VReg },
+    /// The address of the runtime's words: 0 is the contract guard, 1 the current site.
+    RtState { d: VReg },
+    /// Remembers where the next allocation or release comes from.
+    SetSite { text: String },
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +168,17 @@ pub struct Func {
 pub struct Module {
     pub funcs: Vec<Func>,
     pub main: FuncId,
+    /// Present in check mode: the memory checker's entry points.
+    pub check: Option<CheckRt>,
+    /// (name, function) of each `test` block, in `claw test`.
+    pub tests: Vec<(String, FuncId)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CheckRt {
+    pub alloc: FuncId,
+    pub free: FuncId,
+    pub finish: FuncId,
 }
 
 pub fn dump(m: &Module) -> String {

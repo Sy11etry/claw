@@ -1,0 +1,18 @@
+// expect: FAIL c
+// expect:   trap: need failed: `pos(x)` in f at contract_fails.claw:17:9
+// expect:     x = 0
+// expect: 0 passed, 1 failed
+// exit: 1
+fn pos(x int) bool {
+    ret x > 0
+}
+
+fn f(x int) int
+    need pos(x)
+{
+    ret x
+}
+
+test "c" {
+    _ = f(0)
+}

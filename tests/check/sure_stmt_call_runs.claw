@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: left = 3
+fn f() int {
+    ret 3
+}
+
+fn main() {
+    sure f() == 4
+}

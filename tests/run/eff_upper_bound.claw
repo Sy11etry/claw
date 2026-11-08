@@ -1,0 +1,8 @@
+// expect: 1
+pub fn f(x int) int +io +mem {
+    ret x
+}
+
+fn main() {
+    print(f(1))
+}

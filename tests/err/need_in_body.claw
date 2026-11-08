@@ -1,0 +1,4 @@
+// error: E0168
+fn main() {
+    need 1 > 0
+}

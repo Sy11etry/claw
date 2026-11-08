@@ -1,0 +1,10 @@
+// expect: 2
+fn f(own s str) int
+    sure ret == old(len(s))
+{
+    ret len(s)
+}
+
+fn main() {
+    print(f(copy("ab")))
+}

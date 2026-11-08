@@ -1,0 +1,289 @@
+// The memory checker behind `claw run` and `claw test`. Built only in those modes.
+//
+// Each 8 bytes of memory have one shadow byte: 0 means all usable, 1-7 means only the
+// first that many, 250 is the guard zone around a block, 253 is freed memory.
+// Memory the checker never heard of (stack, statics) counts as usable.
+
+extern "malloc" fn c_malloc(n u64) *u8
+extern "free" fn c_free(p *u8)
+extern "calloc" fn c_calloc(n u64, size u64) *u8
+extern "memset" fn c_memset(p *u8, v i32, n u64) *u8
+extern "write" fn c_write(fd i32, p *u8, n u64) i64
+extern "strlen" fn c_strlen(s *u8) u64
+extern "exit" fn c_exit(code i32)
+
+const zone u8 = 250
+const freed u8 = 253
+const before = 64
+const after = 32
+const stamp = 5209369101
+const top_size = 8388608
+const chunk_size = 2097152
+const ring_size = 65536
+const ring_bytes = 67108864
+
+const live_state = 1
+const freed_state = 2
+
+// Lives in the guard zone in front of the block.
+type Header {
+    stamp int
+    size int
+    made *u8
+    gone *u8
+    prev *Header
+    next *Header
+    state int
+}
+
+// Words of __state(): 0 the contract guard, 1 the current site.
+const w_top = 2
+const w_list = 3
+const w_ring = 4
+const w_ring_at = 5
+const w_ring_count = 6
+const w_ring_held = 7
+
+claw fn chunk(addr int, make bool) *u8 {
+    s := __state()
+    if s[w_top] == 0 {
+        s[w_top] = cast[int](c_calloc(u64(top_size), 8))
+    }
+    i := addr >> 24
+    if i < 0 or i >= top_size { ret none }
+    top := cast[**u8](s[w_top])
+    if top[i] == none and make {
+        top[i] = c_calloc(u64(chunk_size), 1)
+    }
+    ret top[i]
+}
+
+claw fn shadow_at(addr int) u8 {
+    c := chunk(addr, false)
+    if c == none { ret 0 }
+    ret c[(addr >> 3) & (chunk_size - 1)]
+}
+
+claw fn fill(addr int, n int, v u8) {
+    if n <= 0 { ret }
+    mut g := addr >> 3
+    last := (addr + n - 1) >> 3
+    for g <= last {
+        at := g & (chunk_size - 1)
+        mut count := chunk_size - at
+        if count > last - g + 1 { count = last - g + 1 }
+        c := chunk(g << 3, v != 0)
+        if c != none { _ = c_memset(c + at, i32(v), u64(count)) }
+        g += count
+    }
+}
+
+claw fn say(s str) {
+    _ = c_write(2, s.ptr, u64(s.len))
+}
+
+claw fn say_place(p *u8) {
+    if p == none {
+        say("an unknown place")
+    } else {
+        _ = c_write(2, p, c_strlen(p))
+    }
+}
+
+claw fn say_int(v int) {
+    if v >= 10 { say_int(v / 10) }
+    mut c := u8(v % 10) + '0'
+    _ = c_write(2, &c, 1)
+}
+
+claw fn stop() {
+    c_exit(101)
+}
+
+claw fn rounded(n int) int {
+    ret (n + 7) & ~7
+}
+
+claw fn block_end(b *Header) int {
+    ret cast[int](b) + before + rounded(b.size) + after
+}
+
+// The block whose memory or guard zones contain this address.
+claw fn block_of(addr int) *Header {
+    s := __state()
+    mut b := cast[*Header](s[w_list])
+    for b != none {
+        if addr >= cast[int](b) and addr < block_end(b) { ret b }
+        b = b.next
+    }
+    ret none
+}
+
+claw fn describe(b *Header) {
+    if b == none { ret }
+    say("  block of ")
+    say_int(b.size)
+    say(" bytes made at ")
+    say_place(b.made)
+    say("\n")
+    if b.state == freed_state {
+        say("  released at ")
+        say_place(b.gone)
+        say("\n")
+    }
+}
+
+claw fn on_alloc(n int) *u8 {
+    if n < 0 or n > 70368744177664 { ret none }
+    size := rounded(n)
+    base := c_malloc(u64(before + size + after))
+    if base == none { ret none }
+    a := cast[int](base)
+    user := a + before
+    fill(a, before, zone)
+    if n & 7 != 0 {
+        at := user + (n & ~7)
+        c := chunk(at, true)
+        c[(at >> 3) & (chunk_size - 1)] = u8(n & 7)
+    }
+    fill(user + size, after, zone)
+
+    s := __state()
+    b := cast[*Header](base)
+    old := cast[*Header](s[w_list])
+    b.stamp = stamp
+    b.size = n
+    b.made = cast[*u8](s[1])
+    b.gone = none
+    b.prev = none
+    b.next = old
+    b.state = live_state
+    if old != none { old.prev = b }
+    s[w_list] = a
+    ret cast[*u8](user)
+}
+
+claw fn unlink(b *Header) {
+    s := __state()
+    if b.prev != none {
+        b.prev.next = b.next
+    } else {
+        s[w_list] = cast[int](b.next)
+    }
+    if b.next != none { b.next.prev = b.prev }
+}
+
+// Freed blocks wait here, poisoned, so that late uses can still be caught.
+claw fn hold(b *Header) {
+    s := __state()
+    if s[w_ring] == 0 {
+        s[w_ring] = cast[int](c_calloc(u64(ring_size), 8))
+    }
+    ring := cast[**Header](s[w_ring])
+    for s[w_ring_count] == ring_size or (s[w_ring_held] > ring_bytes and s[w_ring_count] > 0) {
+        at := (s[w_ring_at] - s[w_ring_count] + ring_size) % ring_size
+        oldest := ring[at]
+        total := before + rounded(oldest.size) + after
+        fill(cast[int](oldest), total, 0)
+        s[w_ring_count] -= 1
+        s[w_ring_held] -= oldest.size
+        unlink(oldest)
+        c_free(cast[*u8](oldest))
+    }
+    ring[s[w_ring_at]] = b
+    s[w_ring_at] = (s[w_ring_at] + 1) % ring_size
+    s[w_ring_count] += 1
+    s[w_ring_held] += b.size
+}
+
+claw fn on_free(p *u8) {
+    if p == none { ret }
+    s := __state()
+    a := cast[int](p)
+    site := cast[*u8](s[1])
+    b := cast[*Header](a - before)
+    if a < before or shadow_at(a - 1) != zone or b.stamp != stamp {
+        say("trap: `free` of a pointer that `alloc` did not return at ")
+        say_place(site)
+        say("\n")
+        describe(block_of(a))
+        stop()
+    }
+    if b.state == freed_state {
+        say("trap: double free at ")
+        say_place(site)
+        say("\n")
+        describe(b)
+        stop()
+    }
+    b.state = freed_state
+    b.gone = site
+    fill(a, rounded(b.size), freed)
+    hold(b)
+}
+
+claw fn bad_access(addr int, v u8, site *u8) {
+    if v == freed {
+        say("trap: use after free at ")
+    } else {
+        say("trap: out of bounds of a heap block at ")
+    }
+    say_place(site)
+    say("\n")
+    describe(block_of(addr))
+    stop()
+}
+
+claw fn access(addr int, n int, site *u8) {
+    if addr >= 0 and addr < 16384 {
+        say("trap: null pointer at ")
+        say_place(site)
+        say("\n")
+        stop()
+    }
+    if n <= 0 { ret }
+    final := addr + n - 1
+    mut g := addr >> 3
+    last := final >> 3
+    for g <= last {
+        at := g << 3
+        v := shadow_at(at)
+        if v != 0 {
+            mut reach := final
+            if reach > at + 7 { reach = at + 7 }
+            if v >= 8 or reach - at >= int(v) { bad_access(at, v, site) }
+        }
+        g += 1
+    }
+}
+
+// Runs after `main` returns normally.
+claw fn finish() {
+    s := __state()
+    mut count := 0
+    mut bytes := 0
+    mut b := cast[*Header](s[w_list])
+    for b != none {
+        if b.state == live_state {
+            count += 1
+            bytes += b.size
+        }
+        b = b.next
+    }
+    if count == 0 { ret }
+    say("trap: memory leak: ")
+    say_int(count)
+    say(" blocks, ")
+    say_int(bytes)
+    say(" bytes never released\n")
+    mut shown := 0
+    b = cast[*Header](s[w_list])
+    for b != none and shown < 5 {
+        if b.state == live_state {
+            describe(b)
+            shown += 1
+        }
+        b = b.next
+    }
+    stop()
+}

@@ -1,3 +1,4 @@
+// checked-exit: 101
 // expect: 2
 // expect: 2
 // expect: 16

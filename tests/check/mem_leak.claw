@@ -1,0 +1,9 @@
+// expect: 1
+// exit: 101
+// stderr: trap: memory leak: 1 blocks, 16 bytes
+// stderr: made at mem_leak.claw:6:10
+claw fn main() {
+    p := alloc[int](2)
+    print(1)
+    p[0] = 1
+}

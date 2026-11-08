@@ -1,0 +1,8 @@
+// exit: 101
+// stderr: out of bounds
+claw fn main() {
+    p := alloc[u8](9)
+    q := cast[*int](p + 4)
+    print(*q)
+    free(p)
+}

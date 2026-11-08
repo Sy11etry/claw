@@ -1,0 +1,10 @@
+// error: E0165
+fn f(own s str)
+    sure len(s) > 0
+{
+    print(s)
+}
+
+fn main() {
+    f("a")
+}

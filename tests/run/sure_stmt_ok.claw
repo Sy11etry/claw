@@ -1,0 +1,6 @@
+// expect: 1
+fn main() {
+    x := 1
+    sure x == 1
+    print(x)
+}

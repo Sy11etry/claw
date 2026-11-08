@@ -1,0 +1,8 @@
+// expect: a1
+pub fn f(x int) +io {
+    print("a{x}")
+}
+
+fn main() {
+    f(1)
+}

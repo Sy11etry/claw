@@ -1,0 +1,8 @@
+// exit: 101
+// stderr: out of bounds
+claw fn main() {
+    p := alloc[int](2)
+    q := p - 1
+    *q = 5
+    free(p)
+}

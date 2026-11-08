@@ -1,4 +1,4 @@
-# Claw 0.4 card
+# Claw 0.5 card
 
 One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -7,7 +7,7 @@ type Point { x int, y int }              // struct, laid out like C
 type Shape = Circle{r f64} | Dot         // variants
 type ParseErr = Empty | Bad{at int}
 
-const limit = 100                        // compile-time value
+const limit = 100
 
 fn add(a Point, b Point) Point {         // parameters are read-only
     ret Point{a.x + b.x, a.y + b.y}      // struct fields are positional
@@ -32,9 +32,9 @@ fn find(a [3]int, x int) ?int {          // may be absent
     ret none
 }
 
-fn main() {                              // required, no params, no result
+fn main() {                              // required
     x := 5                               // immutable, type inferred
-    y i32 = 7                            // explicit type
+    y i32 = 7
     mut s := 0                           // mutable
     for i in 0..10 { s += i }
     for s > 40 { s -= 1 }                // while
@@ -110,17 +110,17 @@ Always available: `push pop insert remove clear reserve swap sort has index_of`,
 ## Templates and modules
 
 ```claw
-use lib.geo                              // the file lib/geo.claw, known here as `geo`
+use lib.geo                              // lib/geo.claw, known as `geo`
 
 type Pair[A, B] { a A, b B }
 
-pub fn max[T](a T, b T) T {              // `pub` is visible from other modules
+pub fn max[T](a T, b T) T {              // visible to other modules
     if a > b { ret a }
     ret b
 }
 
 fn demo() {
-    print(max(1, 2))                     // types are worked out from the values
+    print(max(1, 2))                     // types inferred
     print(max[i32](1, 2))                // or written out
     p := Pair[int, f64]{1, 2.5}
     q := geo.make(3)                     // `module.name`
@@ -138,15 +138,15 @@ extern fn strlen(s *u8) u64              // any libSystem function; callable fro
 type Node { next *Node, v int }
 
 claw fn sum() int {
-    p := alloc[int](3)                   // n items on the heap; check-free pointer
-    defer free(p)                        // runs when this block ends, however it ends
+    p := alloc[int](3)                   // n items on the heap
+    defer free(p)                        // runs when this block ends
     p[0] = 1
-    q := p + 1                           // moves by whole items
+    q := p + 1
     *q = 2
     mut x := 5
     r := &x                              // `&` needs a `mut` variable
     *r += 1
-    n *Node = none                       // the null pointer
+    n *Node = none                       // null
     if n == none { print(strlen("hi")) }
     ret p[0] + p[1] + x
 }
@@ -159,4 +159,25 @@ raw pointers do not.
 
 In `claw fn`, `a.ptr`, `a.len`, `a.cap` of `[]T` and `str` are open to change.
 
-Not yet (`E0900`): generic variants, `test`.
+## Contracts, effects, tests
+
+```claw
+pub fn div(a int, b int) int +io
+    need b != 0                          // checked at every call
+    sure ret * b <= a                    // checked at every return; `old(x)` is x on entry
+{
+    ret a / b
+}
+
+test "div" {                             // run by `claw test`
+    sure div(6, 2) == 3                  // works in any body
+}
+```
+
+`+mem` allocates, `+io` touches the world. `pub` must declare them; private functions have them worked out.
+A contract only looks: no `&`, moves or effects. Inside one, integer `+ - *` in a comparison is exact.
+
+`claw run` and `claw test` check everything, including heap misuse and leaks in `claw fn`.
+`claw build` leaves out contracts that call functions.
+
+Not yet (`E0900`): generic variants.

@@ -5,6 +5,7 @@ mod ast;
 mod cir;
 mod codegen;
 mod diag;
+mod effects;
 mod fmt;
 mod lexer;
 mod lower;
@@ -22,7 +23,8 @@ use std::process::{exit, Command};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "claw run <file.claw>            compile with all checks and run
-claw build <file.claw> [-o out] compile to an executable
+claw test <file.claw>           run the file's `test` blocks with all checks
+claw build <file.claw> [-o out] compile to an executable; contracts with calls are left out
 claw check <file.claw>          report errors only
 claw fmt <file.claw> [--check]  put a file into the one standard format
 claw --version
@@ -81,24 +83,30 @@ fn report(o: &Options, mut diags: Vec<Diag>, files: &[String]) -> ! {
     exit(1);
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Build,
+    Run,
+    Test,
+}
+
 /// Runs the front end; never returns on a source error.
-fn compile_to_cir(o: &Options) -> (cir::Module, Vec<String>) {
-    let loaded = match modules::load(&o.file) {
+fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
+    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test };
+    let loaded = match modules::load(&o.file, opts.check) {
         Ok(l) => l,
         Err((diags, files)) => report(o, diags, &files),
     };
     let mut diags = Vec::new();
-    let checked = sema::check(&loaded.units, loaded.core, &mut diags);
+    let checked = sema::check(&loaded.units, loaded.core, mode == Mode::Test, &mut diags);
+    let slow = effects::check(&loaded.units, &checked, &mut diags);
     if !diags.is_empty() {
         report(o, diags, &loaded.files);
     }
-    let funcs = || loaded.units.iter().filter(|u| !u.is_std).flat_map(|u| u.program.funcs.iter());
-    let contracts: usize = funcs().map(|f| f.contracts.len()).sum();
-    let effects: usize = funcs().map(|f| f.effects.len()).sum();
-    if contracts + effects > 0 {
-        eprintln!("claw: note: {contracts} contracts and {effects} effects were parsed but NOT checked; checking arrives in 0.5");
+    if mode == Mode::Build && slow > 0 {
+        eprintln!("claw: note: {slow} checks that call functions are left out of this build; `claw run` and `claw test` do them");
     }
-    let module = lower::lower(&loaded.units, &checked, &loaded.base_names);
+    let module = lower::lower(&loaded.units, &checked, &loaded.base_names, opts);
     (module, loaded.base_names.clone())
 }
 
@@ -128,12 +136,16 @@ fn format_file(o: &Options) -> ! {
     exit(0);
 }
 
-fn compile(o: &Options, out: &Path) {
-    let (module, files) = compile_to_cir(o);
+fn compile(o: &Options, out: &Path, mode: Mode) {
+    let (module, files) = compile_to_cir(o, mode);
     if o.emit_cir {
         print!("{}", cir::dump(&module));
     }
-    let object = match codegen::generate(&module, &files, o.alloc_stats) {
+    emit(o, &module, &files, out);
+}
+
+fn emit(o: &Options, module: &cir::Module, files: &[String], out: &Path) {
+    let object = match codegen::generate(module, files, o.alloc_stats) {
         Ok(obj) => obj,
         Err(e) => {
             eprintln!("{}:1:1 {e}", o.file);
@@ -173,7 +185,7 @@ fn run(o: &Options) -> ! {
         exit(2);
     }
     let exe = dir.join(default_out(&o.file));
-    compile(o, &exe);
+    compile(o, &exe, Mode::Run);
     let status = Command::new(&exe).status();
     let _ = std::fs::remove_dir_all(&dir);
     match status {
@@ -186,6 +198,77 @@ fn run(o: &Options) -> ! {
             exit(2);
         }
     }
+}
+
+/// Longest a single test may run.
+const TEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Each test is its own process, so a trap in one cannot take the others down.
+fn run_one_test(exe: &Path, dir: &Path) -> Result<(), String> {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+    let (out_path, err_path) = (dir.join("out"), dir.join("err"));
+    let (out, err) = match (std::fs::File::create(&out_path), std::fs::File::create(&err_path)) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return Err("cannot capture the test's output".to_string()),
+    };
+    let mut child = Command::new(exe).stdout(Stdio::from(out)).stderr(Stdio::from(err)).spawn().map_err(|e| format!("cannot start: {e}"))?;
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if start.elapsed() > TEST_LIMIT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("still running after {} seconds", TEST_LIMIT.as_secs()));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_micros(200)),
+            Err(e) => return Err(format!("cannot wait for it: {e}")),
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut text = std::fs::read_to_string(&err_path).unwrap_or_default();
+    if text.is_empty() {
+        text = format!("stopped with exit code {}\n", status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0)));
+    }
+    let printed = std::fs::read_to_string(&out_path).unwrap_or_default();
+    if !printed.is_empty() {
+        text.push_str("printed:\n");
+        text.push_str(&printed);
+    }
+    Err(text)
+}
+
+fn test_all(o: &Options) -> ! {
+    let (mut module, files) = compile_to_cir(o, Mode::Test);
+    if module.tests.is_empty() {
+        eprintln!("claw: no `test` blocks in {}", o.file);
+        exit(1);
+    }
+    let dir = std::env::temp_dir().join(format!("claw-test-{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("claw: cannot create {}: {e}", dir.display());
+        exit(2);
+    }
+    let tests = module.tests.clone();
+    let mut failed = 0;
+    for (i, (name, id)) in tests.iter().enumerate() {
+        module.main = *id;
+        let exe = dir.join(format!("t{i}"));
+        emit(o, &module, &files, &exe);
+        if let Err(why) = run_one_test(&exe, &dir) {
+            failed += 1;
+            println!("FAIL {name}");
+            for line in why.lines() {
+                println!("  {line}");
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    println!("{} passed, {failed} failed", tests.len() - failed);
+    exit((failed > 0) as i32);
 }
 
 fn main() {
@@ -205,12 +288,13 @@ fn real_main() {
         Some("build") => {
             let o = parse_options(&args[1..]);
             let out = o.out.as_ref().map(PathBuf::from).unwrap_or_else(|| default_out(&o.file));
-            compile(&o, &out);
+            compile(&o, &out, Mode::Build);
         }
+        Some("test") => test_all(&parse_options(&args[1..])),
         Some("fmt") => format_file(&parse_options(&args[1..])),
         Some("check") => {
             let o = parse_options(&args[1..]);
-            compile_to_cir(&o);
+            compile_to_cir(&o, Mode::Build);
         }
         Some("__encoder-golden") => {
             for (word, text) in arm64::golden() {

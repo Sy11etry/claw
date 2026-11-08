@@ -1,0 +1,10 @@
+// expect: ab
+fn f() str +mem
+    sure len(ret) == 2
+{
+    ret copy("ab")
+}
+
+fn main() {
+    print(f())
+}

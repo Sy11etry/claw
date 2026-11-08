@@ -1,0 +1,11 @@
+// exit: 101
+// stderr: x = -1
+fn f(x f64) f64
+    need x >= 0.0
+{
+    ret x
+}
+
+fn main() {
+    print(f(-1.0))
+}

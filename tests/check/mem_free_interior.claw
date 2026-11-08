@@ -1,0 +1,6 @@
+// exit: 101
+// stderr: did not return
+claw fn main() {
+    p := alloc[int](2)
+    free(p + 1)
+}

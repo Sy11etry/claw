@@ -1,0 +1,12 @@
+// error: E0162
+type E = Bad
+
+fn f() ! E
+    sure ret
+{
+    ret
+}
+
+fn main() {
+    f()?
+}

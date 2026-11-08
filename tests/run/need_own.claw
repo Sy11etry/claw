@@ -1,0 +1,10 @@
+// expect: 2
+fn take(own s str) int
+    need len(s) > 0
+{
+    ret len(s)
+}
+
+fn main() {
+    print(take(copy("ab")))
+}

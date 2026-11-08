@@ -1,0 +1,11 @@
+// expect: 200000
+claw fn main() {
+    mut n := 0
+    for i in 0..200000 {
+        p := alloc[int](2)
+        p[1] = i
+        free(p)
+        n += 1
+    }
+    print(n)
+}

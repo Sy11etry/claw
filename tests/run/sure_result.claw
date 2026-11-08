@@ -1,0 +1,15 @@
+// expect: fail(Bad)
+// expect: 2
+type E = Bad
+
+fn f(x int) int ! E
+    sure ret > 0
+{
+    if x < 0 { fail Bad }
+    ret x
+}
+
+fn main() {
+    print(f(-1))
+    print(f(2))
+}

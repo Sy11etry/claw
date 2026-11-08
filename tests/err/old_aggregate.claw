@@ -1,0 +1,12 @@
+// error: E0163
+fn f(a &[]int)
+    sure len(a) == len(old(a))
+{
+    a = []
+}
+
+fn main() {
+    mut a []int = []
+    f(&a)
+    print(a)
+}

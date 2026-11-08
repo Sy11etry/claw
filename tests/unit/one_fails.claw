@@ -1,0 +1,16 @@
+// expect: FAIL wrong sum
+// expect:   trap: sure failed: `add(1, 2) == 4` at one_fails.claw:15:5
+// expect:     left = 3
+// expect: 1 passed, 1 failed
+// exit: 1
+fn add(a int, b int) int {
+    ret a + b
+}
+
+test "right" {
+    sure add(1, 2) == 3
+}
+
+test "wrong sum" {
+    sure add(1, 2) == 4
+}

@@ -1,0 +1,4 @@
+// expect: 1 passed, 0 failed
+test "alone" {
+    sure 1 + 1 == 2
+}

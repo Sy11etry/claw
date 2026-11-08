@@ -1,0 +1,17 @@
+// error: E0160
+fn a(n int) {
+    if n > 0 { b(n - 1) }
+}
+
+fn b(n int) {
+    a(n)
+    print(n)
+}
+
+pub fn f() {
+    a(1)
+}
+
+fn main() {
+    f()
+}

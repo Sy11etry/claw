@@ -1,0 +1,16 @@
+// error: E0160
+fn g() {
+    h()
+}
+
+fn h() {
+    print(1)
+}
+
+pub fn f() {
+    g()
+}
+
+fn main() {
+    f()
+}

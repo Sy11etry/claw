@@ -1,0 +1,5 @@
+pub fn half(x int) int
+    need x != 0
+{
+    ret x / 2
+}

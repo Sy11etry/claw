@@ -1,0 +1,12 @@
+// expect: 2
+const limit = 3
+
+fn f(x int) int
+    need x < limit
+{
+    ret x
+}
+
+fn main() {
+    print(f(2))
+}

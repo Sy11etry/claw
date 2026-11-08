@@ -25,6 +25,10 @@ const CAPTURE_FLAG: u64 = BUF_CAP + 8;
 /// Counters for `--alloc-stats`, the leak check used by the test suite.
 const ALLOC_COUNT: u64 = BUF_CAP + 16;
 const FREE_COUNT: u64 = BUF_CAP + 24;
+/// Words shared with the contract guard and the memory checker.
+const STATE: u64 = BUF_CAP + 32;
+const STATE_SIZE: u64 = 128;
+const SITE_WORD: u64 = 8;
 
 #[derive(Clone, Copy)]
 enum Target {
@@ -113,6 +117,7 @@ enum Trap {
     Convert,
     AllocSize,
     OutOfMemory,
+    ContractMath,
 }
 
 impl Trap {
@@ -125,6 +130,7 @@ impl Trap {
             Trap::Convert => "value does not fit the target type",
             Trap::AllocSize => "invalid allocation size",
             Trap::OutOfMemory => "out of memory",
+            Trap::ContractMath => "a number in a contract is too large even for exact arithmetic",
         }
     }
 }
@@ -876,6 +882,75 @@ impl Gen {
                 self.data_addr(X2, if *bits == 64 { fmts.0 } else { fmts.1 });
                 self.call(BL, Target::BufFloat);
             }
+            Inst::WideBin { op, dlo, dhi, alo, ahi, blo, bhi, loc } => {
+                self.load(fr, X9, *alo);
+                self.load(fr, X10, *ahi);
+                self.load(fr, X11, *blo);
+                self.load(fr, X12, *bhi);
+                match op {
+                    WideOp::Add => {
+                        self.e(adds(X13, X9, X11));
+                        self.e(adcs(X14, X10, X12));
+                        self.trap_if(Cond::Vs, Trap::ContractMath, *loc, traps);
+                    }
+                    WideOp::Sub => {
+                        self.e(subs(X13, X9, X11));
+                        self.e(sbcs(X14, X10, X12));
+                        self.trap_if(Cond::Vs, Trap::ContractMath, *loc, traps);
+                    }
+                    WideOp::Mul => {
+                        // Exact only while both sides fit in 64 signed bits.
+                        self.e(cmp_asr(X10, X9, 63));
+                        self.trap_if(Cond::Ne, Trap::ContractMath, *loc, traps);
+                        self.e(cmp_asr(X12, X11, 63));
+                        self.trap_if(Cond::Ne, Trap::ContractMath, *loc, traps);
+                        self.e(mul(X13, X9, X11));
+                        self.e(smulh(X14, X9, X11));
+                    }
+                }
+                self.store(fr, X13, *dlo);
+                self.store(fr, X14, *dhi);
+            }
+            Inst::WideCmp { cc, d, alo, ahi, blo, bhi } => {
+                // `a > b` is `b < a`: only LT and GE are valid after subs + sbcs.
+                let (x, y) = if matches!(cc, Cc::Gt | Cc::Le) { ((*blo, *bhi), (*alo, *ahi)) } else { ((*alo, *ahi), (*blo, *bhi)) };
+                self.load(fr, X9, x.0);
+                self.load(fr, X10, x.1);
+                self.load(fr, X11, y.0);
+                self.load(fr, X12, y.1);
+                let cond = match cc {
+                    Cc::Eq | Cc::Ne => {
+                        self.e(eor(X13, X9, X11));
+                        self.e(eor(X14, X10, X12));
+                        self.e(orr(X13, X13, X14));
+                        self.e(cmp_imm(X13, 0));
+                        if *cc == Cc::Eq { Cond::Eq } else { Cond::Ne }
+                    }
+                    _ => {
+                        self.e(subs(X13, X9, X11));
+                        self.e(sbcs(X14, X10, X12));
+                        if matches!(cc, Cc::Lt | Cc::Gt) { Cond::Lt } else { Cond::Ge }
+                    }
+                };
+                self.e(cset(X13, cond as u32));
+                self.store(fr, X13, *d);
+            }
+            Inst::RtState { d } => {
+                self.bss_addr(X9);
+                self.mov_imm(X16, STATE as i64);
+                self.e(add(X9, X9, X16));
+                self.store(fr, X9, *d);
+            }
+            Inst::SetSite { text } => {
+                let mut bytes = text.as_bytes().to_vec();
+                bytes.push(0);
+                let off = self.add_str(&bytes);
+                self.data_addr(X9, off);
+                self.bss_addr(X10);
+                self.mov_imm(X16, (STATE + SITE_WORD) as i64);
+                self.e(add(X10, X10, X16));
+                self.e(str(X9, X10, 0));
+            }
             Inst::Flush { fd } => {
                 self.e(movz(X0, *fd, 0));
                 self.call(BL, Target::Flush);
@@ -1145,12 +1220,12 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     if alloc_stats {
         g.bump_counter(ALLOC_COUNT);
     }
-    g.call(B, Target::Import(IMP_MALLOC));
+    g.call(B, m.check.map_or(Target::Import(IMP_MALLOC), |c| Target::User(c.alloc)));
     let rt_free = g.here();
     if alloc_stats {
         g.bump_counter(FREE_COUNT);
     }
-    g.call(B, Target::Import(IMP_FREE));
+    g.call(B, m.check.map_or(Target::Import(IMP_FREE), |c| Target::User(c.free)));
     let trap = g.rt_trap();
     let flush = g.rt_flush();
     let take = g.rt_take();
@@ -1179,6 +1254,9 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     g.e(stp_pre(FP, LR, SP, -16));
     g.e(mov_sp(FP, SP));
     g.call(BL, Target::User(m.main));
+    if let Some(c) = m.check {
+        g.call(BL, Target::User(c.finish));
+    }
     if alloc_stats {
         g.report_alloc_stats();
     }
@@ -1224,6 +1302,6 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         imports,
         symbols,
         entry,
-        bss_size: BUF_CAP + 32,
+        bss_size: STATE + STATE_SIZE,
     })
 }

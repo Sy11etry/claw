@@ -1,0 +1,6 @@
+// exit: 101
+// stderr: did not return
+claw fn main() {
+    mut x := 1
+    free(&x)
+}

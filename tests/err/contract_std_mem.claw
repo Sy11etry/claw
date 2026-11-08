@@ -1,0 +1,10 @@
+// error: E0161
+fn f(s str)
+    need len(trim(s)) > 0
+{
+    print(s)
+}
+
+fn main() {
+    f("a")
+}

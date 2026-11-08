@@ -1,0 +1,7 @@
+// expect: 7
+claw fn main() {
+    p := alloc[u8](100000000)
+    p[99999999] = 7
+    print(p[99999999])
+    free(p)
+}

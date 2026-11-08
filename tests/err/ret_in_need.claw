@@ -1,0 +1,10 @@
+// error: E0162
+fn f(x int) int
+    need ret > 0
+{
+    ret x
+}
+
+fn main() {
+    print(f(1))
+}

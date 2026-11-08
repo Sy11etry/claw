@@ -1,0 +1,13 @@
+// expect: 5
+claw fn f(a &int)
+    sure a == 5
+{
+    defer a = 5
+    a = 1
+}
+
+fn main() {
+    mut x := 0
+    f(&x)
+    print(x)
+}

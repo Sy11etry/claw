@@ -1,0 +1,8 @@
+// error: E0160
+pub fn show[T](x T) {
+    print(x)
+}
+
+fn main() {
+    show(1)
+}

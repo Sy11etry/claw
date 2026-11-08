@@ -11,6 +11,7 @@ pub const X10: Reg = 10;
 pub const X11: Reg = 11;
 pub const X12: Reg = 12;
 pub const X13: Reg = 13;
+pub const X14: Reg = 14;
 pub const X16: Reg = 16;
 pub const X19: Reg = 19;
 pub const X20: Reg = 20;
@@ -80,6 +81,12 @@ pub fn cmn_imm(rn: Reg, imm: u32) -> u32 {
 
 pub fn adds(rd: Reg, rn: Reg, rm: Reg) -> u32 {
     rrr(0xAB00_0000, rd, rn, rm)
+}
+pub fn adcs(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0xBA00_0000, rd, rn, rm)
+}
+pub fn sbcs(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0xFA00_0000, rd, rn, rm)
 }
 pub fn subs(rd: Reg, rn: Reg, rm: Reg) -> u32 {
     rrr(0xEB00_0000, rd, rn, rm)
@@ -340,6 +347,8 @@ pub fn golden() -> Vec<(u32, String)> {
         s(cmp_imm(X10, 64), "cmp x10, #64"),
         s(cmn_imm(X10, 1), "cmn x10, #1"),
         s(adds(X11, X9, X10), "adds x11, x9, x10"),
+        s(adcs(X14, X10, X12), "adcs x14, x10, x12"),
+        s(sbcs(X14, X10, X12), "sbcs x14, x10, x12"),
         s(subs(X11, X9, X10), "subs x11, x9, x10"),
         s(sub(X2, X2, X9), "sub x2, x2, x9"),
         s(cmp(X9, X10), "cmp x9, x10"),

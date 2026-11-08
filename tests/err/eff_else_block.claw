@@ -1,0 +1,16 @@
+// error: E0160
+fn g() ?int {
+    ret none
+}
+
+pub fn f() int {
+    x := g() else {
+        print(0)
+        ret 0
+    }
+    ret x
+}
+
+fn main() {
+    print(f())
+}

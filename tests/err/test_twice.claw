@@ -1,0 +1,9 @@
+// error: E0167
+test "a" {
+}
+
+test "a" {
+}
+
+fn main() {
+}

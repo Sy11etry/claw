@@ -1,0 +1,7 @@
+// exit: 101
+// stderr: at need_module.claw:6:11
+use lib.ctr
+
+fn main() {
+    print(ctr.half(0))
+}

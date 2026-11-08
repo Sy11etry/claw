@@ -1,0 +1,12 @@
+// expect: 6
+fn sum(a []int) int
+    sure ret == old(sum(a))
+{
+    mut t := 0
+    for x in a { t += x }
+    ret t
+}
+
+fn main() {
+    print(sum([1, 2, 3]))
+}

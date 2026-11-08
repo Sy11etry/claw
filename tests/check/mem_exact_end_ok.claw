@@ -1,0 +1,7 @@
+// expect: 1
+claw fn main() {
+    p := alloc[u8](3)
+    p[2] = 1
+    print(p[2])
+    free(p)
+}

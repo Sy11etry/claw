@@ -1,0 +1,5 @@
+// expect: 1 passed, 0 failed
+test "alloc in sure" {
+    sure join(["a", "b"], "-") == "a-b"
+    sure len(split("a,b", ",")) == 2
+}

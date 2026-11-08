@@ -1,0 +1,13 @@
+// exit: 101
+// stderr: need failed: `len(a) > 0` in first
+// stderr: a = []
+fn first(a []int) int
+    need len(a) > 0
+{
+    ret a[0]
+}
+
+fn main() {
+    b []int = []
+    print(first(b))
+}

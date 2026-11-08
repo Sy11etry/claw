@@ -1,0 +1,12 @@
+// expect: [1]
+fn add(a &[]int) +mem
+    sure len(a) == old(len(a)) + 1
+{
+    push(&a, 1)
+}
+
+fn main() {
+    mut a []int = []
+    add(&a)
+    print(a)
+}

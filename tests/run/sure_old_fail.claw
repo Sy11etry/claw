@@ -1,0 +1,13 @@
+// exit: 101
+// stderr: `a == old(a) + 1`
+// stderr: a = 3
+fn add_one(a &int)
+    sure a == old(a) + 1
+{
+    a += 2
+}
+
+fn main() {
+    mut x := 1
+    add_one(&x)
+}

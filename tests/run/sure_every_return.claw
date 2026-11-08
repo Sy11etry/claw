@@ -1,0 +1,13 @@
+// expect: 1
+// exit: 101
+fn f(x int) int
+    sure ret > 0
+{
+    if x == 0 { ret 1 }
+    ret -1
+}
+
+fn main() {
+    print(f(0))
+    print(f(1))
+}

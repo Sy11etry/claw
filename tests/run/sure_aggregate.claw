@@ -1,0 +1,12 @@
+// expect: P{3, 4}
+type P { x int, y int }
+
+fn f() P
+    sure ret.x == 3
+{
+    ret P{3, 4}
+}
+
+fn main() {
+    print(f())
+}

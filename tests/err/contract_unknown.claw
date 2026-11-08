@@ -1,0 +1,10 @@
+// error: E0101
+fn f(x int)
+    need y > 0
+{
+    print(x)
+}
+
+fn main() {
+    f(1)
+}

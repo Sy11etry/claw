@@ -1,0 +1,13 @@
+// expect: true
+// exit: 101
+// stderr: `a + b <= 9223372036854775807`
+fn fits(a int, b int) bool
+    need a + b <= 9223372036854775807
+{
+    ret true
+}
+
+fn main() {
+    print(fits(9223372036854775806, 1))
+    print(fits(9223372036854775807, 1))
+}

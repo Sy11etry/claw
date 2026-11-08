@@ -1,0 +1,14 @@
+// expect: 1
+fn n(s str) int {
+    ret len(s)
+}
+
+fn f(s str) int
+    sure ret == n(s)
+{
+    ret len(s)
+}
+
+fn main() {
+    print(f("a"))
+}

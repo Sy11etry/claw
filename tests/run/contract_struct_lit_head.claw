@@ -1,0 +1,19 @@
+// expect: 1
+type K = A | B
+
+fn f(k K) int
+    need k_ok(k)
+{
+    match k {
+        A: ret 1
+        B: ret 2
+    }
+}
+
+fn k_ok(_ K) bool {
+    ret true
+}
+
+fn main() {
+    print(f(A))
+}

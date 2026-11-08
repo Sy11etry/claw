@@ -1,0 +1,15 @@
+// error: E0164
+fn g(a &int) bool {
+    a = 1
+    ret true
+}
+
+fn f(x int)
+    need g(&x)
+{
+    print(x)
+}
+
+fn main() {
+    f(1)
+}

@@ -1,0 +1,15 @@
+// exit: 101
+// stderr: need failed: `no(x)` in f at contract_with_call_runs.claw:14:11
+fn no(_ int) bool {
+    ret false
+}
+
+fn f(x int) int
+    need no(x)
+{
+    ret x
+}
+
+fn main() {
+    print(f(1))
+}

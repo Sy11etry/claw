@@ -1,5 +1,6 @@
 // exit: 101
-// stderr: trap: index out of bounds at core.claw:
+// stderr: trap: need failed: `i >= 0 and i < len(a)` in remove at trap_remove.claw:6:11
+// stderr: i = 5
 fn main() {
     mut a []int = [1]
     print(remove(&a, 5))

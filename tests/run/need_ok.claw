@@ -1,0 +1,10 @@
+// expect: 3
+fn div(a int, b int) int
+    need b != 0
+{
+    ret a / b
+}
+
+fn main() {
+    print(div(6, 2))
+}

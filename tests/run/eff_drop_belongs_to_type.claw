@@ -1,0 +1,11 @@
+// expect: 7
+type F { n int }
+
+fn drop(x &F) +io {
+    print(x.n)
+}
+
+fn main() {
+    mut a []F = []
+    push(&a, F{7})
+}

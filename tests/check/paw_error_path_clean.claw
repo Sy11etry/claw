@@ -1,0 +1,11 @@
+// expect: x
+type E = Bad
+
+fn f() str ! E {
+    fail Bad
+}
+
+fn main() {
+    s := copy("x")
+    print(s)
+}

@@ -1,0 +1,8 @@
+// error: E0160
+fn g() +mem {
+    print(1)
+}
+
+fn main() {
+    g()
+}

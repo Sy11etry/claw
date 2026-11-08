@@ -1,0 +1,12 @@
+// expect: 2 passed, 0 failed
+fn add(a int, b int) int {
+    ret a + b
+}
+
+test "one" {
+    sure add(1, 2) == 3
+}
+
+test "two" {
+    sure add(2, 2) == 4
+}

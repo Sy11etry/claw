@@ -1,0 +1,10 @@
+// expect: true
+fn f(a u64) bool
+    need a + 1 > a
+{
+    ret true
+}
+
+fn main() {
+    print(f(18446744073709551615))
+}

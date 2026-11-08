@@ -1,0 +1,12 @@
+// error: E0166
+type F { n int }
+
+fn drop(x &F)
+    need x.n > 0
+{
+    print(x.n)
+}
+
+fn main() {
+    print(F{1})
+}

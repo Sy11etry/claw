@@ -1,0 +1,10 @@
+// expect: 2
+extern fn strlen(s *u8) u64
+
+pub claw fn f() int {
+    ret int(strlen("hi"))
+}
+
+fn main() {
+    print(f())
+}

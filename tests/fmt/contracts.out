@@ -1,0 +1,11 @@
+fn f(a int) int +mem
+    need a > 0
+    sure ret >= a
+{
+    sure a > 0
+    ret a
+}
+
+test "x" {
+    sure f(1) == 1
+}

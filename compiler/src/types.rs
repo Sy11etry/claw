@@ -180,6 +180,31 @@ impl Types {
         self.user_drop_in(t, &mut Vec::new())
     }
 
+    /// Every user-written `drop` that releasing a `t` could run.
+    pub fn user_drops(&self, t: Ty) -> Vec<String> {
+        let (mut out, mut seen) = (Vec::new(), Vec::new());
+        self.collect_drops(t, &mut out, &mut seen);
+        out
+    }
+
+    fn collect_drops(&self, t: Ty, out: &mut Vec<String>, seen: &mut Vec<Ty>) {
+        if seen.contains(&t) {
+            return;
+        }
+        seen.push(t);
+        out.extend(self.user_drop.get(&t).cloned());
+        let fields: Vec<Ty> = match self.kind(t) {
+            Kind::Struct(id) => self.structs[id].fields.iter().map(|f| f.ty).collect(),
+            Kind::Enum(id) => self.enums[id].variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect(),
+            Kind::Array(e, _) | Kind::Option(e) | Kind::Slice(e) => vec![e],
+            Kind::Result(a, b) => vec![a, b],
+            _ => Vec::new(),
+        };
+        for f in fields {
+            self.collect_drops(f, out, seen);
+        }
+    }
+
     /// `[]Tree` inside `Tree` is legal, so remember what has been looked at.
     fn user_drop_in(&self, t: Ty, seen: &mut Vec<Ty>) -> bool {
         if seen.contains(&t) {

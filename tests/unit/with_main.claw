@@ -1,0 +1,8 @@
+// expect: 1 passed, 0 failed
+test "t" {
+    sure true
+}
+
+fn main() {
+    print(1)
+}

@@ -37,6 +37,8 @@ struct Loader {
     in_progress: Vec<PathBuf>,
     diags: Vec<Diag>,
     core: Option<usize>,
+    /// Also load the memory checker written in Claw.
+    check: bool,
 }
 
 impl Loader {
@@ -58,6 +60,14 @@ impl Loader {
         };
         let name = path.to_string_lossy().into_owned();
         self.core = self.load(name, path, "core.".to_string(), Some(Span::default()));
+        if self.check {
+            let Some(path) = self.std_root.as_ref().map(|r| r.join("check_rt.claw")).filter(|p| p.is_file()) else {
+                eprintln!("claw: cannot find std/check_rt.claw next to the compiler");
+                std::process::exit(2);
+            };
+            let name = path.to_string_lossy().into_owned();
+            self.load(name, path, "__check.".to_string(), Some(Span::default()));
+        }
     }
 
     /// Returns the unit index, or None if the file could not be used.
@@ -91,7 +101,7 @@ impl Loader {
         if self.diags.len() > before {
             return None;
         }
-        let program = parser::Parser::new(toks, &mut self.diags).parse_program();
+        let program = parser::Parser::new(toks, &mut self.diags).with_source(&src).parse_program();
         if self.diags.len() > before {
             return None;
         }
@@ -142,7 +152,7 @@ fn find_std() -> Option<PathBuf> {
     repo.is_dir().then_some(repo)
 }
 
-pub fn load(root: &str) -> Result<Loaded, (Vec<Diag>, Vec<String>)> {
+pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)> {
     let mut l = Loader {
         std_root: find_std(),
         units: Vec::new(),
@@ -152,6 +162,7 @@ pub fn load(root: &str) -> Result<Loaded, (Vec<Diag>, Vec<String>)> {
         in_progress: Vec::new(),
         diags: Vec::new(),
         core: None,
+        check,
     };
     l.load(root.to_string(), PathBuf::from(root), String::new(), None);
     if !l.diags.is_empty() {

@@ -1,0 +1,14 @@
+// error: E0164
+fn g(own s str) bool {
+    ret len(s) > 0
+}
+
+fn f(own s str)
+    need g(s)
+{
+    print(s)
+}
+
+fn main() {
+    f("a")
+}

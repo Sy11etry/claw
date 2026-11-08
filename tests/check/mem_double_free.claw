@@ -1,0 +1,7 @@
+// exit: 101
+// stderr: trap: double free at mem_double_free.claw:6:5
+claw fn main() {
+    p := alloc[int](2)
+    free(p)
+    free(p)
+}

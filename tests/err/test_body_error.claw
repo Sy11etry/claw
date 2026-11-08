@@ -1,0 +1,7 @@
+// error: E0101
+test "a" {
+    print(nope)
+}
+
+fn main() {
+}

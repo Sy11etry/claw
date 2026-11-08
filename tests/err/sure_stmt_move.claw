@@ -1,0 +1,9 @@
+// error: E0164
+fn g(own s str) bool {
+    ret len(s) > 0
+}
+
+fn main() {
+    s := copy("a")
+    sure g(s)
+}

@@ -1,0 +1,10 @@
+// expect: true
+fn f(a int) bool
+    need -a > 0
+{
+    ret true
+}
+
+fn main() {
+    print(f(-9223372036854775807 - 1))
+}

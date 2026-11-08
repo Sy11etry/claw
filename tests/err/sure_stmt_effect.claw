@@ -1,0 +1,9 @@
+// error: E0161
+fn g() bool {
+    print(1)
+    ret true
+}
+
+fn main() {
+    sure g()
+}

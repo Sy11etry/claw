@@ -1,0 +1,12 @@
+// expect: 1
+fn g(own s str) int {
+    ret len(s)
+}
+
+pub fn f(own s str) int {
+    ret g(s)
+}
+
+fn main() {
+    print(f(copy("a")))
+}

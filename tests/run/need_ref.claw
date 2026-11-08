@@ -1,0 +1,16 @@
+// expect: 2
+// exit: 101
+// stderr: `a < 3`
+fn bump(a &int)
+    need a < 3
+{
+    a += 1
+}
+
+fn main() {
+    mut x := 1
+    bump(&x)
+    print(x)
+    x = 3
+    bump(&x)
+}

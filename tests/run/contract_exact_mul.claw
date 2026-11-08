@@ -1,0 +1,10 @@
+// expect: true
+fn f(a int, b int) bool
+    need a * b > 9223372036854775807
+{
+    ret true
+}
+
+fn main() {
+    print(f(9223372036854775807, 2))
+}

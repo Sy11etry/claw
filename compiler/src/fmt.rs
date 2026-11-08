@@ -218,7 +218,8 @@ pub fn format(src: &str) -> Result<String, Vec<Diag>> {
             return Err(sub);
         }
         let (leading_close, delta) = depth_change(&toks);
-        let contract = matches!(toks.first().map(|t| &t.tok), Some(Tok::Kw("need")) | Some(Tok::Kw("sure")));
+        // A clause of a signature, not a `sure` statement in a body.
+        let contract = depth == 0 && matches!(toks.first().map(|t| &t.tok), Some(Tok::Kw("need")) | Some(Tok::Kw("sure")));
         let indent = (depth - leading_close).max(0) + (continued || contract) as i32;
         out.push_str(&"    ".repeat(indent as usize));
         out.push_str(&text);
