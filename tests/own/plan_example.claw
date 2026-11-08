@@ -1,0 +1,14 @@
+// expect: 2
+// allocs-at-least: 2
+fn names() []str +mem {
+    mut a []str = []
+    push(&a, "cat")
+    ret a
+}
+
+fn main() {
+    a := names()
+    b := a
+    c := copy(b)
+    print(len(b) + len(c))
+}

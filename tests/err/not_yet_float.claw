@@ -1,5 +1,5 @@
 // error: E0900
+type Opt[T] = S{v T} | N
+
 fn main() {
-    a []int = []
-    print(len(a))
 }

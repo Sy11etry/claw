@@ -1,0 +1,29 @@
+// expect: y2
+// expect: x1
+// expect: 21
+// expect: P{2, b4}
+// expect: 2
+// allocs-at-least: 4
+fn main() {
+    mut a := "x{1}"
+    mut b := "y{2}"
+    swap(&a, &b)
+    print(a)
+    print(b)
+    mut n := 1
+    mut m := 2
+    swap(&n, &m)
+    print(n * 10 + m)
+    type_check()
+}
+
+type P { x int, y str }
+
+fn type_check() {
+    mut p := P{1, "a{3}"}
+    mut q := P{2, "b{4}"}
+    swap(&p, &q)
+    print(p)
+    swap(&p.x, &q.x)
+    print(q.x)
+}

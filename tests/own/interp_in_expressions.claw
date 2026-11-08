@@ -1,0 +1,15 @@
+// expect: <<a>>
+// expect: <5> done
+// expect: 2
+// allocs-at-least: 3
+fn wrap(s str) str {
+    ret "<{s}>"
+}
+
+fn main() {
+    print(wrap(wrap("a")))
+    x := 5
+    y := "{x}"
+    print("{wrap(y)} done")
+    print(len("{x}{x}"))
+}

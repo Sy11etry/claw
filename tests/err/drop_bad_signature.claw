@@ -1,0 +1,7 @@
+// error: E0156
+fn drop(x int) {
+    print(x)
+}
+
+fn main() {
+}

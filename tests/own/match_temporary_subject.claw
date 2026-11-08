@@ -1,0 +1,20 @@
+// expect: v1
+// expect: b
+// allocs-at-least: 1
+type T = A{s str} | B
+
+fn make(f bool) T {
+    if f { ret A{"v{1}"} }
+    ret B
+}
+
+fn main() {
+    match make(true) {
+        A{s}: print(s)
+        B: print("b")
+    }
+    match make(false) {
+        A{s}: print(s)
+        B: print("b")
+    }
+}

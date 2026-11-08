@@ -1,0 +1,58 @@
+// expect: a b
+// expect: 
+// expect: 
+// expect: [a, b, , c]
+// expect: 4
+// expect: [abc]
+// expect: []
+// expect: a-b--c
+// expect: xy
+// expect: true
+// expect: false
+// expect: true
+// expect: false
+// expect: true
+// expect: false
+// expect: 2
+// expect: none
+// expect: AZ1
+// expect: az1
+// expect: [a, b]
+// expect: 123
+// expect: -45
+// expect: fail(Empty)
+// expect: fail(Empty)
+// expect: fail(BadChar{2})
+// expect: 9223372036854775807
+// expect: fail(TooBig)
+// allocs-at-least: 5
+fn main() {
+    print(trim("  a b  "))
+    print(trim(""))
+    print(trim("   "))
+    p := split("a,b,,c", ",")
+    print(p)
+    print(len(p))
+    print(split("abc", "x"))
+    print(split("", ","))
+    print(join(p, "-"))
+    print(join(split("x y", " "), ""))
+    print(starts_with("hello", "he"))
+    print(starts_with("he", "hello"))
+    print(ends_with("hello", "lo"))
+    print(ends_with("lo", "hello"))
+    print(contains("hello", "ll"))
+    print(contains("hello", "z"))
+    print(find("hello", "l"))
+    print(find("hello", "z"))
+    print(upper("aZ1"))
+    print(lower("aZ1"))
+    print(lines("a\nb"))
+    print(to_int("123"))
+    print(to_int("-45"))
+    print(to_int(""))
+    print(to_int("-"))
+    print(to_int("12x"))
+    print(to_int("9223372036854775807"))
+    print(to_int("9223372036854775808"))
+}

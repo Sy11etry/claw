@@ -1,0 +1,46 @@
+// expect: 2
+// expect: tmp1
+// expect: 6
+// expect: yes
+// expect: 3
+// expect: 0
+// expect: 1
+// expect: 4
+// expect: 1
+// expect: true
+// allocs-at-least: 8
+type U { name str }
+
+fn make(n int) []int {
+    mut a []int = []
+    for i in 0..n { push(&a, i) }
+    ret a
+}
+
+fn user() U {
+    ret U{"tmp{1}"}
+}
+
+fn total(a []int) int {
+    mut s := 0
+    for x in a { s += x }
+    ret s
+}
+
+fn big(a []int) bool {
+    ret len(a) < 3
+}
+
+fn main() {
+    print(len(make(2)))
+    print(user().name)
+    print(total(make(4)))
+    if len(make(1)) > 0 { print("yes") }
+    mut i := 0
+    for big(make(i)) { i += 1 }
+    print(i)
+    for x in make(2) { print(x) }
+    print(total(make(2)) + total(make(3)))
+    print(make(3)[1])
+    print(len(make(2)) > 0 and total(make(1)) == 0)
+}

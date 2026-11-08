@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 #[derive(Clone)]
 pub struct FnSig {
     pub params: Vec<Ty>,
+    /// Which parameters take the value over (`own`).
+    pub own: Vec<bool>,
     pub ret: Ty,
     /// The C symbol, for `extern fn`.
     pub ext: Option<String>,
@@ -37,6 +39,10 @@ pub struct Checked {
 
 struct Var {
     ty: Ty,
+    /// Borrowed from elsewhere, so it can be read but never moved out.
+    view: bool,
+    /// A `&` parameter: writing to it is a use.
+    by_ref: bool,
     mutable: bool,
     read: bool,
     written: bool,
@@ -45,7 +51,7 @@ struct Var {
 }
 
 const BUILTINS: &[&str] = &[
-    "print", "len", "alloc", "free", "cast", "sizeof", "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
+    "print", "len", "copy", "alloc", "free", "cast", "sizeof", "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
 ];
 
 fn prim(name: &str) -> Option<Ty> {
@@ -87,6 +93,9 @@ struct Global<'a> {
     instance_of: HashMap<Ty, (usize, String, Vec<Ty>)>,
     spans: HashMap<Ty, Span>,
     layout_ready: bool,
+    funcs_ready: bool,
+    core: usize,
+    too_many: bool,
     depth: u32,
     work: Vec<(&'a Func, usize, Vec<Ty>, String)>,
 }
@@ -126,6 +135,20 @@ impl<'a> Global<'a> {
                     return ERR;
                 }
                 self.types.intern(Kind::Pointer(p))
+            }
+            TypeKind::Ref(inner) => {
+                let p = self.resolve(inner, diags);
+                if p == ERR {
+                    return ERR;
+                }
+                self.types.intern(Kind::Ref(p))
+            }
+            TypeKind::Slice(inner) => {
+                let p = self.resolve(inner, diags);
+                if p == ERR {
+                    return ERR;
+                }
+                self.types.intern(Kind::Slice(p))
             }
             TypeKind::Array(size, elem) => {
                 let n = match size {
@@ -178,8 +201,7 @@ impl<'a> Global<'a> {
                 return p;
             }
             if name == "str" {
-                diags.push(Diag::new("E0900", span, "type `str` is not available in claw 0.3"));
-                return ERR;
+                return STR;
             }
         }
         let m = match module {
@@ -226,9 +248,29 @@ impl<'a> Global<'a> {
                 ERR
             }
             None => {
+                // The always-available module, when nothing nearer has this name.
+                let core = self.core;
+                if module.is_none() && m != core {
+                    if let Some((NameDef::Type(ty), true)) = self.mods[core].names.get(name).copied() {
+                        return ty;
+                    }
+                }
                 diags.push(Diag::new("E0112", span, format!("unknown type `{name}`")));
                 ERR
             }
+        }
+    }
+
+    /// Hooks up a template's `drop` for one instance of its type.
+    fn attach_generic_drop(&mut self, ty: Ty, m: usize, type_name: &str, targs: Vec<Ty>, diags: &mut Vec<Diag>) {
+        let Some(&(Some(f), _)) = self.mods[m].funcs.get("drop") else { return };
+        let matches_type = f.params.first().is_some_and(|p| match &p.ty.kind {
+            TypeKind::Ref(inner) => matches!(&inner.kind, TypeKind::Name { name, .. } if name == type_name),
+            _ => false,
+        });
+        if matches_type && f.tparams.len() == targs.len() {
+            let full = self.instantiate_fn(f, m, targs, diags);
+            self.types.user_drop.insert(ty, full);
         }
     }
 
@@ -262,6 +304,10 @@ impl<'a> Global<'a> {
         self.types.structs[id].fields = resolved;
         if self.layout_ready {
             self.ensure_layout(ty, diags);
+        }
+        if self.funcs_ready {
+            let (type_name, args) = (d.name.clone(), self.instance_of[&ty].2.clone());
+            self.attach_generic_drop(ty, m, &type_name, args, diags);
         }
         ty
     }
@@ -344,7 +390,9 @@ impl<'a> Global<'a> {
             return full;
         }
         if self.work.len() >= MAX_INSTANCES || self.sigs.len() >= MAX_INSTANCES {
-            diags.push(Diag::new("E0145", f.name_span, format!("`{}` keeps instantiating itself with new types", f.name)));
+            if !std::mem::replace(&mut self.too_many, true) {
+                diags.push(Diag::new("E0145", f.name_span, format!("`{}` keeps instantiating itself with new types", f.name)));
+            }
             return full;
         }
         let tenv: HashMap<String, Ty> = f.tparams.iter().map(|p| p.0.clone()).zip(targs.iter().copied()).collect();
@@ -354,7 +402,8 @@ impl<'a> Global<'a> {
         let ret = f.ret.as_ref().map(|t| self.resolve(t, diags)).unwrap_or(VOID);
         self.tenv = saved_env;
         self.cur = saved_cur;
-        self.sigs.insert(full.clone(), FnSig { params, ret, ext: None, variadic: false });
+        let own = f.params.iter().map(|p| p.own).collect();
+        self.sigs.insert(full.clone(), FnSig { params, own, ret, ext: None, variadic: false });
         self.work.push((f, m, targs, full.clone()));
         full
     }
@@ -376,6 +425,16 @@ impl<'a> Global<'a> {
             }
             TypeKind::Pointer(x) => {
                 if let Kind::Pointer(t) = self.types.kind(a) {
+                    self.unify(x, t, bind, tparams);
+                }
+            }
+            TypeKind::Ref(x) => {
+                if let Kind::Ref(t) | Kind::Pointer(t) = self.types.kind(a) {
+                    self.unify(x, t, bind, tparams);
+                }
+            }
+            TypeKind::Slice(x) => {
+                if let Kind::Slice(t) = self.types.kind(a) {
                     self.unify(x, t, bind, tparams);
                 }
             }
@@ -409,7 +468,7 @@ impl<'a> Global<'a> {
         match self.types.kind(t) {
             Kind::Struct(id) => Some(self.types.structs[id].module),
             Kind::Enum(id) => Some(self.types.enums[id].module),
-            Kind::Pointer(p) => self.owner_of(p),
+            Kind::Pointer(p) | Kind::Ref(p) => self.owner_of(p),
             _ => None,
         }
     }
@@ -551,7 +610,7 @@ fn declare_types<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
                 check_case(n, true, "type parameter", *sp, diags);
             }
             if matches!(d.body, TypeBody::Variants(_)) {
-                diags.push(Diag::new("E0900", d.span, "generic variants are not available in claw 0.3; use a generic struct or `?T`"));
+                diags.push(Diag::new("E0900", d.span, "generic variants are not available in claw 0.4; use a generic struct or `?T`"));
             } else {
                 let m = &mut g.mods[g.cur];
                 if m.names.contains_key(&d.name) || m.gtypes.contains_key(&d.name) {
@@ -594,6 +653,9 @@ fn resolve_field_list(g: &mut Global, fields: &[FieldDecl], diags: &mut Vec<Diag
     let mut out: Vec<Field> = Vec::new();
     for f in fields {
         check_case(&f.name, false, "field", f.span, diags);
+        if matches!(f.ty.kind, TypeKind::Ref(_)) {
+            diags.push(Diag::new("E0157", f.span, "`&` is only for parameters; a struct cannot hold one"));
+        }
         if out.iter().any(|x| x.name == f.name) {
             diags.push(Diag::new("E0137", f.span, format!("field `{}` appears twice", f.name)));
         }
@@ -646,6 +708,17 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
         }
         let params: Vec<Ty> = f.params.iter().map(|x| g.resolve(&x.ty, diags)).collect();
         let ret = f.ret.as_ref().map(|t| g.resolve(t, diags)).unwrap_or(VOID);
+        if g.types.is_ref(ret) {
+            diags.push(Diag::new("E0157", f.name_span, "a function cannot return a `&`; return the value"));
+        }
+        if f.name == "drop" {
+            match params.first().map(|t| g.types.kind(*t)) {
+                Some(Kind::Ref(t)) if params.len() == 1 && matches!(g.types.kind(t), Kind::Struct(_) | Kind::Enum(_)) => {
+                    g.types.user_drop.insert(t, format!("{prefix}drop"));
+                }
+                _ => diags.push(Diag::new("E0156", f.name_span, "`drop` takes exactly one `&` parameter of a struct or variant type")),
+            }
+        }
         if !f.claw {
             let bad = f.params.iter().zip(&params).find(|(_, t)| g.types.is_ptr(**t)).map(|(x, _)| x.span);
             if let Some(span) = bad.or(if g.types.is_ptr(ret) { Some(f.name_span) } else { None }) {
@@ -653,7 +726,8 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
             }
         }
         g.mods[g.cur].funcs.insert(f.name.clone(), (None, f.public));
-        g.sigs.insert(format!("{prefix}{}", f.name), FnSig { params, ret, ext: None, variadic: false });
+        let own = f.params.iter().map(|p| p.own).collect();
+        g.sigs.insert(format!("{prefix}{}", f.name), FnSig { params, own, ret, ext: None, variadic: false });
     }
     for x in &p.externs {
         if g.mods[g.cur].funcs.contains_key(&x.name) || BUILTINS.contains(&x.name.as_str()) {
@@ -671,7 +745,9 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
             diags.push(Diag::new("E0149", x.span, "`extern fn` returns only numbers, bool and pointers"));
         }
         g.mods[g.cur].funcs.insert(x.name.clone(), (None, x.public));
-        g.sigs.insert(format!("{prefix}{}", x.name), FnSig { params, ret, ext: Some(x.name.clone()), variadic: x.variadic });
+        let symbol = x.symbol.clone().unwrap_or_else(|| x.name.clone());
+        let own = vec![false; params.len()];
+        g.sigs.insert(format!("{prefix}{}", x.name), FnSig { params, own, ret, ext: Some(symbol), variadic: x.variadic });
     }
 }
 
@@ -688,10 +764,21 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
         is_main,
         locks: Vec::new(),
         in_defer: false,
+        moved: HashMap::new(),
+        flows: Vec::new(),
     };
     for (x, ty) in f.params.iter().zip(sig.params) {
-        if x.name != "_" {
-            cx.declare(&x.name, ty, false, x.span, x.span);
+        if x.name == "_" {
+            continue;
+        }
+        let (t, view, mutable) = match cx.kind(ty) {
+            Kind::Ref(inner) => (inner, true, true),
+            _ => (ty, !x.own, false),
+        };
+        cx.declare(&x.name, t, mutable, x.span, x.span);
+        if let Some(v) = cx.lookup(&x.name) {
+            v.view = view;
+            v.by_ref = mutable;
         }
     }
     let ends = cx.block(&f.body);
@@ -702,7 +789,7 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
     }
 }
 
-pub fn check(units: &[Unit], diags: &mut Vec<Diag>) -> Checked {
+pub fn check(units: &[Unit], core: usize, diags: &mut Vec<Diag>) -> Checked {
     let mut g = Global {
         types: Types::new(),
         mods: units
@@ -724,6 +811,9 @@ pub fn check(units: &[Unit], diags: &mut Vec<Diag>) -> Checked {
         instance_of: HashMap::new(),
         spans: HashMap::new(),
         layout_ready: false,
+        funcs_ready: false,
+        core,
+        too_many: false,
         depth: 0,
         work: Vec::new(),
     };
@@ -750,6 +840,12 @@ pub fn check(units: &[Unit], diags: &mut Vec<Diag>) -> Checked {
     for (i, u) in units.iter().enumerate() {
         g.cur = i;
         collect_funcs(&mut g, &u.program, diags);
+    }
+
+    g.funcs_ready = true;
+    let existing: Vec<(Ty, (usize, String, Vec<Ty>))> = g.instance_of.iter().map(|(t, i)| (*t, i.clone())).collect();
+    for (ty, (m, name, targs)) in existing {
+        g.attach_generic_drop(ty, m, &name, targs, diags);
     }
 
     let root = units.len() - 1;
@@ -802,6 +898,94 @@ struct Ctx<'a, 'b> {
     /// Arrays being walked by an enclosing `for ... in`.
     locks: Vec<String>,
     in_defer: bool,
+    /// Variables whose value has left, and where it left.
+    moved: HashMap<String, Span>,
+    flows: Vec<LoopFlow>,
+}
+
+/// What `moved` looked like at each jump out of a loop body.
+#[derive(Default)]
+struct LoopFlow {
+    breaks: Vec<HashMap<String, Span>>,
+    conts: Vec<HashMap<String, Span>>,
+}
+
+/// One step of a path like `a.b[i]`, for spotting overlapping uses.
+#[derive(Clone, PartialEq)]
+enum Comp {
+    Field(String),
+    Index,
+}
+
+fn path_of(e: &Expr) -> Option<(String, Vec<Comp>)> {
+    match &e.kind {
+        ExprKind::Var(n) => Some((n.clone(), Vec::new())),
+        ExprKind::Field { e: b, name, .. } => {
+            let (r, mut c) = path_of(b)?;
+            c.push(Comp::Field(name.clone()));
+            Some((r, c))
+        }
+        ExprKind::Index { e: b, .. } | ExprKind::Slice { e: b, .. } => {
+            let (r, mut c) = path_of(b)?;
+            c.push(Comp::Index);
+            Some((r, c))
+        }
+        _ => None,
+    }
+}
+
+/// Could these two paths touch the same memory?
+fn overlap(a: &(String, Vec<Comp>), b: &(String, Vec<Comp>)) -> bool {
+    a.0 == b.0 && a.1.iter().zip(&b.1).all(|(x, y)| x == y)
+}
+
+/// Visits an expression and everything nested in it.
+fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    match &e.kind {
+        ExprKind::Unary { e: x, .. } | ExprKind::AddrOf(x) | ExprKind::Deref(x) | ExprKind::Field { e: x, .. } | ExprKind::Try(x) | ExprKind::ArrayFill(x) => walk(x, f),
+        ExprKind::Binary { l, r, .. } => {
+            walk(l, f);
+            walk(r, f);
+        }
+        ExprKind::Index { e: x, i } => {
+            walk(x, f);
+            walk(i, f);
+        }
+        ExprKind::Slice { e: x, lo, hi } => {
+            walk(x, f);
+            for b in [lo, hi].into_iter().flatten() {
+                walk(b, f);
+            }
+        }
+        ExprKind::Call { args, .. } | ExprKind::StructLit { args, .. } | ExprKind::ArrayLit(args) => {
+            for a in args {
+                walk(a, f);
+            }
+        }
+        ExprKind::Interp(parts) => {
+            for p in parts {
+                if let Part::Expr(x) = p {
+                    walk(x, f);
+                }
+            }
+        }
+        ExprKind::Else { e: x, handler } => {
+            walk(x, f);
+            if let ElseKind::Value(v) = handler {
+                walk(v, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mutable_paths(e: &Expr, out: &mut Vec<(String, Vec<Comp>)>) {
+    walk(e, &mut |x| {
+        if let ExprKind::AddrOf(inner) = &x.kind {
+            out.extend(path_of(inner));
+        }
+    });
 }
 
 fn is_lit(e: &Expr) -> bool {
@@ -827,7 +1011,7 @@ fn mentions_unbound(p: &TypeExpr, bind: &HashMap<String, Ty>, tparams: &[(String
     let rec = |x: &TypeExpr| mentions_unbound(x, bind, tparams);
     match &p.kind {
         TypeKind::Name { name, targs, .. } => (tparams.iter().any(|t| t.0 == *name) && !bind.contains_key(name)) || targs.iter().any(rec),
-        TypeKind::Pointer(x) | TypeKind::Array(_, x) | TypeKind::Option(x) => rec(x),
+        TypeKind::Pointer(x) | TypeKind::Ref(x) | TypeKind::Slice(x) | TypeKind::Array(_, x) | TypeKind::Option(x) => rec(x),
         TypeKind::Result(ok, err) => ok.as_deref().is_some_and(rec) || rec(err),
     }
 }
@@ -889,22 +1073,24 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if taken {
             self.diags.push(Diag::new("E0102", span, format!("`{name}` is already defined; names cannot be reused or hidden")));
             if self.lookup(name).is_none() {
-                let v = Var { ty, mutable, read: true, written: true, span, decl };
+                let v = Var { ty, view: false, by_ref: false, mutable, read: true, written: true, span, decl };
                 self.scopes.last_mut().unwrap().insert(name.to_string(), v);
             }
             return;
         }
-        let v = Var { ty, mutable, read: false, written: false, span, decl };
+        self.moved.remove(name);
+        let v = Var { ty, view: false, by_ref: false, mutable, read: false, written: false, span, decl };
         self.scopes.last_mut().unwrap().insert(name.to_string(), v);
     }
 
     fn pop_scope(&mut self) {
         let scope = self.scopes.pop().unwrap();
         for (name, v) in scope {
-            if !v.read {
+            self.moved.remove(&name);
+            if !v.read && !(v.by_ref && v.written) {
                 let d = Diag::new("E0105", v.span, format!("`{name}` is never read")).fix(v.span, "_", format!("rename `{name}` to `_`"));
                 self.diags.push(d);
-            } else if v.mutable && !v.written {
+            } else if v.mutable && !v.written && !v.by_ref {
                 let d = Diag::new("E0116", v.span, format!("`{name}` is `mut` but never changes")).fix(v.decl, "", "remove `mut`");
                 self.diags.push(d);
             }
@@ -941,6 +1127,21 @@ impl<'a, 'b> Ctx<'a, 'b> {
     }
 
     fn accept(&mut self, e: &Expr, got: Ty, want: Ty) {
+        if let Kind::Ref(inner) = self.kind(want) {
+            if self.kind(got) == Kind::Pointer(inner) && matches!(e.kind, ExprKind::AddrOf(_)) {
+                return;
+            }
+            if got == inner {
+                let d = Diag::new("E0157", e.span, "this parameter changes the value, so write `&` here").fix(e.span, "&", "add `&`");
+                self.diags.push(d);
+                if let ExprKind::Var(n) = &e.kind {
+                    if let Some(v) = self.lookup(n) {
+                        v.written = true;
+                    }
+                }
+                return;
+            }
+        }
         if got == want || got == ERR || want == ERR {
             return;
         }
@@ -972,7 +1173,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
     fn value_type(&mut self, span: Span, ty: Ty) -> Ty {
         match self.kind(ty) {
             Kind::Void => self.err("E0104", span, "this has no value"),
-            Kind::StrLit => self.err("E0900", span, "strings outside `print` are not available in claw 0.3"),
+            Kind::StrLit => self.err("E0900", span, "this string form only works directly inside `print`"),
+            Kind::Ref(_) => self.err("E0157", span, "`&x` only works as an argument to a `&` parameter"),
             _ => ty,
         }
     }
@@ -998,6 +1200,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
             ExprKind::Index { e: base, i } => {
                 let b = self.place_base(base);
+                if b == STR {
+                    self.expr(i, Some(INT));
+                    return self.err("E0131", e.span, "a `str` cannot be changed in place");
+                }
                 self.index_type(b, i, base.span)
             }
             ExprKind::Deref(inner) => self.deref_type(e, inner),
@@ -1043,6 +1249,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
             _ => base,
         };
         match self.kind(base) {
+            Kind::Slice(_) | Kind::Str if self.func.claw => match (name, self.kind(base)) {
+                ("ptr", Kind::Slice(e)) => self.g.types.intern(Kind::Pointer(e)),
+                ("ptr", _) => self.g.types.intern(Kind::Pointer(U8)),
+                ("len", _) | ("cap", _) => INT,
+                _ => self.err("E0129", span, format!("{} has only `ptr`, `len` and `cap`", self.g.types.name(base))),
+            },
             Kind::Struct(id) => match self.g.types.structs[id].fields.iter().find(|f| f.name == name) {
                 Some(f) => f.ty,
                 None => {
@@ -1061,7 +1273,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
     fn index_type(&mut self, base: Ty, i: &Expr, base_span: Span) -> Ty {
         self.check(i, INT);
         match self.kind(base) {
-            Kind::Pointer(elem) => elem,
+            Kind::Pointer(elem) | Kind::Slice(elem) => elem,
+            Kind::Str => U8,
             Kind::Array(elem, n) => {
                 if let ExprKind::Int(v) = i.kind {
                     if v < 0 || v >= n as i128 {
@@ -1096,6 +1309,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                         self.value_type(init.span, got)
                     }
                 };
+                self.consume(init);
                 let decl = if *mutable {
                     Span { start: s.span.start, end: name_span.start, line: s.span.line, col: s.span.col, file: s.span.file }
                 } else {
@@ -1127,6 +1341,22 @@ impl<'a, 'b> Ctx<'a, 'b> {
                         }
                     }
                 }
+                if !matches!(target.kind, ExprKind::Var(_)) {
+                    if let Some(root) = root_name(target) {
+                        let root = root.to_string();
+                        self.check_live(&root, target.span);
+                    }
+                }
+                if !self.func.claw {
+                    // `a[i] = g(&a)`: g could move the very memory being assigned to.
+                    let mut muts = Vec::new();
+                    mutable_paths(value, &mut muts);
+                    if let Some(p) = path_of(target) {
+                        if muts.iter().any(|m| overlap(m, &p)) {
+                            self.diags.push(Diag::new("E0158", value.span, format!("`{}` is being assigned and changed at once", p.0)));
+                        }
+                    }
+                }
                 if let Some(o) = op {
                     if self.g.types.is_ptr(ty) {
                         if !matches!(o, BinOp::Add | BinOp::Sub) {
@@ -1143,6 +1373,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     }
                 }
                 self.check(value, ty);
+                self.consume(value);
+                if let ExprKind::Var(n) = &target.kind {
+                    self.moved.remove(n);
+                }
                 false
             }
             StmtKind::Discard(e) => {
@@ -1168,18 +1402,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
             StmtKind::If { cond, then, els } => {
                 self.check(cond, BOOL);
+                let before = self.moved.clone();
                 let a = self.block(then);
-                match els {
+                let after_then = std::mem::replace(&mut self.moved, before);
+                let c = match els {
                     None => false,
-                    Some(Else::Block(b)) => {
-                        let c = self.block(b);
-                        a && c
-                    }
-                    Some(Else::If(i)) => {
-                        let c = self.stmt(i);
-                        a && c
-                    }
-                }
+                    Some(Else::Block(b)) => self.block(b),
+                    Some(Else::If(i)) => self.stmt(i),
+                };
+                self.join_flow(a, after_then, c);
+                a && c
             }
             StmtKind::ForRange { var, var_span, start, end, body } => {
                 self.check(start, INT);
@@ -1188,14 +1420,15 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if var != "_" {
                     self.declare(var, INT, false, *var_span, *var_span);
                 }
-                self.loop_body(body);
+                self.loop_body(body, false);
                 self.pop_scope();
                 false
             }
             StmtKind::ForIn { elem, elem_span, index, subject, body } => {
                 let t = self.expr(subject, None);
                 let elem_ty = match self.kind(t) {
-                    Kind::Array(e, _) => e,
+                    Kind::Array(e, _) | Kind::Slice(e) => e,
+                    Kind::Str => U8,
                     Kind::Err => ERR,
                     _ => {
                         let n = self.tname(t);
@@ -1205,6 +1438,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 self.scopes.push(HashMap::new());
                 if elem != "_" {
                     self.declare(elem, elem_ty, false, *elem_span, *elem_span);
+                    if let Some(v) = self.lookup(elem) {
+                        v.view = true;
+                    }
                 }
                 if let Some((n, sp)) = index {
                     if n != "_" {
@@ -1216,7 +1452,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if let Some(r) = root {
                     self.locks.push(r);
                 }
-                self.loop_body(body);
+                self.loop_body(body, false);
                 if locked {
                     self.locks.pop();
                 }
@@ -1225,11 +1461,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
             StmtKind::ForCond { cond, body } => {
                 self.check(cond, BOOL);
-                self.loop_body(body);
+                self.loop_body(body, false);
                 false
             }
             StmtKind::ForEver { body } => {
-                self.loop_body(body);
+                self.loop_body(body, true);
                 !has_break(body)
             }
             StmtKind::Match { subject, arms } => self.match_stmt(s.span, subject, arms),
@@ -1240,7 +1476,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 let (loops, was) = (self.loops, self.in_defer);
                 self.loops = 0;
                 self.in_defer = true;
+                let before = self.moved.clone();
                 self.block(body);
+                if let Some((name, span)) = self.moved.iter().find(|(n, _)| !before.contains_key(*n)).map(|(n, s)| (n.clone(), *s)) {
+                    self.diags.push(Diag::new("E0151", span, format!("`defer` cannot move `{name}`: it runs after everything else")));
+                }
+                self.moved = before;
                 self.loops = loops;
                 self.in_defer = was;
                 false
@@ -1256,6 +1497,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                             self.diags.push(Diag::new("E0104", e.span, "this function returns nothing; write `ret` alone"));
                         } else {
                             self.check(e, self.ret);
+                            self.consume(e);
                         }
                     }
                     None => {
@@ -1273,7 +1515,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     self.diags.push(Diag::new("E0143", s.span, "`defer` cannot leave the function"));
                 }
                 match self.kind(self.ret) {
-                    Kind::Result(_, err) => self.check(e, err),
+                    Kind::Result(_, err) => {
+                        self.check(e, err);
+                        self.consume(e);
+                    }
                     Kind::Err => {
                         self.expr(e, None);
                     }
@@ -1288,15 +1533,100 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if self.loops == 0 {
                     self.diags.push(Diag::new("E0108", s.span, "`break` and `continue` only work inside `for`"));
                 }
+                let state = self.moved.clone();
+                if let Some(f) = self.flows.last_mut() {
+                    if matches!(s.kind, StmtKind::Break) {
+                        f.breaks.push(state);
+                    } else {
+                        f.conts.push(state);
+                    }
+                }
                 true
             }
         }
     }
 
-    fn loop_body(&mut self, body: &Block) {
+    fn loop_body(&mut self, body: &Block, forever: bool) {
+        let entry = self.moved.clone();
+        self.flows.push(LoopFlow::default());
         self.loops += 1;
-        self.block(body);
+        let ends = self.block(body);
         self.loops -= 1;
+        let flow = self.flows.pop().unwrap();
+
+        // What has left by the time the loop comes around again.
+        let mut back = if ends { HashMap::new() } else { std::mem::take(&mut self.moved) };
+        for c in flow.conts {
+            back.extend(c);
+        }
+        let mut again: Vec<(String, Span)> = back.iter().filter(|(n, _)| !entry.contains_key(*n)).map(|(n, s)| (n.clone(), *s)).collect();
+        again.sort_by_key(|x| x.1.start);
+        for (name, span) in again {
+            if self.lookup(&name).is_some() {
+                let d = Diag::new("E0151", span, format!("`{name}` moves here on every pass of the loop")).fix(span, format!("copy({name})"), format!("write `copy({name})`"));
+                self.diags.push(d);
+            }
+        }
+        let mut out = if forever { HashMap::new() } else { entry };
+        if !forever {
+            out.extend(back);
+        }
+        for b in flow.breaks {
+            out.extend(b);
+        }
+        self.moved = out;
+    }
+
+    /// After two branches: anything moved on a path that continues counts as moved.
+    fn join_flow(&mut self, first_ends: bool, first: HashMap<String, Span>, second_ends: bool) {
+        if first_ends {
+            return;
+        }
+        if second_ends {
+            self.moved = first;
+        } else {
+            self.moved.extend(first);
+        }
+    }
+
+    fn check_live(&mut self, name: &str, span: Span) {
+        if let Some(at) = self.moved.remove(name) {
+            let d = Diag::new("E0151", span, format!("`{name}` was moved away at line {}", at.line)).fix(at, format!("copy({name})"), format!("write `copy({name})` there"));
+            self.diags.push(d);
+        }
+    }
+
+    /// `e` is being taken over by something else. Only whole local variables can go.
+    fn consume(&mut self, e: &Expr) {
+        let t = e.ty.get();
+        if t == ERR || !self.g.types.needs_drop(t) {
+            return;
+        }
+        match &e.kind {
+            ExprKind::Var(n) => {
+                let Some(view) = self.lookup(n).map(|v| v.view) else { return };
+                if view {
+                    let d = Diag::new("E0152", e.span, format!("`{n}` is borrowed here, so it cannot be moved away")).fix(e.span, format!("copy({n})"), format!("write `copy({n})`"));
+                    self.diags.push(d);
+                    return;
+                }
+                if self.locks.contains(n) {
+                    self.diags.push(Diag::new("E0122", e.span, format!("`{n}` cannot move while it is being walked or matched")));
+                    return;
+                }
+                self.moved.insert(n.clone(), e.span);
+            }
+            ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Deref(_) => {
+                if self.func.claw && matches!(root_of(e, &self.g.types), Root::Through) {
+                    return; // Raw memory: moving it out is the programmer's business.
+                }
+                self.diags.push(Diag::new("E0152", e.span, "only a whole variable can be moved; write `copy(...)`, or use `remove` or `swap`"));
+            }
+            ExprKind::Slice { .. } => {
+                self.diags.push(Diag::new("E0152", e.span, "a slice only borrows; write `copy(...)` to keep it"));
+            }
+            _ => {}
+        }
     }
 
     fn match_stmt(&mut self, span: Span, subject: &Expr, arms: &[Arm]) -> bool {
@@ -1317,7 +1647,15 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
         }
 
+        let root = root_name(subject).map(|n| n.to_string()).filter(|_| self.g.types.needs_drop(t));
+        let locked = root.is_some();
+        if let Some(r) = root {
+            self.locks.push(r);
+        }
+        let before = self.moved.clone();
+        let mut joined: Option<HashMap<String, Span>> = None;
         for arm in arms {
+            self.moved = before.clone();
             if wild {
                 self.diags.push(Diag::new("E0113", arm.span, "this arm can never run: `_` above catches everything"));
             }
@@ -1355,6 +1693,13 @@ impl<'a, 'b> Ctx<'a, 'b> {
             let ends = self.block(&arm.body);
             all_end &= ends;
             self.pop_scope();
+            if !ends {
+                joined.get_or_insert_with(HashMap::new).extend(self.moved.clone());
+            }
+        }
+        self.moved = joined.unwrap_or(before);
+        if locked {
+            self.locks.pop();
         }
 
         let exhaustive = wild
@@ -1418,6 +1763,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
         for ((b, sp), f) in binds.iter().zip(fields) {
             if b != "_" {
                 self.declare(b, f.ty, false, *sp, *sp);
+                if let Some(v) = self.lookup(b) {
+                    v.view = true;
+                }
             }
         }
     }
@@ -1461,10 +1809,18 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if hint == Some(bytes) {
                     bytes
                 } else {
-                    STRLIT
+                    STR
                 }
             }
-            ExprKind::Interp(_) => STRLIT,
+            ExprKind::Interp(parts) => {
+                for p in parts {
+                    if let Part::Expr(x) = p {
+                        let t = self.expr(x, None);
+                        self.value_type(x.span, t);
+                    }
+                }
+                STR
+            }
             ExprKind::None => match hint.map(|h| self.kind(h)) {
                 Some(Kind::Option(_)) | Some(Kind::Pointer(_)) => hint.unwrap(),
                 Some(Kind::Err) => ERR,
@@ -1472,7 +1828,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             },
             ExprKind::RetVal => ERR,
             ExprKind::Var(name) => self.var(e, name),
-            ExprKind::AddrOf(inner) => self.addr_of(e, inner),
+            ExprKind::AddrOf(inner) => self.addr_of(e, inner, hint),
             ExprKind::Deref(inner) => self.deref_type(e, inner),
             ExprKind::Unary { op, e: inner } => self.unary(e, *op, inner, num_hint),
             ExprKind::Binary { op, l, r } => self.binary(*op, l, r, num_hint),
@@ -1482,6 +1838,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
             ExprKind::ArrayFill(item) => match num_hint.map(|h| self.kind(h)) {
                 Some(Kind::Array(elem, _)) => {
                     self.check(item, elem);
+                    if self.g.types.needs_drop(elem) {
+                        self.diags.push(Diag::new("E0153", item.span, "`[x...]` would share one owner between many items; build the array item by item"));
+                    }
                     num_hint.unwrap()
                 }
                 Some(Kind::Err) => {
@@ -1507,13 +1866,29 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 let b = self.expr(base, None);
                 self.index_type(b, i, base.span)
             }
+            ExprKind::Slice { e: base, lo, hi } => {
+                let b = self.expr(base, None);
+                for x in [lo, hi].into_iter().flatten() {
+                    self.check(x, INT);
+                }
+                match self.kind(b) {
+                    Kind::Array(el, _) => self.g.types.intern(Kind::Slice(el)),
+                    Kind::Slice(_) | Kind::Str | Kind::Err => b,
+                    _ => {
+                        let n = self.tname(b);
+                        self.err("E0129", base.span, format!("{n} cannot be sliced"))
+                    }
+                }
+            }
             ExprKind::Try(inner) => self.try_expr(e, inner),
             ExprKind::Else { e: inner, handler } => self.else_expr(e, inner, handler),
         }
     }
 
     fn var(&mut self, e: &Expr, name: &str) -> Ty {
-        if let Some(v) = self.lookup(name) {
+        if self.lookup(name).is_some() {
+            self.check_live(name, e.span);
+            let v = self.lookup(name).unwrap();
             v.read = true;
             return v.ty;
         }
@@ -1553,10 +1928,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
-    fn addr_of(&mut self, e: &Expr, inner: &Expr) -> Ty {
+    fn addr_of(&mut self, e: &Expr, inner: &Expr, hint: Option<Ty>) -> Ty {
         if !self.func.claw {
-            self.expr(inner, None);
-            return self.err("E0900", e.span, "`&` in an ordinary `fn` is not available in claw 0.3; use `claw fn`");
+            if !matches!(hint.map(|h| self.g.types.kind(h)), Some(Kind::Ref(_)) | None) {
+                self.expr(inner, None);
+                return self.err("E0157", e.span, "`&x` only works as an argument to a `&` parameter");
+            }
         }
         if !matches!(inner.kind, ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Deref(_)) {
             self.expr(inner, None);
@@ -1565,6 +1942,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let t = self.place(inner);
         match root_of(inner, &self.g.types) {
             Root::Var(root) => {
+                self.check_live(&root, inner.span);
+                if self.locks.contains(&root) {
+                    self.diags.push(Diag::new("E0122", inner.span, format!("`{root}` cannot change while it is being walked or matched")));
+                }
                 let info = self.lookup(&root).map(|v| (v.mutable, v.decl));
                 if let Some((mutable, decl)) = info {
                     if !mutable {
@@ -1587,7 +1968,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if t == ERR {
             return ERR;
         }
-        self.g.types.intern(Kind::Pointer(t))
+        let wants_ref = matches!(hint.map(|h| self.g.types.kind(h)), Some(Kind::Ref(_)));
+        if self.func.claw && !wants_ref {
+            self.g.types.intern(Kind::Pointer(t))
+        } else {
+            self.g.types.intern(Kind::Ref(t))
+        }
     }
 
     fn unary(&mut self, e: &Expr, op: UnOp, inner: &Expr, hint: Option<Ty>) -> Ty {
@@ -1641,7 +2027,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 let (a, b) = self.operands(l, r, None);
                 if a != b {
                     self.mismatch(r.span, b, a);
-                } else if a != ERR && !self.g.types.is_num(a) && a != BOOL && !self.g.types.is_ptr(a) {
+                } else if a != ERR && !self.g.types.is_num(a) && a != BOOL && !self.g.types.is_ptr(a) && a != STR {
                     let n = self.tname(a);
                     self.diags.push(Diag::new("E0104", l.span, format!("`{}` works on numbers and bool, not {n}; use `match`", op.text())));
                 }
@@ -1651,7 +2037,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 let (a, b) = self.operands(l, r, None);
                 if a != b {
                     self.mismatch(r.span, b, a);
-                } else if a != ERR && !self.g.types.is_num(a) && !self.g.types.is_ptr(a) {
+                } else if a != ERR && !self.g.types.is_num(a) && !self.g.types.is_ptr(a) && a != STR {
                     let n = self.tname(a);
                     self.diags.push(Diag::new("E0104", l.span, format!("`{}` needs numbers, found {n}", op.text())));
                 }
@@ -1723,12 +2109,24 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
                 let t = self.expr(&args[0], None);
                 match self.kind(t) {
-                    Kind::Array(..) | Kind::Err => INT,
+                    Kind::Array(..) | Kind::Slice(_) | Kind::Str | Kind::Err => INT,
                     _ => {
                         let n = self.tname(t);
                         self.err("E0104", args[0].span, format!("`len` needs an array, found {n}"))
                     }
                 }
+            }
+            "copy" => {
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, format!("`copy` takes 1 value, found {}", args.len())));
+                }
+                let t = self.expr(&args[0], None);
+                let t = self.value_type(args[0].span, t);
+                if t != ERR && self.g.types.has_user_drop(t) {
+                    let n = self.tname(t);
+                    return Some(self.err("E0154", span, format!("{n} has its own `drop`, so the compiler cannot copy it")));
+                }
+                t
             }
             "sizeof" => {
                 let Some(t) = self.one_targ(name, span, targs) else { return Some(ERR) };
@@ -1901,7 +2299,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     first = Some(t);
                     found = self.g.owner_of(t).filter(|m| self.g.mods[*m].funcs.get(name).is_some_and(|f| f.1));
                 }
-                found
+                // Last, the module every program can see without importing it.
+                let core = self.g.core;
+                found.or(self.g.mods[core].funcs.get(name).filter(|f| f.1).map(|_| core))
             }
         };
         let entry = target.and_then(|m| self.g.mods[m].funcs.get(name).copied().map(|f| (m, f)));
@@ -1918,6 +2318,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
         };
         if !public && m != cur {
             self.diags.push(Diag::new("E0147", span, private_msg(name)));
+        }
+        if name == "drop" {
+            self.diags.push(Diag::new("E0156", span, "`drop` runs by itself; it cannot be called"));
         }
 
         let (full, got) = if let Some(f) = generic {
@@ -1959,6 +2362,14 @@ impl<'a, 'b> Ctx<'a, 'b> {
             self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", sig.params.len(), args.len())));
         }
         self.finish_args(args, &sig.params, &got);
+        for (a, own) in args.iter().zip(&sig.own) {
+            if *own {
+                self.consume(a);
+            }
+        }
+        if !self.func.claw {
+            self.check_exclusive(span, args);
+        }
         if sig.variadic {
             for a in args.iter().skip(sig.params.len()) {
                 if !is_c_type(&self.g.types, a.ty.get()) || a.ty.get() == STRLIT {
@@ -1968,6 +2379,31 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
         *e.res.borrow_mut() = Res::Func(full);
         sig.ret
+    }
+
+    /// One call may not change something while also reading or changing it elsewhere.
+    fn check_exclusive(&mut self, span: Span, args: &[Expr]) {
+        let mut muts = Vec::new();
+        for a in args {
+            mutable_paths(a, &mut muts);
+        }
+        for (i, m) in muts.iter().enumerate() {
+            if muts[i + 1..].iter().any(|o| overlap(o, m)) {
+                self.diags.push(Diag::new("E0158", span, format!("`{}` is passed with `&` twice in one call", m.0)));
+                return;
+            }
+        }
+        for a in args {
+            if matches!(a.kind, ExprKind::AddrOf(_)) || !self.g.types.is_aggregate(a.ty.get()) {
+                continue;
+            }
+            if let Some(p) = path_of(a) {
+                if muts.iter().any(|m| overlap(m, &p)) {
+                    self.diags.push(Diag::new("E0158", a.span, format!("`{}` is read here and changed with `&` in the same call", p.0)));
+                    return;
+                }
+            }
+        }
     }
 
     fn struct_lit(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr]) -> Ty {
@@ -2016,6 +2452,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
             let Kind::Struct(id) = self.kind(ty) else { return ERR };
             let wants: Vec<Ty> = self.g.types.structs[id].fields.iter().map(|f| f.ty).collect();
             self.finish_args(args, &wants, &got);
+            for a in args {
+                self.consume(a);
+            }
             return ty;
         }
         let (fields, ty, public) = match self.g.mods[m].names.get(name).copied() {
@@ -2043,6 +2482,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
         for (a, f) in args.iter().zip(&fields) {
             self.check(a, f.ty);
+            self.consume(a);
         }
         for a in args.iter().skip(fields.len()) {
             self.expr(a, None);
@@ -2052,29 +2492,40 @@ impl<'a, 'b> Ctx<'a, 'b> {
 
     fn array_lit(&mut self, e: &Expr, items: &[Expr], hint: Option<Ty>) -> Ty {
         if let Some(h) = hint {
-            if let Kind::Array(elem, n) = self.kind(h) {
-                if items.len() as u64 != n {
-                    let name = self.tname(h);
-                    self.diags.push(Diag::new("E0104", e.span, format!("`{name}` needs {n} items, found {}", items.len())));
+            match self.kind(h) {
+                Kind::Array(elem, n) => {
+                    if items.len() as u64 != n {
+                        let name = self.tname(h);
+                        self.diags.push(Diag::new("E0104", e.span, format!("`{name}` needs {n} items, found {}", items.len())));
+                    }
+                    self.array_items(items, elem);
+                    return h;
                 }
-                for it in items {
-                    self.check(it, elem);
+                Kind::Slice(elem) => {
+                    self.array_items(items, elem);
+                    return h;
                 }
-                return h;
+                _ => {}
             }
         }
         if items.is_empty() {
-            return self.err("E0123", e.span, "an empty array has no size");
+            return self.err("E0123", e.span, "cannot tell what this empty array holds; write `a []int = []`");
         }
         let first = self.expr(&items[0], None);
         let first = self.value_type(items[0].span, first);
-        for it in &items[1..] {
-            self.check(it, first);
-        }
+        self.consume(&items[0]);
+        self.array_items(&items[1..], first);
         if first == ERR {
             return ERR;
         }
         self.g.types.intern(Kind::Array(first, items.len() as u64))
+    }
+
+    fn array_items(&mut self, items: &[Expr], elem: Ty) {
+        for it in items {
+            self.check(it, elem);
+            self.consume(it);
+        }
     }
 
     fn try_expr(&mut self, e: &Expr, inner: &Expr) -> Ty {
@@ -2082,6 +2533,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             self.diags.push(Diag::new("E0143", e.span, "`defer` cannot leave the function"));
         }
         let t = self.expr(inner, None);
+        self.consume(inner);
         match self.kind(t) {
             Kind::Option(p) => {
                 if !self.is_main && !matches!(self.kind(self.ret), Kind::Option(_) | Kind::Err) {
@@ -2112,6 +2564,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
 
     fn else_expr(&mut self, e: &Expr, inner: &Expr, handler: &ElseKind) -> Ty {
         let t = self.expr(inner, None);
+        self.consume(inner);
         let (payload, err) = match self.kind(t) {
             Kind::Option(p) => (p, None),
             Kind::Result(ok, err) => (ok, Some(err)),
@@ -2129,9 +2582,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     self.expr(v, None);
                 } else {
                     self.check(v, payload);
+                    self.consume(v);
                 }
             }
             ElseKind::Block(binder, b) => {
+                let before = self.moved.clone();
                 self.scopes.push(HashMap::new());
                 if let Some((n, sp)) = binder {
                     match err {
@@ -2147,6 +2602,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
                 let ends = self.block(b);
                 self.pop_scope();
+                self.moved = before;
                 if !ends {
                     self.diags.push(Diag::new("E0117", b.end, "an `else` block must leave: end it with `ret`, `fail`, `break` or `continue`"));
                 }
@@ -2172,6 +2628,7 @@ fn expr_breaks(e: &Expr) -> bool {
         }
         ExprKind::Try(e) | ExprKind::Field { e, .. } | ExprKind::Unary { e, .. } | ExprKind::AddrOf(e) | ExprKind::Deref(e) => expr_breaks(e),
         ExprKind::Index { e, i } => expr_breaks(e) || expr_breaks(i),
+        ExprKind::Slice { e, .. } => expr_breaks(e),
         ExprKind::Binary { l, r, .. } => expr_breaks(l) || expr_breaks(r),
         ExprKind::Call { args, .. } | ExprKind::StructLit { args, .. } | ExprKind::ArrayLit(args) => args.iter().any(expr_breaks),
         ExprKind::ArrayFill(e) => expr_breaks(e),

@@ -1,0 +1,49 @@
+// Thin wrappers over libSystem, callable from ordinary code.
+
+extern "sqrt" fn c_sqrt(x f64) f64
+extern "pow" fn c_pow(x f64, y f64) f64
+extern "sin" fn c_sin(x f64) f64
+extern "cos" fn c_cos(x f64) f64
+extern "floor" fn c_floor(x f64) f64
+extern "ceil" fn c_ceil(x f64) f64
+extern "log" fn c_log(x f64) f64
+extern "exp" fn c_exp(x f64) f64
+extern "fabs" fn c_fabs(x f64) f64
+
+pub const pi = 3.141592653589793
+
+pub claw fn sqrt(x f64) f64 {
+    ret c_sqrt(x)
+}
+
+pub claw fn pow(x f64, y f64) f64 {
+    ret c_pow(x, y)
+}
+
+pub claw fn sin(x f64) f64 {
+    ret c_sin(x)
+}
+
+pub claw fn cos(x f64) f64 {
+    ret c_cos(x)
+}
+
+pub claw fn floor(x f64) f64 {
+    ret c_floor(x)
+}
+
+pub claw fn ceil(x f64) f64 {
+    ret c_ceil(x)
+}
+
+pub claw fn log(x f64) f64 {
+    ret c_log(x)
+}
+
+pub claw fn exp(x f64) f64 {
+    ret c_exp(x)
+}
+
+pub claw fn abs(x f64) f64 {
+    ret c_fabs(x)
+}

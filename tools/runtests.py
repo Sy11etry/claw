@@ -7,6 +7,7 @@ tests/run/*.claw  compiled and executed. Headers:
     // stderr: <substring>       (repeatable)
 tests/err/*.claw  must be rejected. Header:
     // error: E####              (repeatable; all must appear, nothing else)
+tests/own/*.claw  like run, built with --alloc-stats: allocations must equal frees.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
@@ -48,6 +49,30 @@ def run_test(path, tmp):
     for s in headers(text, "stderr"):
         if s not in p.stderr + r.stderr:
             return f"stderr lacks {s!r}: {p.stderr + r.stderr!r}"
+    return None
+
+
+def own_test(path, tmp):
+    """Like a run test, but every allocation must also have been freed."""
+    text = path.read_text()
+    exe = tmp / ("own_" + path.stem)
+    p = subprocess.run([CLAW, "build", path, "-o", exe, "--alloc-stats"], capture_output=True, text=True, env={"PATH": ""})
+    if p.returncode != 0:
+        return f"compile failed:\n{p.stderr}"
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return f"exit code {r.returncode}\nstderr: {r.stderr}"
+    want_out = headers(text, "expect")
+    if r.stdout.splitlines() != want_out:
+        return f"stdout mismatch\n  got:  {r.stdout.splitlines()}\n  want: {want_out}"
+    m = re.search(r"allocs=(\d+) frees=(\d+)", r.stderr)
+    if not m:
+        return f"no allocation report: {r.stderr!r}"
+    if m[1] != m[2]:
+        return f"leak or double free: {m[0]}"
+    least = headers(text, "allocs-at-least")
+    if least and int(m[1]) < int(least[0]):
+        return f"expected at least {least[0]} allocations, saw {m[1]}"
     return None
 
 
@@ -108,13 +133,19 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL run/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/own").glob("*.claw")):
+            total += 1
+            msg = own_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL own/{path.name}: {msg}")
         for path in sorted((ROOT / "tests/fmt").glob("*.claw")):
             total += 1
             msg = fmt_test(path, tmp)
             if msg:
                 failures += 1
                 print(f"FAIL fmt/{path.name}: {msg}")
-        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
+        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
             total += 1
             msg = fmt_stable(path, tmp)
             if msg:

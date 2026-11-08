@@ -1,0 +1,32 @@
+// expect: 6
+// expect: 0
+// expect: Box{hi1}
+// expect: owned2
+// allocs-at-least: 3
+fn total(a []int) int {
+    mut s := 0
+    for x in a { s += x }
+    ret s
+}
+
+fn clear_it(a &[]int) {
+    a = []
+}
+
+type Box { s str }
+
+fn keep(own s str) Box {
+    ret Box{s}
+}
+
+fn main() {
+    mut a []int = [1, 2, 3]
+    print(total(a))
+    clear_it(&a)
+    print(len(a))
+    b := keep("hi{1}")
+    print(b)
+    s := "owned{2}"
+    c := keep(s)
+    print(c.s)
+}

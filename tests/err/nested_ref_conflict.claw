@@ -1,0 +1,13 @@
+// error: E0158
+fn g(a &[]int) []int {
+    ret copy(a)
+}
+
+fn f(a []int, b []int) {
+    print(len(a) + len(b))
+}
+
+fn main() {
+    mut x []int = []
+    f(x, g(&x))
+}

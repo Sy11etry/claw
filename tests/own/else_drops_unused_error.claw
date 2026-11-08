@@ -1,0 +1,18 @@
+// expect: 5
+// expect: skip
+// allocs-at-least: 2
+type E = Bad{msg str}
+
+fn parse() int ! E {
+    fail Bad{"gone{1}"}
+}
+
+fn main() {
+    x := parse() else 5
+    print(x)
+    y := parse() else {
+        print("skip")
+        ret
+    }
+    print(y)
+}

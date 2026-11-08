@@ -1,0 +1,11 @@
+// error: E0156
+type F { p int }
+
+fn drop(f &F) {
+    print(f.p)
+}
+
+fn main() {
+    mut f := F{1}
+    drop(&f)
+}

@@ -1,0 +1,21 @@
+// expect: 2
+// allocs-at-least: 3
+fn make() []int {
+    ret [1]
+}
+
+claw fn f() int {
+    a := make()
+    p := alloc[int](1)
+    defer free(p)
+    *p = len(a)
+    if *p > 0 {
+        b := make()
+        ret *p + len(b)
+    }
+    ret 0
+}
+
+fn main() {
+    print(f())
+}

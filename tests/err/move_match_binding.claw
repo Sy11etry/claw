@@ -1,0 +1,12 @@
+// error: E0152
+type T = A{s str}
+
+fn f(t T) str {
+    match t {
+        A{s}: ret s
+    }
+}
+
+fn main() {
+    print(f(A{"x"}))
+}

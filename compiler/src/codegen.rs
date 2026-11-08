@@ -20,6 +20,11 @@ const IMP_FREE: usize = 5;
 const BUF_CAP: u64 = 1 << 16;
 /// Stay well inside the default 8 MB main-thread stack.
 const MAX_FRAME: u64 = 7 << 20;
+/// Set while the buffer is collecting a string rather than output.
+const CAPTURE_FLAG: u64 = BUF_CAP + 8;
+/// Counters for `--alloc-stats`, the leak check used by the test suite.
+const ALLOC_COUNT: u64 = BUF_CAP + 16;
+const FREE_COUNT: u64 = BUF_CAP + 24;
 
 #[derive(Clone, Copy)]
 enum Target {
@@ -27,6 +32,7 @@ enum Target {
     Trap,
     RtAlloc,
     RtFree,
+    RtTake,
     Flush,
     BufStr,
     BufInt,
@@ -252,6 +258,17 @@ impl Gen {
     /// `__claw_flush(x0 = fd)` writes out the buffer, retrying short writes.
     fn rt_flush(&mut self) -> usize {
         let pos = self.here();
+        // Filling up while building a string: there is nowhere to flush to.
+        let msg = "trap: interpolated string is too long (64 KB)\n";
+        let off = self.add_str(msg.as_bytes());
+        self.bss_addr(X9);
+        self.mov_imm(X16, CAPTURE_FLAG as i64);
+        self.e(add(X9, X9, X16));
+        self.e(ldr(X10, X9, 0));
+        self.e(cbz(X10, 5));
+        self.data_addr(X0, off);
+        self.e(movz(X1, msg.len() as u32, 0));
+        self.call(B, Target::Trap);
         self.e(stp_pre(FP, LR, SP, -48));
         self.e(mov_sp(FP, SP));
         self.e(stp(X19, X20, SP, 16));
@@ -305,6 +322,66 @@ impl Gen {
         self.e(str(X10, X9, 0));
         self.e(b_at(B, -17));
         // done:
+        self.e(ldp(X19, X20, SP, 16));
+        self.e(ldp_post(FP, LR, SP, 32));
+        self.e(ret());
+        pos
+    }
+
+    /// Adds 1 to a counter; touches only x9, x10 and x16.
+    fn bump_counter(&mut self, off: u64) {
+        self.bss_addr(X9);
+        self.mov_imm(X16, off as i64);
+        self.e(add(X9, X9, X16));
+        self.e(ldr(X10, X9, 0));
+        self.e(add_imm(X10, X10, 1));
+        self.e(str(X10, X9, 0));
+    }
+
+    fn report_alloc_stats(&mut self) {
+        for (text, off) in [("allocs=", ALLOC_COUNT), (" frees=", FREE_COUNT)] {
+            let s = self.add_str(text.as_bytes());
+            self.data_addr(X0, s);
+            self.e(movz(X1, text.len() as u32, 0));
+            self.call(BL, Target::BufStr);
+            self.bss_addr(X9);
+            self.mov_imm(X16, off as i64);
+            self.e(add(X9, X9, X16));
+            self.e(ldr(X0, X9, 0));
+            self.call(BL, Target::BufInt);
+        }
+        let s = self.add_str(b"\n");
+        self.data_addr(X0, s);
+        self.e(movz(X1, 1, 0));
+        self.call(BL, Target::BufStr);
+        self.e(movz(X0, 2, 0));
+        self.call(BL, Target::Flush);
+    }
+
+    /// `__claw_take()` hands back the buffer as heap bytes: x0 = pointer, x1 = length.
+    fn rt_take(&mut self) -> usize {
+        let pos = self.here();
+        self.e(stp_pre(FP, LR, SP, -32));
+        self.e(mov_sp(FP, SP));
+        self.e(stp(X19, X20, SP, 16));
+        self.bss_addr(X19);
+        self.mov_imm(X16, CAPTURE_FLAG as i64);
+        self.e(add(X9, X19, X16));
+        self.e(str(XZR, X9, 0));
+        self.e(ldr(X20, X19, 0));
+        self.e(str(XZR, X19, 0));
+        self.e(cbz(X20, 9));
+        self.e(mov(X0, X20));
+        self.call(BL, Target::RtAlloc);
+        self.e(cbnz(X0, 2));
+        self.e(brk(3));
+        self.e(add_imm(X1, X19, 8));
+        self.e(mov(X2, X20));
+        self.call(BL, Target::Import(IMP_MEMCPY));
+        self.e(b_at(B, 2));
+        // Empty: no allocation at all.
+        self.e(movz(X0, 0, 0));
+        self.e(mov(X1, X20));
         self.e(ldp(X19, X20, SP, 16));
         self.e(ldp_post(FP, LR, SP, 32));
         self.e(ret());
@@ -707,6 +784,35 @@ impl Gen {
                 });
             }
             Inst::MemCopy { dst, src, size } => self.mem_copy(fr, *dst, *src, *size),
+            Inst::MemCopyDyn { dst, src, n } => {
+                self.load(fr, X0, *dst);
+                self.load(fr, X1, *src);
+                self.load(fr, X2, *n);
+                self.call(BL, Target::Import(IMP_MEMCPY));
+            }
+            Inst::BoundsDyn { idx, len, loc } => {
+                self.load(fr, X9, *idx);
+                self.load(fr, X10, *len);
+                self.e(cmp(X9, X10));
+                self.trap_if(Cond::Hs, Trap::Bounds, *loc, traps);
+            }
+            Inst::BufPtr { p, n } => {
+                self.load(fr, X0, *p);
+                self.load(fr, X1, *n);
+                self.call(BL, Target::BufStr);
+            }
+            Inst::CaptureStart => {
+                self.bss_addr(X9);
+                self.mov_imm(X16, CAPTURE_FLAG as i64);
+                self.e(add(X9, X9, X16));
+                self.e(movz(X10, 1, 0));
+                self.e(str(X10, X9, 0));
+            }
+            Inst::CaptureTake { ptr, len } => {
+                self.call(BL, Target::RtTake);
+                self.store(fr, X0, *ptr);
+                self.store(fr, X1, *len);
+            }
             Inst::IndexAddr { d, base, idx, size } => {
                 self.load(fr, X9, *base);
                 self.load(fr, X10, *idx);
@@ -1003,7 +1109,7 @@ impl Gen {
     }
 }
 
-pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
+pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Object, String> {
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
     for f in &m.funcs {
         for b in &f.blocks {
@@ -1036,11 +1142,18 @@ pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
     let stubs: Vec<usize> = (0..imports.len()).map(|s| g.import_stub(s)).collect();
     // Every allocation passes through these two, so a later version can record them.
     let rt_alloc = g.here();
+    if alloc_stats {
+        g.bump_counter(ALLOC_COUNT);
+    }
     g.call(B, Target::Import(IMP_MALLOC));
     let rt_free = g.here();
+    if alloc_stats {
+        g.bump_counter(FREE_COUNT);
+    }
     g.call(B, Target::Import(IMP_FREE));
     let trap = g.rt_trap();
     let flush = g.rt_flush();
+    let take = g.rt_take();
     let buf_str = g.rt_buf_str();
     let buf_int = g.rt_buf_num(true);
     let buf_uint = g.rt_buf_num(false);
@@ -1051,6 +1164,7 @@ pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
         ("free", rt_free),
         ("trap", trap),
         ("flush", flush),
+        ("take", take),
         ("buf_str", buf_str),
         ("buf_int", buf_int),
         ("buf_uint", buf_uint),
@@ -1065,6 +1179,9 @@ pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
     g.e(stp_pre(FP, LR, SP, -16));
     g.e(mov_sp(FP, SP));
     g.call(BL, Target::User(m.main));
+    if alloc_stats {
+        g.report_alloc_stats();
+    }
     g.e(movz(X0, 0, 0));
     g.e(ldp_post(FP, LR, SP, 16));
     g.e(ret());
@@ -1082,6 +1199,7 @@ pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
             Target::Trap => trap,
             Target::RtAlloc => rt_alloc,
             Target::RtFree => rt_free,
+            Target::RtTake => take,
             Target::Flush => flush,
             Target::BufStr => buf_str,
             Target::BufInt => buf_int,
@@ -1106,6 +1224,6 @@ pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
         imports,
         symbols,
         entry,
-        bss_size: BUF_CAP + 8,
+        bss_size: BUF_CAP + 32,
     })
 }

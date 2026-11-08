@@ -91,7 +91,7 @@ fn format_code(line: &str, diags: &mut Vec<Diag>) -> (String, Vec<Token>) {
     let mut braces: Vec<bool> = Vec::new();
     // In a signature or `if`/`for`/`match` head a bare `Name {` opens a block.
     let head = match (real.first().map(|t| &t.tok), real.get(1).map(|t| &t.tok)) {
-        (Some(Tok::Kw("fn" | "if" | "for" | "match" | "claw" | "pub")), _) => true,
+        (Some(Tok::Kw("fn" | "if" | "for" | "match" | "claw" | "pub" | "extern")), _) => true,
         (Some(Tok::Op("}")), Some(Tok::Kw("else"))) => true,
         _ => false,
     };
@@ -112,6 +112,11 @@ fn format_code(line: &str, diags: &mut Vec<Diag>) -> (String, Vec<Token>) {
                 }
             }
             if head && parens == 0 && t.tok == Tok::Op("{") {
+                space = true;
+            }
+            // The result type of a signature: `fn f() []int`.
+            let signature = matches!(real.first().map(|x| &x.tok), Some(Tok::Kw("fn" | "claw" | "pub" | "extern")));
+            if signature && parens == 0 && real[i - 1].tok == Tok::Op(")") && matches!(t.tok, Tok::Op("[") | Tok::Op("?")) {
                 space = true;
             }
             if type_decl && (i == 2 || i == 3 || (i + 1 == real.len() && t.tok == Tok::Op("}"))) {

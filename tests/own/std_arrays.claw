@@ -1,0 +1,46 @@
+// expect: 10
+// expect: 1
+// expect: 10
+// expect: 10
+// expect: 8
+// expect: [100, 300, 9, 8, 7, 6, 5, 4, 3, 2, 200]
+// expect: [2, 3, 4, 5, 6, 7, 8, 9, 100, 200, 300]
+// expect: 10
+// expect: none
+// expect: true
+// expect: false
+// expect: 0
+// expect: none
+// expect: [1]
+// expect: [1.5, 2.5, 3.5]
+// expect: 3
+// allocs-at-least: 3
+fn main() {
+    mut a []int = []
+    for i in 0..10 { push(&a, 10 - i) }
+    print(len(a))
+    print(pop(&a))
+    print(a[0])
+    print(remove(&a, 0))
+    print(len(a))
+    insert(&a, 0, 100)
+    insert(&a, len(a), 200)
+    insert(&a, 1, 300)
+    print(a)
+    sort(&a)
+    print(a)
+    print(index_of(a, 300))
+    print(index_of(a, 7777))
+    print(has(a, 200))
+    print(has(a, 201))
+    clear(&a)
+    print(len(a))
+    print(pop(&a))
+    push(&a, 1)
+    print(a)
+    mut f []f64 = [2.5, 1.5, 3.5]
+    sort(&f)
+    print(f)
+    reserve(&f, 100)
+    print(len(f))
+}

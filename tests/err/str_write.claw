@@ -1,0 +1,6 @@
+// error: E0131
+fn main() {
+    mut s := "ab"
+    s[0] = 'x'
+    print(s)
+}

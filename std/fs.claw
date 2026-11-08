@@ -1,0 +1,80 @@
+// Whole-file reading and writing.
+
+extern "open" fn c_open(path *u8, flags i32, ...) i32
+extern "close" fn c_close(fd i32) i32
+extern "read" fn c_read(fd i32, p *u8, n u64) i64
+extern "write" fn c_write(fd i32, p *u8, n u64) i64
+extern "unlink" fn c_unlink(path *u8) i32
+extern "__error" fn c_errno() *i32
+
+pub type IoErr = NotFound | Denied | Failed{code int}
+
+const o_rdonly i32 = 0
+const o_wronly i32 = 1
+const o_creat i32 = 512
+const o_trunc i32 = 1024
+
+claw fn last_error() IoErr {
+    code := int(*c_errno())
+    if code == 2 { ret NotFound }
+    if code == 13 { ret Denied }
+    ret Failed{code}
+}
+
+claw fn c_path(path str) *u8 +mem {
+    p := alloc[u8](len(path) + 1)
+    for c, i in path { p[i] = c }
+    p[len(path)] = 0
+    ret p
+}
+
+pub claw fn read(path str) str ! IoErr +io +mem {
+    name := c_path(path)
+    defer free(name)
+    fd := c_open(name, o_rdonly)
+    if fd < 0 { fail last_error() }
+    defer {
+        _ = c_close(fd)
+    }
+    mut bytes []u8 = []
+    reserve(&bytes, 4096)
+    for {
+        reserve(&bytes, bytes.len + 4096)
+        n := c_read(fd, bytes.ptr + bytes.len, 4096)
+        if n < 0 { fail last_error() }
+        if n == 0 { break }
+        bytes.len += int(n)
+    }
+    mut out := ""
+    if bytes.len > 0 {
+        out.ptr = bytes.ptr
+        out.len = bytes.len
+        out.cap = bytes.cap
+        bytes.ptr = none
+        bytes.len = 0
+        bytes.cap = 0
+    }
+    ret out
+}
+
+pub claw fn write(path str, data str) ! IoErr +io +mem {
+    name := c_path(path)
+    defer free(name)
+    fd := c_open(name, o_wronly | o_creat | o_trunc, 420)
+    if fd < 0 { fail last_error() }
+    defer {
+        _ = c_close(fd)
+    }
+    mut done := 0
+    for done < len(data) {
+        n := c_write(fd, data.ptr + done, u64(len(data) - done))
+        if n < 0 { fail last_error() }
+        done += int(n)
+    }
+}
+
+pub claw fn remove(path str) ! IoErr +io +mem {
+    name := c_path(path)
+    defer free(name)
+    if c_unlink(name) != 0 { fail last_error() }
+}

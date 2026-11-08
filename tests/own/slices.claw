@@ -1,0 +1,28 @@
+// expect: 5
+// expect: 3
+// expect: 9
+// expect: 15
+// expect: 0
+// expect: [2, 3, 4]
+// expect: [2, 3]
+// expect: 50
+// allocs-at-least: 2
+fn sum(a []int) int {
+    mut s := 0
+    for x in a { s += x }
+    ret s
+}
+
+fn main() {
+    a []int = [1, 2, 3, 4, 5]
+    print(sum(a[1..3]))
+    print(sum(a[..2]))
+    print(sum(a[3..]))
+    print(sum(a[..]))
+    print(len(a[2..2]))
+    print(a[1..4])
+    b := copy(a[1..3])
+    print(b)
+    f := [10, 20, 30]
+    print(sum(f[1..]))
+}

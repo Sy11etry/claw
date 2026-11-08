@@ -1,0 +1,7 @@
+// error: E0122
+fn main() {
+    mut a []int = [1]
+    for x in a {
+        a[0] = x
+    }
+}

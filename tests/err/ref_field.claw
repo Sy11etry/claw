@@ -1,0 +1,5 @@
+// error: E0157
+type P { a &int }
+
+fn main() {
+}

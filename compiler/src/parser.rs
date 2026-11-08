@@ -22,7 +22,7 @@ fn join(a: Span, b: Span) -> Span {
 }
 
 fn not_yet(what: &str) -> String {
-    format!("{what} is not available in claw 0.3")
+    format!("{what} is not available in claw 0.4")
 }
 
 fn is_type_name(s: &str) -> bool {
@@ -190,6 +190,12 @@ impl<'a> Parser<'a> {
 
     fn parse_extern(&mut self, public: bool) -> PResult<ExternDecl> {
         self.bump();
+        let symbol = if let Tok::Str(s) = self.peek().clone() {
+            self.bump();
+            Some(s)
+        } else {
+            None
+        };
         if !self.at_kw("fn") {
             return self.expected("`fn` after `extern`");
         }
@@ -205,14 +211,14 @@ impl<'a> Parser<'a> {
             }
             let (pname, pspan) = self.expect_ident("a parameter name")?;
             let ty = self.parse_type()?;
-            params.push(Param { name: pname, span: pspan, ty });
+            params.push(Param { own: false, name: pname, span: pspan, ty });
             if !self.eat_op(",") {
                 break;
             }
         }
         self.expect_op(")")?;
         let ret = if matches!(self.peek(), Tok::Ident(_)) || self.at_op("*") { Some(self.parse_type()?) } else { None };
-        Ok(ExternDecl { name, span, public, params, variadic, ret })
+        Ok(ExternDecl { symbol, name, span, public, params, variadic, ret })
     }
 
     fn parse_tparams(&mut self) -> PResult<Vec<(String, Span)>> {
@@ -300,7 +306,11 @@ impl<'a> Parser<'a> {
                     self.bump();
                     Size::Name(n)
                 }
-                Tok::Op("]") => return self.error("E0900", span, not_yet("the growable array `[]T`")),
+                Tok::Op("]") => {
+                    self.bump();
+                    let elem = self.parse_type_base()?;
+                    return Ok(TypeExpr { kind: TypeKind::Slice(Box::new(elem)), span });
+                }
                 _ => return self.expected("an array size"),
             };
             self.expect_op("]")?;
@@ -311,8 +321,9 @@ impl<'a> Parser<'a> {
             let inner = self.parse_type_base()?;
             return Ok(TypeExpr { kind: TypeKind::Pointer(Box::new(inner)), span });
         }
-        if self.at_op("&") {
-            return self.error("E0900", span, not_yet("the `&` parameter"));
+        if self.eat_op("&") {
+            let inner = self.parse_type_base()?;
+            return Ok(TypeExpr { kind: TypeKind::Ref(Box::new(inner)), span });
         }
         let (first, _) = self.expect_ident("a type")?;
         let (module, name) = if self.at_op(".") {
@@ -381,13 +392,13 @@ impl<'a> Parser<'a> {
         self.expect_op("(")?;
         let mut params = Vec::new();
         while !self.at_op(")") {
-            if self.at_kw("own") {
-                let span = self.span();
-                return self.error("E0900", span, not_yet("`own`"));
+            let own = self.at_kw("own");
+            if own {
+                self.bump();
             }
             let (pname, span) = self.expect_ident("a parameter name")?;
             let ty = self.parse_type()?;
-            params.push(Param { name: pname, span, ty });
+            params.push(Param { own, name: pname, span, ty });
             if !self.eat_op(",") {
                 break;
             }
@@ -849,12 +860,9 @@ impl<'a> Parser<'a> {
             } else if self.at_op("[") {
                 self.bump();
                 let was = std::mem::replace(&mut self.in_head, false);
-                let i = self.parse_expr(0);
+                let result = self.parse_index_or_slice(e);
                 self.in_head = was;
-                let i = i?;
-                let close = self.expect_op("]")?;
-                let span = join(e.span, close.span);
-                e = Expr::new(ExprKind::Index { e: Box::new(e), i: Box::new(i) }, span);
+                e = result?;
             } else if self.at_op("?") {
                 let close = self.bump();
                 let span = join(e.span, close.span);
@@ -863,6 +871,19 @@ impl<'a> Parser<'a> {
                 return Ok(e);
             }
         }
+    }
+
+    fn parse_index_or_slice(&mut self, e: Expr) -> PResult<Expr> {
+        let lo = if self.at_op("..") { None } else { Some(Box::new(self.parse_expr(0)?)) };
+        if self.eat_op("..") {
+            let hi = if self.at_op("]") { None } else { Some(Box::new(self.parse_expr(0)?)) };
+            let close = self.expect_op("]")?;
+            let span = join(e.span, close.span);
+            return Ok(Expr::new(ExprKind::Slice { e: Box::new(e), lo, hi }, span));
+        }
+        let close = self.expect_op("]")?;
+        let span = join(e.span, close.span);
+        Ok(Expr::new(ExprKind::Index { e: Box::new(e), i: lo.expect("an index was parsed") }, span))
     }
 
     fn parse_args(&mut self, close: &str) -> PResult<(Vec<Expr>, Span)> {

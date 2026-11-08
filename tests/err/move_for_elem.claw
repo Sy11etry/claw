@@ -1,0 +1,9 @@
+// error: E0152
+fn main() {
+    a []str = []
+    mut b []str = []
+    for s in a {
+        push(&b, s)
+    }
+    print(b)
+}

@@ -16,6 +16,8 @@ pub enum Size {
 pub enum TypeKind {
     Name { module: Option<String>, name: String, targs: Vec<TypeExpr> },
     Pointer(Box<TypeExpr>),
+    Ref(Box<TypeExpr>),
+    Slice(Box<TypeExpr>),
     Array(Size, Box<TypeExpr>),
     Option(Box<TypeExpr>),
     /// `T ! E`, or `! E` when the success value is nothing.
@@ -46,6 +48,8 @@ pub struct UseDecl {
 
 #[derive(Debug, Clone)]
 pub struct ExternDecl {
+    /// The C function's name, when it differs from `name`.
+    pub symbol: Option<String>,
     pub name: String,
     pub span: Span,
     pub public: bool,
@@ -111,6 +115,8 @@ pub struct Func {
 
 #[derive(Debug, Clone)]
 pub struct Param {
+    /// `own x T`: the function takes the value over.
+    pub own: bool,
     pub name: String,
     pub span: Span,
     pub ty: TypeExpr,
@@ -289,6 +295,8 @@ pub enum ExprKind {
     ArrayFill(Box<Expr>),
     Field { e: Box<Expr>, name: String, name_span: Span },
     Index { e: Box<Expr>, i: Box<Expr> },
+    /// `a[lo..hi]`, either end optional: a read-only view.
+    Slice { e: Box<Expr>, lo: Option<Box<Expr>>, hi: Option<Box<Expr>> },
     Try(Box<Expr>),
     Else { e: Box<Expr>, handler: ElseKind },
 }

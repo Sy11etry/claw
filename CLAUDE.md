@@ -23,7 +23,7 @@
 
 ```bash
 cargo build --release --manifest-path compiler/Cargo.toml   # сборка, без предупреждений
-python3 tools/runtests.py                                   # все тесты всех итераций
+python3 tools/runtests.py                                   # все тесты всех итераций; tests/own сверяют alloc и free
 python3 tools/check_encoder.py                              # сверка ARM64-энкодера с llvm-mc
 python3 benchmarks/run.py                                   # замеры против clang
 python3 tools/install.py                                    # установка версии в ~/.claw

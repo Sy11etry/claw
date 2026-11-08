@@ -17,6 +17,11 @@ pub enum Kind {
     Enum(usize),
     Array(Ty, u64),
     Pointer(Ty),
+    /// A growable array, or a read-only view of part of one.
+    Slice(Ty),
+    Str,
+    /// A `&T` parameter.
+    Ref(Ty),
     Option(Ty),
     Result(Ty, Ty),
 }
@@ -35,6 +40,7 @@ pub const BOOL: Ty = Ty(10);
 pub const VOID: Ty = Ty(11);
 pub const STRLIT: Ty = Ty(12);
 pub const ERR: Ty = Ty(13);
+pub const STR: Ty = Ty(14);
 
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -78,7 +84,16 @@ pub struct Types {
     map: HashMap<Kind, Ty>,
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
+    /// Types with a user-written `drop`, and the function that does it.
+    pub user_drop: HashMap<Ty, String>,
 }
+
+/// `[]T` and `str` in memory: pointer, length, capacity. Capacity 0 means the
+/// bytes are not ours to free (static data or a view).
+pub const SEQ_SIZE: u64 = 24;
+pub const SEQ_PTR: u64 = 0;
+pub const SEQ_LEN: u64 = 8;
+pub const SEQ_CAP: u64 = 16;
 
 pub fn align_up(v: u64, a: u64) -> u64 {
     (v + a - 1) & !(a - 1)
@@ -86,7 +101,7 @@ pub fn align_up(v: u64, a: u64) -> u64 {
 
 impl Types {
     pub fn new() -> Types {
-        let mut t = Types { kinds: Vec::new(), map: HashMap::new(), structs: Vec::new(), enums: Vec::new() };
+        let mut t = Types { kinds: Vec::new(), map: HashMap::new(), structs: Vec::new(), enums: Vec::new(), user_drop: HashMap::new() };
         for k in [
             Kind::Int { bits: 8, signed: true },
             Kind::Int { bits: 16, signed: true },
@@ -102,6 +117,7 @@ impl Types {
             Kind::Void,
             Kind::StrLit,
             Kind::Err,
+            Kind::Str,
         ] {
             t.intern(k);
         }
@@ -130,6 +146,10 @@ impl Types {
         matches!(self.kind(t), Kind::Float { .. })
     }
 
+    pub fn is_ref(&self, t: Ty) -> bool {
+        matches!(self.kind(t), Kind::Ref(_))
+    }
+
     pub fn is_ptr(&self, t: Ty) -> bool {
         matches!(self.kind(t), Kind::Pointer(_))
     }
@@ -140,7 +160,39 @@ impl Types {
 
     /// Lives in memory and is handled by address.
     pub fn is_aggregate(&self, t: Ty) -> bool {
-        matches!(self.kind(t), Kind::Struct(_) | Kind::Enum(_) | Kind::Array(..) | Kind::Option(_) | Kind::Result(..))
+        matches!(self.kind(t), Kind::Struct(_) | Kind::Enum(_) | Kind::Array(..) | Kind::Slice(_) | Kind::Str | Kind::Option(_) | Kind::Result(..))
+    }
+
+    /// Owns something that must be released when it goes away.
+    pub fn needs_drop(&self, t: Ty) -> bool {
+        match self.kind(t) {
+            Kind::Slice(_) | Kind::Str => true,
+            Kind::Struct(id) => self.user_drop.contains_key(&t) || self.structs[id].fields.iter().any(|f| self.needs_drop(f.ty)),
+            Kind::Enum(id) => self.enums[id].variants.iter().any(|v| v.fields.iter().any(|f| self.needs_drop(f.ty))),
+            Kind::Array(e, _) | Kind::Option(e) => self.needs_drop(e),
+            Kind::Result(a, b) => self.needs_drop(a) || self.needs_drop(b),
+            _ => false,
+        }
+    }
+
+    /// Somewhere inside is a type whose copy the compiler cannot write for itself.
+    pub fn has_user_drop(&self, t: Ty) -> bool {
+        self.user_drop_in(t, &mut Vec::new())
+    }
+
+    /// `[]Tree` inside `Tree` is legal, so remember what has been looked at.
+    fn user_drop_in(&self, t: Ty, seen: &mut Vec<Ty>) -> bool {
+        if seen.contains(&t) {
+            return false;
+        }
+        seen.push(t);
+        match self.kind(t) {
+            Kind::Struct(id) => self.user_drop.contains_key(&t) || self.structs[id].fields.iter().any(|f| self.user_drop_in(f.ty, seen)),
+            Kind::Enum(id) => self.enums[id].variants.iter().any(|v| v.fields.iter().any(|f| self.user_drop_in(f.ty, seen))),
+            Kind::Array(e, _) | Kind::Option(e) | Kind::Slice(e) => self.user_drop_in(e, seen),
+            Kind::Result(a, b) => self.user_drop_in(a, seen) || self.user_drop_in(b, seen),
+            _ => false,
+        }
     }
 
     pub fn size(&self, t: Ty) -> u64 {
@@ -152,7 +204,8 @@ impl Types {
             Kind::Int { bits, .. } | Kind::Float { bits } => ((bits / 8) as u64, (bits / 8) as u64),
             Kind::Bool => (1, 1),
             Kind::Void | Kind::StrLit | Kind::Err => (0, 1),
-            Kind::Pointer(_) => (8, 8),
+            Kind::Pointer(_) | Kind::Ref(_) => (8, 8),
+            Kind::Slice(_) | Kind::Str => (SEQ_SIZE, 8),
             Kind::Struct(id) => (self.structs[id].size, self.structs[id].align),
             Kind::Enum(id) => (self.enums[id].size, 8),
             Kind::Array(e, n) => {
@@ -177,6 +230,9 @@ impl Types {
             Kind::Enum(id) => self.enums[id].name.clone(),
             Kind::Array(e, n) => format!("[{}]{}", n, self.name(e)),
             Kind::Pointer(p) => format!("*{}", self.name(p)),
+            Kind::Slice(e) => format!("[]{}", self.name(e)),
+            Kind::Str => "str".to_string(),
+            Kind::Ref(p) => format!("&{}", self.name(p)),
             Kind::Option(p) => format!("?{}", self.name(p)),
             Kind::Result(ok, err) => {
                 if ok == VOID {

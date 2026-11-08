@@ -1,0 +1,16 @@
+// error: E0151
+fn eat(own a []int) {
+    print(len(a))
+}
+
+fn f(x bool) {
+    a []int = [1]
+    if x {
+        eat(a)
+    }
+    print(a)
+}
+
+fn main() {
+    f(true)
+}

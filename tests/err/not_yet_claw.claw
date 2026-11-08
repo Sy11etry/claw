@@ -1,6 +1,5 @@
 // error: E0900
-fn f(a &int) {
-    print(1)
+test "d" {
 }
 
 fn main() {

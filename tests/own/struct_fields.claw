@@ -1,0 +1,19 @@
+// expect: User{bob1, [z3, y2], 31}
+// expect: bob1
+// expect: changed4
+// allocs-at-least: 5
+type User { name str, tags []str, age int }
+
+fn main() {
+    mut u := User{"ann", [], 30}
+    u.name = "bob{1}"
+    push(&u.tags, "x")
+    push(&u.tags, "y{2}")
+    u.tags[0] = "z{3}"
+    u.age += 1
+    print(u)
+    v := copy(u)
+    u.name = "changed{4}"
+    print(v.name)
+    print(u.name)
+}

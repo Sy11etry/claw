@@ -1,0 +1,32 @@
+// expect: hi1
+// expect: 3
+// expect: hi1
+// expect: 3
+// expect: 2
+// expect: 0
+// expect: Text{t3}
+// allocs-at-least: 5
+type Msg = Text{s str} | Many{a []str} | Stop
+
+fn show(m Msg) int {
+    match m {
+        Text{s}: {
+            print(s)
+            ret len(s)
+        }
+        Many{a}: ret len(a)
+        Stop: ret 0
+    }
+}
+
+fn main() {
+    a := Text{"hi{1}"}
+    print(show(a))
+    b := copy(a)
+    print(show(b))
+    print(show(Many{["x", "y{2}"]}))
+    print(show(Stop))
+    mut c := Stop
+    c = Text{"t{3}"}
+    print(c)
+}

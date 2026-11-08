@@ -1,0 +1,37 @@
+// expect: 1
+// expect: 5
+// expect: end
+// expect: close 3
+// expect: close 4
+// expect: close 2
+// expect: close 1
+// allocs-at-least: 4
+type File { fd int, buf *u8 }
+
+claw fn open(fd int) File {
+    ret File{fd, alloc[u8](8)}
+}
+
+claw fn drop(f &File) {
+    print("close {f.fd}")
+    free(f.buf)
+}
+
+fn pass(own f File) File {
+    ret f
+}
+
+type Holder { f File, n int }
+
+fn main() {
+    a := open(1)
+    b := pass(a)
+    print(b.fd)
+    h := Holder{open(2), 5}
+    print(h.n)
+    mut list []File = []
+    push(&list, open(3))
+    push(&list, open(4))
+    _ = len(list)
+    print("end")
+}

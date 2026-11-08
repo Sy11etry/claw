@@ -1,0 +1,12 @@
+// expect: 32
+// allocs-at-least: 9
+fn main() {
+    mut total := 0
+    for i in 0..10 {
+        b []int = [i, 1]
+        if i == 3 { continue }
+        if i == 8 { break }
+        total += b[0] + b[1]
+    }
+    print(total)
+}

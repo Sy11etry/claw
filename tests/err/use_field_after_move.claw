@@ -1,0 +1,9 @@
+// error: E0151
+type P { a []int }
+
+fn main() {
+    p := P{[]}
+    q := p
+    print(p.a)
+    print(q)
+}

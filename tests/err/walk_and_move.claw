@@ -1,0 +1,9 @@
+// error: E0122
+fn main() {
+    a []int = [1]
+    for x in a {
+        b := a
+        print(b)
+        print(x)
+    }
+}

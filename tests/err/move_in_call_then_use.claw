@@ -1,0 +1,10 @@
+// error: E0151
+fn eat(own a []int) {
+    print(len(a))
+}
+
+fn main() {
+    a []int = [1]
+    eat(a)
+    print(a)
+}

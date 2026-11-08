@@ -1,0 +1,274 @@
+// Available in every program without `use`.
+
+extern "memmove" fn c_memmove(d *u8, s *u8, n u64) *u8
+extern "memcmp" fn c_memcmp(a *u8, b *u8, n u64) i32
+
+claw fn raw[T](p *T) *u8 {
+    ret cast[*u8](p)
+}
+
+// ---- arrays ----
+
+claw fn grow[T](a &[]T, want int) +mem {
+    if a.cap >= want { ret }
+    mut cap := a.cap * 2
+    if cap < 4 { cap = 4 }
+    if cap < want { cap = want }
+    p := alloc[T](cap)
+    if a.len > 0 {
+        _ = c_memmove(raw(p), raw(a.ptr), u64(a.len * sizeof[T]()))
+    }
+    if a.cap > 0 { free(a.ptr) }
+    a.ptr = p
+    a.cap = cap
+}
+
+pub claw fn reserve[T](a &[]T, n int) +mem {
+    grow(&a, n)
+}
+
+pub claw fn push[T](a &[]T, own x T) +mem {
+    grow(&a, a.len + 1)
+    a.ptr[a.len] = x
+    a.len += 1
+}
+
+pub claw fn pop[T](a &[]T) ?T {
+    if a.len == 0 { ret none }
+    a.len -= 1
+    ret a.ptr[a.len]
+}
+
+pub claw fn insert[T](a &[]T, i int, own x T) +mem {
+    if i != a.len { _ = a[i] }
+    grow(&a, a.len + 1)
+    from := a.ptr + i
+    _ = c_memmove(raw(from + 1), raw(from), u64((a.len - i) * sizeof[T]()))
+    a.ptr[i] = x
+    a.len += 1
+}
+
+pub claw fn remove[T](a &[]T, i int) T {
+    _ = a[i]
+    x := a.ptr[i]
+    from := a.ptr + i
+    _ = c_memmove(raw(from), raw(from + 1), u64((a.len - i - 1) * sizeof[T]()))
+    a.len -= 1
+    ret x
+}
+
+fn discard[T](own _ T) {
+}
+
+pub claw fn clear[T](a &[]T) {
+    for i in 0..a.len {
+        discard(a.ptr[i])
+    }
+    a.len = 0
+}
+
+pub claw fn swap[T](a &T, b &T) {
+    pa := &a
+    pb := &b
+    t := *pa
+    *pa = *pb
+    *pb = t
+}
+
+pub claw fn sort[T](a &[]T) {
+    n := a.len
+    mut i := n / 2
+    for i > 0 {
+        i -= 1
+        sift(a.ptr, i, n)
+    }
+    mut end := n
+    for end > 1 {
+        end -= 1
+        step(a.ptr, end)
+        sift(a.ptr, 0, end)
+    }
+}
+
+claw fn step[T](p *T, i int) {
+    t := p[0]
+    p[0] = p[i]
+    p[i] = t
+}
+
+claw fn sift[T](p *T, start int, n int) {
+    mut root := start
+    for root * 2 + 1 < n {
+        mut child := root * 2 + 1
+        if child + 1 < n and p[child] < p[child + 1] { child += 1 }
+        if not (p[root] < p[child]) { ret }
+        t := p[root]
+        p[root] = p[child]
+        p[child] = t
+        root = child
+    }
+}
+
+pub fn index_of[T](a []T, x T) ?int {
+    for v, i in a {
+        if v == x { ret i }
+    }
+    ret none
+}
+
+pub fn has[T](a []T, x T) bool {
+    for v in a {
+        if v == x { ret true }
+    }
+    ret false
+}
+
+// ---- strings ----
+
+claw fn str_eq(a str, b str) bool {
+    if a.len != b.len { ret false }
+    if a.len == 0 { ret true }
+    ret c_memcmp(a.ptr, b.ptr, u64(a.len)) == 0
+}
+
+claw fn str_cmp(a str, b str) int {
+    mut n := a.len
+    if b.len < n { n = b.len }
+    if n > 0 {
+        r := c_memcmp(a.ptr, b.ptr, u64(n))
+        if r != 0 { ret int(r) }
+    }
+    ret a.len - b.len
+}
+
+pub fn starts_with(s str, prefix str) bool {
+    if len(prefix) > len(s) { ret false }
+    ret s[0..len(prefix)] == prefix
+}
+
+pub fn ends_with(s str, suffix str) bool {
+    if len(suffix) > len(s) { ret false }
+    ret s[len(s) - len(suffix)..] == suffix
+}
+
+pub fn find(s str, t str) ?int {
+    mut i := 0
+    for i + len(t) <= len(s) {
+        if s[i..i + len(t)] == t { ret i }
+        i += 1
+    }
+    ret none
+}
+
+pub fn contains(s str, t str) bool {
+    _ = find(s, t) else {
+        ret false
+    }
+    ret true
+}
+
+fn is_space(c u8) bool {
+    ret c == ' ' or c == '\t' or c == '\n' or c == '\r'
+}
+
+pub fn trim(s str) str +mem {
+    mut a := 0
+    mut b := len(s)
+    for a < b and is_space(s[a]) { a += 1 }
+    for b > a and is_space(s[b - 1]) { b -= 1 }
+    ret copy(s[a..b])
+}
+
+pub fn split(s str, sep str) []str +mem {
+    mut out []str = []
+    mut start := 0
+    mut i := 0
+    for i + len(sep) <= len(s) {
+        if len(sep) > 0 and s[i..i + len(sep)] == sep {
+            push(&out, copy(s[start..i]))
+            i += len(sep)
+            start = i
+        } else {
+            i += 1
+        }
+    }
+    push(&out, copy(s[start..]))
+    ret out
+}
+
+pub fn lines(s str) []str +mem {
+    ret split(s, "\n")
+}
+
+pub claw fn join(parts []str, sep str) str +mem {
+    mut total := 0
+    for p, i in parts {
+        total += len(p)
+        if i > 0 { total += len(sep) }
+    }
+    if total == 0 { ret "" }
+    mem := alloc[u8](total)
+    mut at := 0
+    for p, i in parts {
+        if i > 0 and len(sep) > 0 {
+            _ = c_memmove(mem + at, sep.ptr, u64(len(sep)))
+            at += len(sep)
+        }
+        if len(p) > 0 {
+            _ = c_memmove(mem + at, p.ptr, u64(len(p)))
+            at += len(p)
+        }
+    }
+    mut out := ""
+    out.ptr = mem
+    out.len = total
+    out.cap = total
+    ret out
+}
+
+claw fn map_bytes(s str, low u8, high u8, delta i32) str +mem {
+    if len(s) == 0 { ret "" }
+    mem := alloc[u8](len(s))
+    for c, i in s {
+        if c >= low and c <= high {
+            mem[i] = u8(i32(c) + delta)
+        } else {
+            mem[i] = c
+        }
+    }
+    mut out := ""
+    out.ptr = mem
+    out.len = len(s)
+    out.cap = len(s)
+    ret out
+}
+
+pub fn upper(s str) str +mem {
+    ret map_bytes(s, 'a', 'z', -32)
+}
+
+pub fn lower(s str) str +mem {
+    ret map_bytes(s, 'A', 'Z', 32)
+}
+
+pub type NumErr = Empty | BadChar{at int} | TooBig
+
+pub fn to_int(s str) int ! NumErr {
+    if len(s) == 0 { fail Empty }
+    negative := s[0] == '-'
+    mut i := 0
+    if negative { i = 1 }
+    if i == len(s) { fail Empty }
+    limit := 922337203685477580
+    mut n := 0
+    for i < len(s) {
+        c := s[i]
+        if c < '0' or c > '9' { fail BadChar{i} }
+        d := int(c - '0')
+        if n > limit or (n == limit and d > 7) { fail TooBig }
+        n = n * 10 + d
+        i += 1
+    }
+    if negative { ret -n }
+    ret n
+}

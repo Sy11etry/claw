@@ -1,0 +1,25 @@
+// expect: 2
+// expect: 4
+// expect: 8
+// expect: 16
+// expect: 32
+// expect: 64
+// expect: 128
+// expect: 256
+// expect: 512
+// expect: 1024
+// expect: 2048
+// expect: 4096
+// expect: 8192
+// expect: 16384
+// expect: 32768
+// expect: 65536
+// exit: 101
+// stderr: interpolated string is too long
+fn main() {
+    mut s := "x"
+    for i in 0..18 {
+        s = "{s}{s}"
+        print(len(s) + i - i)
+    }
+}

@@ -1,0 +1,6 @@
+// error: E0152
+fn main() {
+    a [][]int = []
+    b := a[0]
+    print(b)
+}

@@ -1,6 +1,7 @@
-// error: E0900
+// error: E0157
 fn main() {
-    a := 1
+    mut a := 1
     p := &a
+    a = 2
     print(p)
 }

@@ -1,0 +1,12 @@
+// error: E0158
+type P { a int }
+
+fn f(a &P, b &int) {
+    a.a = b
+}
+
+fn main() {
+    mut p := P{1}
+    f(&p, &p.a)
+    print(p)
+}

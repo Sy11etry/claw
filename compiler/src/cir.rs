@@ -103,8 +103,10 @@ pub enum Inst {
     Load { d: VReg, p: VReg, off: u64, mem: Mem },
     Store { p: VReg, off: u64, s: VReg, mem: Mem },
     MemCopy { dst: VReg, src: VReg, size: u64 },
+    MemCopyDyn { dst: VReg, src: VReg, n: VReg },
     IndexAddr { d: VReg, base: VReg, idx: VReg, size: u64 },
     Bounds { idx: VReg, len: u64, loc: Loc },
+    BoundsDyn { idx: VReg, len: VReg, loc: Loc },
     /// `malloc` of `n` items, trapping on a bad size or on failure.
     Alloc { d: VReg, n: VReg, elem: u64, loc: Loc },
     Free { p: VReg },
@@ -113,6 +115,10 @@ pub enum Inst {
     CallC { d: Option<VReg>, sym: String, args: Vec<CArg>, variadic: Option<usize>, ret: CRet },
     BufStr { text: String },
     BufInt { s: VReg, signed: bool },
+    BufPtr { p: VReg, n: VReg },
+    /// From here on the output buffer collects a string instead of printing.
+    CaptureStart,
+    CaptureTake { ptr: VReg, len: VReg },
     BufBool { s: VReg },
     BufFloat { s: VReg, bits: u8 },
     Flush { fd: u32 },

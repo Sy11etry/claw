@@ -1,0 +1,14 @@
+fn round(n int) int {
+    mut a []int = []
+    for i in 0..n { push(&a, i) }
+    mut sum := 0
+    for x in a { sum += x }
+    for i in 0..n { sum += a[i] }
+    ret sum
+}
+
+fn main() {
+    mut total := 0
+    for _ in 0..5 { total += round(4000000) }
+    print(total)
+}

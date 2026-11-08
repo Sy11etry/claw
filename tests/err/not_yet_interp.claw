@@ -1,5 +1,6 @@
 // error: E0900
+test "a" {
+}
+
 fn main() {
-    s str = "a"
-    print(s)
 }

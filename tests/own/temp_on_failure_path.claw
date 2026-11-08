@@ -1,0 +1,25 @@
+// expect: fail(Bad{no1})
+// allocs-at-least: 2
+type E = Bad{msg str}
+
+fn make() []int {
+    ret [1, 2]
+}
+
+fn fails() int ! E {
+    fail Bad{"no{1}"}
+}
+
+fn sum(a []int, b int) int {
+    ret len(a) + b
+}
+
+fn use_it() int ! E {
+    x := sum(make(), fails()?)
+    ret x
+}
+
+fn main() {
+    r := use_it()
+    print(r)
+}

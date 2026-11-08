@@ -1,0 +1,32 @@
+// expect: 2
+// expect: 0
+// expect: 1
+// expect: kept
+// allocs-at-least: 4
+fn eat(own a []int) int {
+    ret len(a)
+}
+
+fn run(flag bool) int {
+    a []int = [1, 2]
+    if flag {
+        ret eat(a)
+    }
+    ret 0
+}
+
+fn branch(flag bool) {
+    a []int = [1]
+    if flag {
+        print(eat(a))
+    } else {
+        print("kept")
+    }
+}
+
+fn main() {
+    print(run(true))
+    print(run(false))
+    branch(true)
+    branch(false)
+}

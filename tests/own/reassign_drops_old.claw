@@ -1,0 +1,17 @@
+// expect: 5
+// expect: 6
+// allocs-at-least: 3
+fn make(n int) []int {
+    mut a []int = []
+    for i in 0..n { push(&a, i) }
+    ret a
+}
+
+fn main() {
+    mut a := make(3)
+    a = make(5)
+    print(len(a))
+    b := a
+    a = make(1)
+    print(len(a) + len(b))
+}

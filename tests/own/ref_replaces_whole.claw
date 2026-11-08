@@ -1,0 +1,21 @@
+// expect: new1
+// expect: [1, 2, 1, 2]
+// allocs-at-least: 3
+fn reset(s &str) {
+    s = "new{1}"
+}
+
+fn add_two(a &[]int) {
+    push(&a, 1)
+    push(&a, 2)
+}
+
+fn main() {
+    mut s := "old{2}"
+    reset(&s)
+    print(s)
+    mut a []int = []
+    add_two(&a)
+    add_two(&a)
+    print(a)
+}

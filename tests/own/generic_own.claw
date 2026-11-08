@@ -1,0 +1,19 @@
+// expect: 5
+// expect: s1
+// expect: [1, 2]
+// expect: [a2, b3]
+// allocs-at-least: 3
+fn id[T](own x T) T {
+    ret x
+}
+
+fn pair[T](own a T, own b T) [2]T {
+    ret [a, b]
+}
+
+fn main() {
+    print(id(5))
+    print(id("s{1}"))
+    print(id([1, 2] ))
+    print(pair("a{2}", "b{3}"))
+}

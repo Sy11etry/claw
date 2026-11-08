@@ -1,0 +1,13 @@
+// expect: [z3, y2]
+// expect: y2
+// expect: 2
+// allocs-at-least: 5
+fn main() {
+    mut a [2]str = ["x{1}", "y{2}"]
+    a[0] = "z{3}"
+    print(a)
+    b := copy(a)
+    print(b[1])
+    c := a
+    print(len(c))
+}

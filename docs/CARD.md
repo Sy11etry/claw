@@ -1,4 +1,4 @@
-# Claw 0.3 card
+# Claw 0.4 card
 
 One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -60,7 +60,7 @@ fn main() {                              // required, no params, no result
 }
 ```
 
-Types: `int` (= `i64`), `i8 i16 i32 u8 u16 u32 u64 f32 f64 bool`, `[N]T`, `?T`, `T ! E`, `! E`. No implicit conversions:
+Types: `int` (= `i64`), `i8 i16 i32 u8 u16 u32 u64 f32 f64 bool str`, `[N]T`, `[]T`, `?T`, `T ! E`, `! E`. No implicit conversions:
 write `i32(x)`, `f64(n)`, `int(c)`. A number literal takes the type around it. `'a'` is a `u8`.
 
 Operators: `+ - * / %`, `& | ^ ~ << >>`, `== != < <= > >=`, `and or not`.
@@ -75,6 +75,37 @@ changing an array while `for` walks it, ignoring a `T ! E`.
 
 Stops the program with exit code 101 and `file:line:col`: signed overflow, division by zero, bad shift, array index
 out of range, a conversion that does not fit a signed type (unsigned types wrap).
+
+## Memory is automatic
+
+```claw
+fn names() []str {
+    mut a []str = []                     // growable; `[1, 2]` works too
+    push(&a, "cat")
+    ret a                                // moves out, no copy
+}
+
+fn total(a []int) int { ... }            // parameter: read-only view
+fn clear_it(a &[]int) { a = [] }         // `&`: may change it; call with clear_it(&x)
+fn keep(own s str) Box { ... }           // `own`: takes it over; call with keep(s)
+
+fn demo() {
+    a := names()
+    b := a                               // `a` has moved: using it now is an error
+    c := copy(b)                         // copies are always written out
+    s := "n = {len(c)}"                  // `{expr}` builds a str
+    v := b[1..]                          // read-only view; also `[..2]`, works on str
+    print(v)
+    print(s[0..1] == "n")
+}                                        // everything still owned is freed here
+```
+
+Only a whole local variable can move. For a field or an element: `copy(x)`, `remove(&a, i)`, `swap(&a, &b)`.
+A collection cannot change while `for` walks it. One call cannot pass the same thing with `&` and without.
+`s[i]` is a `u8`; a `str` cannot be changed in place. A type may define `drop(x &T)`, run when it goes away.
+
+Always available: `push pop insert remove clear reserve swap sort has index_of`,
+`find contains starts_with ends_with trim split lines join upper lower to_int`. Also `use fs`, `use math`.
 
 ## Templates and modules
 
@@ -126,4 +157,6 @@ a pointer. `sizeof[T]()` is the size in bytes. `cast` converts between pointers,
 where `*u8` is expected is its NUL-terminated bytes. Arithmetic and array bounds stay checked in `claw fn`;
 raw pointers do not.
 
-Not yet (`E0900`): strings as values, `[]T`, `own`, `&` parameters, generic variants, `test`.
+In `claw fn`, `a.ptr`, `a.len`, `a.cap` of `[]T` and `str` are open to change.
+
+Not yet (`E0900`): generic variants, `test`.

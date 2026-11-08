@@ -1,0 +1,7 @@
+// error: E0157
+fn f(a &int) &int {
+    ret &a
+}
+
+fn main() {
+}

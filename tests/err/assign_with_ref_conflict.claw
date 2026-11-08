@@ -1,0 +1,11 @@
+// error: E0158
+fn g(a &[]int) int {
+    push(&a, 1)
+    ret 0
+}
+
+fn main() {
+    mut x []int = [1]
+    x[0] = g(&x)
+    print(x)
+}

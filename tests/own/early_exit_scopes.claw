@@ -1,0 +1,25 @@
+// expect: 6
+// expect: 1
+// allocs-at-least: 5
+fn make(n int) []int {
+    mut a []int = []
+    for i in 0..n { push(&a, i) }
+    ret a
+}
+
+fn f(n int) int {
+    outer := make(1)
+    for i in 0..4 {
+        inner := make(2)
+        if i == n {
+            nested := make(3)
+            ret len(outer) + len(inner) + len(nested)
+        }
+    }
+    ret len(outer)
+}
+
+fn main() {
+    print(f(2))
+    print(f(9))
+}

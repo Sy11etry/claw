@@ -1,0 +1,6 @@
+// error: E0158
+fn main() {
+    mut a := [1, 2]
+    swap(&a[0], &a[1])
+    print(a)
+}

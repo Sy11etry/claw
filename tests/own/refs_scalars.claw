@@ -1,0 +1,37 @@
+// expect: 4
+// expect: P{6, 1}
+// expect: [1, 3]
+// expect: [8]
+// allocs-at-least: 1
+type P { x int, y int }
+
+fn inc(n &int) {
+    n += 1
+}
+
+fn twice(n &int) {
+    inc(&n)
+    inc(&n)
+}
+
+fn set(p &P, v int) {
+    p.x = v
+    inc(&p.y)
+}
+
+fn main() {
+    mut a := 1
+    inc(&a)
+    twice(&a)
+    print(a)
+    mut p := P{0, 0}
+    set(&p, 5)
+    inc(&p.x)
+    print(p)
+    mut arr := [1, 2]
+    inc(&arr[1])
+    print(arr)
+    mut v []int = [7]
+    inc(&v[0])
+    print(v)
+}

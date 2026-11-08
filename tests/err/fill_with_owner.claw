@@ -1,0 +1,5 @@
+// error: E0153
+fn main() {
+    a [2]str = ["x"...]
+    print(a)
+}

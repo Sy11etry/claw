@@ -1,0 +1,16 @@
+// expect: 1.5
+// expect: 256
+// expect: 1
+// expect: 2
+// expect: 2.5
+// expect: 3
+use math
+
+fn main() {
+    print(math.sqrt(2.25))
+    print(math.pow(2, 8))
+    print(math.floor(1.5))
+    print(math.ceil(1.5))
+    print(math.abs(-2.5))
+    print(math.floor(math.pi))
+}

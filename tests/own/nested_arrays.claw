@@ -1,0 +1,18 @@
+// expect: [[1, 9], [3, 4]]
+// expect: 2
+// expect: 1
+// expect: 100
+// allocs-at-least: 5
+fn main() {
+    mut a [][]int = []
+    push(&a, [1, 2])
+    push(&a, [3])
+    a[0][1] = 9
+    push(&a[1], 4)
+    print(a)
+    print(len(a[1]))
+    b := copy(a)
+    a[0][0] = 100
+    print(b[0][0])
+    print(a[0][0])
+}

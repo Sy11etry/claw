@@ -1,0 +1,4 @@
+// error: E0106
+fn main() {
+    print(copy(1, 2))
+}

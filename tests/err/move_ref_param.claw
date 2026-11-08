@@ -1,0 +1,9 @@
+// error: E0152
+fn f(a &[]int) []int {
+    ret a
+}
+
+fn main() {
+    mut x []int = []
+    print(f(&x))
+}

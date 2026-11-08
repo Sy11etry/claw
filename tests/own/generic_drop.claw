@@ -1,0 +1,25 @@
+// expect: 7
+// expect: 2.5
+// allocs-at-least: 2
+type Box[T] { p *T }
+
+claw fn box_of[T](own v T) Box[T] {
+    p := alloc[T](1)
+    *p = v
+    ret Box[T]{p}
+}
+
+claw fn get[T](b Box[T]) T {
+    ret *b.p
+}
+
+claw fn drop[T](b &Box[T]) {
+    free(b.p)
+}
+
+fn main() {
+    a := box_of(7)
+    print(get(a))
+    c := box_of(2.5)
+    print(get(c))
+}

@@ -1,0 +1,13 @@
+// expect: 99999
+// expect: 100000
+// expect: n999
+// allocs-at-least: 1000
+fn main() {
+    mut a []int = []
+    for i in 0..100000 { push(&a, i) }
+    print(a[99999])
+    print(len(a))
+    mut s []str = []
+    for i in 0..1000 { push(&s, "n{i}") }
+    print(s[999])
+}

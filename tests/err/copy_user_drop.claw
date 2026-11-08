@@ -1,0 +1,16 @@
+// error: E0154
+type F { p *int }
+
+claw fn drop(f &F) {
+    free(f.p)
+}
+
+claw fn make() F {
+    ret F{none}
+}
+
+fn main() {
+    a := make()
+    b := copy(a)
+    print(b)
+}

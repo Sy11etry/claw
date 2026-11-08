@@ -1,0 +1,25 @@
+// expect: 10
+// expect: 10
+// allocs-at-least: 4
+type Tree { v int, kids []Tree }
+
+fn leaf(v int) Tree {
+    ret Tree{v, []}
+}
+
+fn sum(t Tree) int {
+    mut s := t.v
+    for k in t.kids { s += sum(k) }
+    ret s
+}
+
+fn main() {
+    mut root := leaf(1)
+    push(&root.kids, leaf(2))
+    mut k := leaf(3)
+    push(&k.kids, leaf(4))
+    push(&root.kids, k)
+    print(sum(root))
+    c := copy(root)
+    print(sum(c))
+}

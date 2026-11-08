@@ -1,0 +1,27 @@
+// expect: [apple2, fig3, pear1]
+// expect: 1
+// expect: false
+// expect: pear1
+// expect: apple2
+// expect: [kiwi4, fig3]
+// expect: 0
+// allocs-at-least: 6
+fn main() {
+    mut a []str = []
+    push(&a, "pear{1}")
+    push(&a, "apple{2}")
+    push(&a, "fig{3}")
+    sort(&a)
+    print(a)
+    print(index_of(a, "fig3"))
+    print(has(a, "kiwi"))
+    x := pop(&a)
+    print(x)
+    y := remove(&a, 0)
+    print(y)
+    insert(&a, 0, "kiwi{4}")
+    print(a)
+    clear(&a)
+    print(len(a))
+    push(&a, "z{5}")
+}

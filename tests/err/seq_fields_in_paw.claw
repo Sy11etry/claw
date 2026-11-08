@@ -1,0 +1,5 @@
+// error: E0129
+fn main() {
+    a []int = []
+    print(a.len)
+}

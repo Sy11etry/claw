@@ -1,0 +1,23 @@
+// expect: 2
+// expect: 1
+// expect: 1
+// expect: 1
+// expect: 1
+// allocs-at-least: 5
+fn eat(own a []int) int {
+    ret len(a)
+}
+
+fn main() {
+    a []int = [1, 2]
+    for {
+        print(eat(a))
+        break
+    }
+    mut b []int = [1]
+    for i in 0..3 {
+        print(eat(b))
+        b = [i]
+    }
+    print(len(b))
+}

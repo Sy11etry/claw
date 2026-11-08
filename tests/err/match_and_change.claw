@@ -1,0 +1,13 @@
+// error: E0122
+type T = A{s str} | B
+
+fn main() {
+    mut t := A{"x"}
+    match t {
+        A{s}: {
+            t = B
+            print(s)
+        }
+        B: print(1)
+    }
+}

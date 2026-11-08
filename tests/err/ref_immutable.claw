@@ -1,0 +1,10 @@
+// error: E0103
+fn inc(n &int) {
+    n += 1
+}
+
+fn main() {
+    a := 1
+    inc(&a)
+    print(a)
+}

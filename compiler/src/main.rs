@@ -35,16 +35,18 @@ struct Options {
     json: bool,
     emit_cir: bool,
     check_only: bool,
+    alloc_stats: bool,
 }
 
 fn parse_options(args: &[String]) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => o.json = true,
             "--emit-cir" => o.emit_cir = true,
             "--check" => o.check_only = true,
+            "--alloc-stats" => o.alloc_stats = true,
             "-o" => {
                 i += 1;
                 match args.get(i) {
@@ -86,11 +88,11 @@ fn compile_to_cir(o: &Options) -> (cir::Module, Vec<String>) {
         Err((diags, files)) => report(o, diags, &files),
     };
     let mut diags = Vec::new();
-    let checked = sema::check(&loaded.units, &mut diags);
+    let checked = sema::check(&loaded.units, loaded.core, &mut diags);
     if !diags.is_empty() {
         report(o, diags, &loaded.files);
     }
-    let funcs = || loaded.units.iter().flat_map(|u| u.program.funcs.iter());
+    let funcs = || loaded.units.iter().filter(|u| !u.is_std).flat_map(|u| u.program.funcs.iter());
     let contracts: usize = funcs().map(|f| f.contracts.len()).sum();
     let effects: usize = funcs().map(|f| f.effects.len()).sum();
     if contracts + effects > 0 {
@@ -131,7 +133,7 @@ fn compile(o: &Options, out: &Path) {
     if o.emit_cir {
         print!("{}", cir::dump(&module));
     }
-    let object = match codegen::generate(&module, &files) {
+    let object = match codegen::generate(&module, &files, o.alloc_stats) {
         Ok(obj) => obj,
         Err(e) => {
             eprintln!("{}:1:1 {e}", o.file);

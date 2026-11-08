@@ -1,0 +1,13 @@
+// expect: 50
+// allocs-at-least: 0
+fn main() {
+    mut total := 0
+    for i in 0..10 {
+        a := [i, i + 1]
+        b []int = [i]
+        if i == 3 { continue }
+        if i == 8 { break }
+        total += a[0] + b[0]
+    }
+    print(total)
+}

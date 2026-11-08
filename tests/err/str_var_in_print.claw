@@ -1,5 +1,5 @@
-// error: E0900
+// error: E0104
 fn main() {
-    x := "{1}"
+    x str = 1
     print(x)
 }

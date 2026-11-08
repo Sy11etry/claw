@@ -1,0 +1,10 @@
+// error: E0158
+fn f(a &int, b &int) {
+    a = b
+}
+
+fn main() {
+    mut x := 1
+    f(&x, &x)
+    print(x)
+}

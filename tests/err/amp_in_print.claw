@@ -1,0 +1,6 @@
+// error: E0157
+fn main() {
+    mut x := 1
+    print(&x)
+    x = 2
+}

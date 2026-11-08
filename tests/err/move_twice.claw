@@ -1,0 +1,7 @@
+// error: E0151
+fn main() {
+    a []int = [1]
+    b := a
+    c := a
+    print(len(b) + len(c))
+}

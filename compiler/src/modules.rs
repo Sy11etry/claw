@@ -13,11 +13,15 @@ pub struct Unit {
     /// Local name of each import, and which unit it is.
     pub imports: HashMap<String, usize>,
     pub import_spans: HashMap<String, Span>,
+    /// Part of the standard library rather than the user's program.
+    pub is_std: bool,
 }
 
 pub struct Loaded {
     /// Dependencies come before the modules that use them; the root is last.
     pub units: Vec<Unit>,
+    /// The always-available `core` module.
+    pub core: usize,
     /// Full paths, for error messages.
     pub files: Vec<String>,
     /// Base names, for messages printed at run time.
@@ -32,6 +36,7 @@ struct Loader {
     done: HashMap<PathBuf, usize>,
     in_progress: Vec<PathBuf>,
     diags: Vec<Diag>,
+    core: Option<usize>,
 }
 
 impl Loader {
@@ -43,6 +48,16 @@ impl Loader {
         }
         let in_std = self.std_root.as_ref()?.join(&rel);
         in_std.is_file().then_some(in_std)
+    }
+
+    fn load_core(&mut self) {
+        let found = self.std_root.as_ref().map(|r| r.join("core.claw")).filter(|p| p.is_file());
+        let Some(path) = found else {
+            eprintln!("claw: cannot find std/core.claw next to the compiler");
+            std::process::exit(2);
+        };
+        let name = path.to_string_lossy().into_owned();
+        self.core = self.load(name, path, "core.".to_string(), Some(Span::default()));
     }
 
     /// Returns the unit index, or None if the file could not be used.
@@ -82,6 +97,9 @@ impl Loader {
         }
 
         self.in_progress.push(key.clone());
+        if from.is_none() {
+            self.load_core();
+        }
         let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let mut imports = HashMap::new();
         let mut import_spans = HashMap::new();
@@ -104,7 +122,8 @@ impl Loader {
         }
         self.in_progress.pop();
 
-        self.units.push(Unit { prefix, program, imports, import_spans });
+        let is_std = self.std_root.as_ref().is_some_and(|r| r.canonicalize().map(|c| key.starts_with(c)).unwrap_or(false));
+        self.units.push(Unit { prefix, program, imports, import_spans, is_std });
         let idx = self.units.len() - 1;
         self.done.insert(key, idx);
         Some(idx)
@@ -132,10 +151,12 @@ pub fn load(root: &str) -> Result<Loaded, (Vec<Diag>, Vec<String>)> {
         done: HashMap::new(),
         in_progress: Vec::new(),
         diags: Vec::new(),
+        core: None,
     };
     l.load(root.to_string(), PathBuf::from(root), String::new(), None);
     if !l.diags.is_empty() {
         return Err((l.diags, l.files));
     }
-    Ok(Loaded { units: l.units, files: l.files, base_names: l.base_names })
+    let core = l.core.expect("core was loaded with the root");
+    Ok(Loaded { units: l.units, core, files: l.files, base_names: l.base_names })
 }

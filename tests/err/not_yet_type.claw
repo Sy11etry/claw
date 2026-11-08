@@ -1,7 +1,5 @@
 // error: E0900
-fn f(a []int) {
-    print(1)
-}
+type Opt[T] = S{v T}
 
 fn main() {
 }

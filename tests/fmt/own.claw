@@ -1,0 +1,7 @@
+fn f( own a []int,b &[]str,c str )[]int {
+ x:=a[1..]
+ y:=c[..2]
+ z:=c[i+1..j]
+ push( &b,"s" )
+ ret []
+}

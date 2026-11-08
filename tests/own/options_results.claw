@@ -1,0 +1,48 @@
+// expect: n1
+// expect: none
+// expect: d3
+// expect: n1
+// expect: [1]
+// expect: fail(Bad{oops2})
+// expect: n1
+// expect: [9]
+// expect: err Bad{oops2}
+// allocs-at-least: 9
+type E = Bad{msg str} | Other
+
+fn name(ok bool) ?str {
+    if ok { ret "n{1}" }
+    ret none
+}
+
+fn parse(ok bool) []int ! E {
+    if ok { ret [1] }
+    fail Bad{"oops{2}"}
+}
+
+fn pass(ok bool) []int ! E {
+    a := parse(ok)?
+    ret a
+}
+
+fn opt_pass(ok bool) ?str {
+    s := name(ok)?
+    ret s
+}
+
+fn main() {
+    print(name(true))
+    print(name(false))
+    print(name(false) else "d{3}")
+    print(name(true) else "unused")
+    print(pass(true))
+    print(pass(false))
+    print(opt_pass(true))
+    a := parse(false) else [9]
+    print(a)
+    b := parse(false) else e {
+        print("err {e}")
+        ret
+    }
+    print(b)
+}

@@ -1,0 +1,10 @@
+// error: E0158
+fn f(a &[]int, b []int) {
+    a = copy(b)
+}
+
+fn main() {
+    mut x []int = []
+    f(&x, x)
+    print(x)
+}

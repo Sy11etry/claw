@@ -1,0 +1,17 @@
+// expect: line one
+// expect: line two
+// expect: 2
+// expect: fail(NotFound)
+// allocs-at-least: 3
+use fs
+
+fn main() {
+    path := "/tmp/claw_fs_test_roundtrip.txt"
+    fs.write(path, "line one\nline two")?
+    text := fs.read(path)?
+    print(text)
+    print(len(lines(text)))
+    fs.remove(path)?
+    r := fs.read(path)
+    print(r)
+}

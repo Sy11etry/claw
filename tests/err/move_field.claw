@@ -1,0 +1,8 @@
+// error: E0152
+type P { a []int }
+
+fn main() {
+    p := P{[]}
+    q := p.a
+    print(q)
+}
