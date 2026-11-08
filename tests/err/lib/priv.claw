@@ -1,0 +1,23 @@
+pub fn open_one() int {
+    ret 1
+}
+
+fn secret() int {
+    ret 2
+}
+
+type Hidden { x int }
+const quiet = 3
+pub type Shown { x int }
+
+pub fn twin(s Shown) int {
+    ret s.x
+}
+
+fn only_inside(s Shown) int {
+    ret s.x
+}
+
+pub fn unused_helper() int {
+    ret only_inside(Shown{1}) + secret() + quiet + Hidden{1}.x
+}

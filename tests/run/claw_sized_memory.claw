@@ -1,0 +1,25 @@
+// expect: M{200, -300, -70000, 1.5, true}
+// expect: 200
+// expect: 16
+// expect: 8
+// expect: 6
+// expect: 8
+// expect: true
+// expect: true
+type M { a u8, b i16, c i32, d f32, e bool }
+
+claw fn main() {
+    h := alloc[M](2)
+    defer free(h)
+    h[1] = M{200, -300, -70000, 1.5, true}
+    print(h[1])
+    b := cast[*u8](h)
+    print(b[sizeof[M]()])
+    print(sizeof[M]())
+    print(sizeof[int]())
+    print(sizeof[[3]u16]())
+    print(sizeof[*int]())
+    print(cast[int](h) == cast[int](b))
+    p := cast[*int](cast[int](h))
+    print(p == cast[*int](h))
+}

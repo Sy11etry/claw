@@ -1,0 +1,42 @@
+// expect: inner out
+// expect: got 1
+// expect: outer out
+// expect: 2
+// expect: inner out
+// expect: outer out
+// expect: fail(Bad)
+// expect: find out
+// expect: twice out
+// expect: none
+type E = Bad
+
+claw fn inner(n int) int ! E {
+    defer print("inner out")
+    if n == 0 { fail Bad }
+    ret n
+}
+
+claw fn outer(n int) int ! E {
+    defer print("outer out")
+    x := inner(n)?
+    print("got {x}")
+    ret x + 1
+}
+
+claw fn find(n int) ?int {
+    defer print("find out")
+    if n == 0 { ret none }
+    ret n
+}
+
+claw fn twice(n int) ?int {
+    defer print("twice out")
+    x := find(n)?
+    ret x * 2
+}
+
+claw fn main() {
+    print(outer(1))
+    print(outer(0))
+    print(twice(0))
+}

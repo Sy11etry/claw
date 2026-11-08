@@ -1,0 +1,11 @@
+// error: E0140
+type H { p *int }
+
+claw fn make() H {
+    ret H{none}
+}
+
+fn main() {
+    h := make()
+    print(h.p)
+}

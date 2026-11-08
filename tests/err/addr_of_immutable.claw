@@ -1,0 +1,6 @@
+// error: E0103
+claw fn main() {
+    x := 1
+    p := &x
+    print(p)
+}

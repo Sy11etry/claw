@@ -1,0 +1,14 @@
+// expect: none
+// expect: cleanup
+claw fn get() ?int {
+    ret none
+}
+
+claw fn main() {
+    defer print("cleanup")
+    x := get() else {
+        print("none")
+        ret
+    }
+    print(x)
+}

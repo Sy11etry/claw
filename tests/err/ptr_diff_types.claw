@@ -1,0 +1,7 @@
+// error: E0104
+claw fn f(p *int, q *u8) int {
+    ret p - q
+}
+
+fn main() {
+}

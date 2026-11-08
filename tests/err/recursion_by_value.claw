@@ -1,0 +1,5 @@
+// error: E0127
+type N { next N }
+
+fn main() {
+}

@@ -1,0 +1,5 @@
+// error: E0148
+use lib.priv
+
+fn main() {
+}

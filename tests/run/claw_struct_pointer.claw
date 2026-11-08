@@ -1,0 +1,27 @@
+// expect: P{2, 200}
+// expect: P{5, 6}
+// expect: 5
+// expect: 42
+type P { x int, y u8 }
+
+claw fn bump(p *P) {
+    p.x += 1
+    (*p).y = 200
+}
+
+claw fn main() {
+    mut a := P{1, 2}
+    bump(&a)
+    print(a)
+    h := alloc[P](1)
+    defer free(h)
+    h.x = 5
+    h.y = 6
+    print(*h)
+    copy_of := *h
+    h.x = 99
+    print(copy_of.x)
+    px := &a.x
+    *px = 42
+    print(a.x)
+}

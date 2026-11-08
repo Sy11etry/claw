@@ -1,0 +1,10 @@
+// expect: 12
+// expect: Point{2, 2}
+use lib.geo
+use lib.shapes
+
+fn main() {
+    p := shapes.double(geo.make(1))
+    print(geo.area(p))
+    print(p)
+}

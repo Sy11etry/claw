@@ -1,0 +1,8 @@
+// error: E0108
+claw fn main() {
+    for {
+        defer {
+            break
+        }
+    }
+}

@@ -1,0 +1,4 @@
+// error: E0104
+claw fn main() {
+    free(1)
+}

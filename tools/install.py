@@ -31,6 +31,12 @@ def main():
     shutil.copy2(BUILD, tmp)
     os.replace(tmp, target)
 
+    # Each version keeps the standard library it was built with.
+    std_dst = version_dir / "std"
+    if std_dst.exists():
+        shutil.rmtree(std_dst)
+    shutil.copytree(ROOT / "std", std_dst)
+
     for name in (f"claw-{short}", "claw"):
         link = bin_dir / name
         tmp_link = bin_dir / (name + ".tmp")

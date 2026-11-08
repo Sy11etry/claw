@@ -1,0 +1,10 @@
+// error: E0127
+// error: E0105
+type A[T] { a A[T] }
+
+fn f(a A[int]) {
+    print(1)
+}
+
+fn main() {
+}

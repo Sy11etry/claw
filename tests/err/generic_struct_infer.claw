@@ -1,0 +1,10 @@
+// error: E0144
+type B[T] { p *T }
+
+claw fn f() {
+    b := B{none}
+    print(b.p)
+}
+
+fn main() {
+}

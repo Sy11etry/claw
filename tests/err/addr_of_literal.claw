@@ -1,0 +1,5 @@
+// error: E0131
+claw fn main() {
+    p := &1
+    print(p)
+}

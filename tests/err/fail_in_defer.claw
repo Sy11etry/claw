@@ -1,0 +1,11 @@
+// error: E0143
+type E = X
+
+claw fn g() ! E {
+    defer {
+        fail X
+    }
+}
+
+fn main() {
+}

@@ -1,0 +1,6 @@
+// expect: 5
+use lib.cmem
+
+claw fn main() {
+    print(cmem.strlen("hello"))
+}

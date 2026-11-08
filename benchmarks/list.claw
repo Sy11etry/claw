@@ -1,0 +1,25 @@
+type Node { next *Node, v int }
+
+claw fn round(n int) int {
+    mut head *Node = none
+    for i in 0..n {
+        p := alloc[Node](1)
+        p.next = head
+        p.v = i
+        head = p
+    }
+    mut sum := 0
+    for head != none {
+        sum += head.v
+        next := head.next
+        free(head)
+        head = next
+    }
+    ret sum
+}
+
+fn main() {
+    mut total := 0
+    for _ in 0..5 { total += round(1000000) }
+    print(total)
+}

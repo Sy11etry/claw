@@ -1,4 +1,4 @@
-// error: E0900
+// error: E0142
 fn main() {
     defer print(1)
 }

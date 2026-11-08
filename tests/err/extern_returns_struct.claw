@@ -1,0 +1,7 @@
+// error: E0149
+type P { x int }
+
+extern fn f() P
+
+fn main() {
+}

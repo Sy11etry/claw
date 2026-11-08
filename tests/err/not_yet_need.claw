@@ -1,7 +1,5 @@
 // error: E0900
-fn f[T](a T) T {
-    ret a
-}
+type Opt[T] = Some{v T} | Nope
 
 fn main() {
 }

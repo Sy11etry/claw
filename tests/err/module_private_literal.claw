@@ -1,0 +1,6 @@
+// error: E0147
+use lib.priv
+
+fn main() {
+    print(priv.Hidden{1})
+}

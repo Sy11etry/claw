@@ -1,0 +1,30 @@
+// expect: 30
+// expect: true
+type Node { next *Node, v int }
+
+claw fn push(head *Node, v int) *Node {
+    n := alloc[Node](1)
+    n.next = head
+    n.v = v
+    ret n
+}
+
+claw fn main() {
+    mut head *Node = none
+    for i in 0..5 {
+        head = push(head, i * i)
+    }
+    mut sum := 0
+    mut p := head
+    for p != none {
+        sum += p.v
+        p = p.next
+    }
+    print(sum)
+    for head != none {
+        next := head.next
+        free(head)
+        head = next
+    }
+    print(head == none)
+}

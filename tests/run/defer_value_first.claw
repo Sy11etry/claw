@@ -1,0 +1,15 @@
+// expect: 100
+// expect: 1
+claw fn f() int {
+    mut x := 1
+    p := &x
+    defer {
+        *p = 100
+        print(x)
+    }
+    ret x
+}
+
+claw fn main() {
+    print(f())
+}

@@ -1,0 +1,19 @@
+// expect: 2
+// expect: 1.5
+// expect: 200
+// expect: 4
+// expect: 250
+fn max[T](a T, b T) T {
+    if a > b { ret a }
+    ret b
+}
+
+fn main() {
+    print(max(1, 2))
+    print(max(1.5, 0.5))
+    x u8 = 200
+    y u8 = 100
+    print(max(x, y))
+    print(max[i32](3, 4))
+    print(max(x, 250))
+}

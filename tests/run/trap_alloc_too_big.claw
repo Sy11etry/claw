@@ -1,0 +1,10 @@
+// exit: 101
+// stderr: trap: invalid allocation size
+claw fn v(n int) int {
+    ret n
+}
+
+claw fn main() {
+    p := alloc[int](v(4611686018427387904))
+    print(p == none)
+}

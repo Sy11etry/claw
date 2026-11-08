@@ -3,6 +3,8 @@
 use crate::ast::*;
 use crate::diag::{Diag, Span};
 use crate::lexer::{self, Tok, Token};
+use std::cell::RefCell;
+use std::collections::HashSet;
 
 type PResult<T> = Result<T, ()>;
 
@@ -16,11 +18,11 @@ pub struct Parser<'a> {
 }
 
 fn join(a: Span, b: Span) -> Span {
-    Span { start: a.start, end: b.end, line: a.line, col: a.col }
+    Span { start: a.start, end: b.end, line: a.line, col: a.col, file: a.file }
 }
 
 fn not_yet(what: &str) -> String {
-    format!("{what} is not available in claw 0.2")
+    format!("{what} is not available in claw 0.3")
 }
 
 fn is_type_name(s: &str) -> bool {
@@ -131,14 +133,26 @@ impl<'a> Parser<'a> {
                 break;
             }
             let span = self.span();
+            let public = self.at_kw("pub");
+            if public {
+                self.bump();
+            }
             let result: PResult<()> = match self.peek().clone() {
-                Tok::Kw("fn") => self.parse_func().map(|f| p.funcs.push(f)),
-                Tok::Kw("type") => self.parse_type_decl().map(|t| p.types.push(t)),
-                Tok::Kw("const") => self.parse_const().map(|c| p.consts.push(c)),
-                Tok::Kw(k) if matches!(k, "use" | "pub" | "test" | "claw" | "extern") => {
-                    self.error("E0900", span, not_yet(&format!("`{k}`")))
+                Tok::Kw("fn") => self.parse_func(public, false).map(|f| p.funcs.push(f)),
+                Tok::Kw("claw") => {
+                    self.bump();
+                    if self.at_kw("fn") {
+                        self.parse_func(public, true).map(|f| p.funcs.push(f))
+                    } else {
+                        self.expected("`fn` after `claw`")
+                    }
                 }
-                _ => self.expected("`fn`, `type` or `const`"),
+                Tok::Kw("type") => self.parse_type_decl(public).map(|t| p.types.push(t)),
+                Tok::Kw("const") => self.parse_const(public).map(|c| p.consts.push(c)),
+                Tok::Kw("extern") => self.parse_extern(public).map(|e| p.externs.push(e)),
+                Tok::Kw("use") if !public => self.parse_use().map(|u| p.uses.push(u)),
+                Tok::Kw("test") => self.error("E0900", span, not_yet("`test`")),
+                _ => self.expected("`fn`, `claw fn`, `type`, `const`, `extern` or `use`"),
             };
             if result.is_err() {
                 self.bump();
@@ -153,7 +167,7 @@ impl<'a> Parser<'a> {
         loop {
             match self.peek() {
                 Tok::Eof => return,
-                Tok::Kw("fn") | Tok::Kw("type") | Tok::Kw("const")
+                Tok::Kw("fn") | Tok::Kw("type") | Tok::Kw("const") | Tok::Kw("claw") | Tok::Kw("extern") | Tok::Kw("use") | Tok::Kw("pub")
                     if self.pos == 0 || self.toks[self.pos - 1].tok == Tok::Newline =>
                 {
                     return
@@ -165,13 +179,63 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_const(&mut self) -> PResult<ConstDecl> {
+    fn parse_use(&mut self) -> PResult<UseDecl> {
+        let span = self.bump().span;
+        let mut path = vec![self.expect_ident("a module name")?.0];
+        while self.eat_op(".") {
+            path.push(self.expect_ident("a module name")?.0);
+        }
+        Ok(UseDecl { path, span })
+    }
+
+    fn parse_extern(&mut self, public: bool) -> PResult<ExternDecl> {
+        self.bump();
+        if !self.at_kw("fn") {
+            return self.expected("`fn` after `extern`");
+        }
+        self.bump();
+        let (name, span) = self.expect_ident("a function name")?;
+        self.expect_op("(")?;
+        let mut params = Vec::new();
+        let mut variadic = false;
+        while !self.at_op(")") {
+            if self.eat_op("...") {
+                variadic = true;
+                break;
+            }
+            let (pname, pspan) = self.expect_ident("a parameter name")?;
+            let ty = self.parse_type()?;
+            params.push(Param { name: pname, span: pspan, ty });
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        let ret = if matches!(self.peek(), Tok::Ident(_)) || self.at_op("*") { Some(self.parse_type()?) } else { None };
+        Ok(ExternDecl { name, span, public, params, variadic, ret })
+    }
+
+    fn parse_tparams(&mut self) -> PResult<Vec<(String, Span)>> {
+        let mut out = Vec::new();
+        if self.eat_op("[") {
+            while !self.at_op("]") {
+                out.push(self.expect_ident("a type parameter")?);
+                if !self.eat_op(",") {
+                    break;
+                }
+            }
+            self.expect_op("]")?;
+        }
+        Ok(out)
+    }
+
+    fn parse_const(&mut self, public: bool) -> PResult<ConstDecl> {
         self.bump();
         let (name, span) = self.expect_ident("a constant name")?;
         let ty = if self.at_op("=") { None } else { Some(self.parse_type()?) };
         self.expect_op("=")?;
         let value = self.parse_expr(0)?;
-        Ok(ConstDecl { name, span, ty, value })
+        Ok(ConstDecl { name, span, public, ty, value })
     }
 
     fn parse_fields(&mut self) -> PResult<Vec<FieldDecl>> {
@@ -194,16 +258,13 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
-    fn parse_type_decl(&mut self) -> PResult<TypeDecl> {
+    fn parse_type_decl(&mut self, public: bool) -> PResult<TypeDecl> {
         self.bump();
         let (name, span) = self.expect_ident("a type name")?;
-        if self.at_op("[") {
-            let s = self.span();
-            return self.error("E0900", s, not_yet("generics"));
-        }
+        let tparams = self.parse_tparams()?;
         if self.at_op("{") {
             let fields = self.parse_fields()?;
-            return Ok(TypeDecl { name, span, body: TypeBody::Struct(fields) });
+            return Ok(TypeDecl { name, span, public, tparams, body: TypeBody::Struct(fields) });
         }
         self.expect_op("=")?;
         let mut variants = Vec::new();
@@ -215,7 +276,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
-        Ok(TypeDecl { name, span, body: TypeBody::Variants(variants) })
+        Ok(TypeDecl { name, span, public, tparams, body: TypeBody::Variants(variants) })
     }
 
     fn parse_type_base(&mut self) -> PResult<TypeExpr> {
@@ -246,11 +307,55 @@ impl<'a> Parser<'a> {
             let elem = self.parse_type_base()?;
             return Ok(TypeExpr { kind: TypeKind::Array(size, Box::new(elem)), span });
         }
-        if self.at_op("*") || self.at_op("&") {
-            return self.error("E0900", span, not_yet("references and pointers"));
+        if self.eat_op("*") {
+            let inner = self.parse_type_base()?;
+            return Ok(TypeExpr { kind: TypeKind::Pointer(Box::new(inner)), span });
         }
-        let (name, _) = self.expect_ident("a type")?;
-        Ok(TypeExpr { kind: TypeKind::Name(name), span })
+        if self.at_op("&") {
+            return self.error("E0900", span, not_yet("the `&` parameter"));
+        }
+        let (first, _) = self.expect_ident("a type")?;
+        let (module, name) = if self.at_op(".") {
+            self.bump();
+            (Some(first), self.expect_ident("a type")?.0)
+        } else {
+            (None, first)
+        };
+        let targs = if self.at_op("[") { self.parse_targs()? } else { Vec::new() };
+        Ok(TypeExpr { kind: TypeKind::Name { module, name, targs }, span })
+    }
+
+    fn parse_targs(&mut self) -> PResult<Vec<TypeExpr>> {
+        self.expect_op("[")?;
+        let mut out = Vec::new();
+        while !self.at_op("]") {
+            out.push(self.parse_type()?);
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op("]")?;
+        Ok(out)
+    }
+
+    /// At `[`: does this bracket hold type arguments, as in `max[int](1, 2)`?
+    fn looks_like_targs(&self, name: &str) -> bool {
+        let mut i = 1;
+        let mut depth = 1;
+        while depth > 0 {
+            match self.peek_at(i) {
+                Tok::Op("[") => depth += 1,
+                Tok::Op("]") => depth -= 1,
+                Tok::Eof | Tok::Newline => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        match self.peek_at(i) {
+            Tok::Op("(") => true,
+            Tok::Op("{") => is_type_name(name) && !self.in_head,
+            _ => false,
+        }
     }
 
     fn parse_type(&mut self) -> PResult<TypeExpr> {
@@ -269,13 +374,10 @@ impl<'a> Parser<'a> {
         Ok(t)
     }
 
-    fn parse_func(&mut self) -> PResult<Func> {
+    fn parse_func(&mut self, public: bool, claw: bool) -> PResult<Func> {
         self.bump();
         let (name, name_span) = self.expect_ident("a function name")?;
-        if self.at_op("[") {
-            let span = self.span();
-            return self.error("E0900", span, not_yet("generics"));
-        }
+        let tparams = self.parse_tparams()?;
         self.expect_op("(")?;
         let mut params = Vec::new();
         while !self.at_op(")") {
@@ -315,7 +417,7 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
         let body = self.parse_block()?;
-        Ok(Func { name, name_span, params, ret, contracts, effects, body })
+        Ok(Func { name, name_span, public, claw, tparams, addressed: RefCell::new(HashSet::new()), params, ret, contracts, effects, body })
     }
 
     fn parse_block(&mut self) -> PResult<Block> {
@@ -353,7 +455,9 @@ impl<'a> Parser<'a> {
     fn is_typed_let(&self) -> bool {
         match self.peek_at(1) {
             Tok::Ident(_) => true,
-            Tok::Op("?") => matches!(self.peek_at(2), Tok::Ident(_) | Tok::Op("[") | Tok::Op("?")),
+            Tok::Op("?") => matches!(self.peek_at(2), Tok::Ident(_) | Tok::Op("[") | Tok::Op("?") | Tok::Op("*")),
+            // `x * y` alone does nothing, so at the start of a line this is a pointer type.
+            Tok::Op("*") => true,
             Tok::Op("[") => {
                 // Skip every `[...]` group; a type follows only in a declaration.
                 let mut i = 1;
@@ -370,7 +474,7 @@ impl<'a> Parser<'a> {
                         i += 1;
                     }
                 }
-                matches!(self.peek_at(i), Tok::Ident(_) | Tok::Op("?"))
+                matches!(self.peek_at(i), Tok::Ident(_) | Tok::Op("?") | Tok::Op("*"))
             }
             _ => false,
         }
@@ -413,7 +517,17 @@ impl<'a> Parser<'a> {
                 start,
                 "`else` must be on the same line as the closing `}`".to_string(),
             ),
-            Tok::Kw(k) if matches!(k, "defer" | "need" | "sure") => {
+            Tok::Kw("defer") => {
+                self.bump();
+                let body = if self.at_op("{") {
+                    self.parse_block()?
+                } else {
+                    let stmt = self.parse_stmt()?;
+                    Block { stmts: vec![stmt], end: start }
+                };
+                Ok(Stmt { kind: StmtKind::Defer(body), span: start })
+            }
+            Tok::Kw(k) if matches!(k, "need" | "sure") => {
                 self.error("E0900", start, not_yet(&format!("`{k}` here")))
             }
             Tok::Ident(name) => {
@@ -692,8 +806,17 @@ impl<'a> Parser<'a> {
             let span = join(start, e.span);
             return Ok(Expr::new(ExprKind::Unary { op: UnOp::BitNot, e: Box::new(e) }, span));
         }
-        if self.at_op("&") || self.at_op("*") {
-            return self.error("E0900", start, not_yet("references and pointers"));
+        if self.at_op("&") {
+            self.bump();
+            let e = self.parse_unary()?;
+            let span = join(start, e.span);
+            return Ok(Expr::new(ExprKind::AddrOf(Box::new(e)), span));
+        }
+        if self.at_op("*") {
+            self.bump();
+            let e = self.parse_unary()?;
+            let span = join(start, e.span);
+            return Ok(Expr::new(ExprKind::Deref(Box::new(e)), span));
         }
         let e = self.parse_primary()?;
         self.parse_postfix(e)
@@ -704,8 +827,25 @@ impl<'a> Parser<'a> {
             if self.at_op(".") {
                 self.bump();
                 let (name, name_span) = self.expect_ident("a field name")?;
-                let span = join(e.span, name_span);
-                e = Expr::new(ExprKind::Field { e: Box::new(e), name, name_span }, span);
+                let targs = if self.at_op("[") && self.looks_like_targs(&name) { self.parse_targs()? } else { Vec::new() };
+                let module = if let ExprKind::Var(m) = &e.kind { Some(m.clone()) } else { None };
+                if self.at_op("(") {
+                    let Some(module) = module else {
+                        return self.error("E0900", name_span, not_yet("calling through a value"));
+                    };
+                    self.bump();
+                    let (args, close) = self.parse_args(")")?;
+                    let span = join(e.span, close);
+                    e = Expr::new(ExprKind::Call { module: Some(module), name, name_span, targs, args }, span);
+                } else if self.at_op("{") && module.is_some() && is_type_name(&name) && !self.in_head {
+                    self.bump();
+                    let (args, close) = self.parse_args("}")?;
+                    let span = join(e.span, close);
+                    e = Expr::new(ExprKind::StructLit { module, name, name_span, targs, args }, span);
+                } else {
+                    let span = join(e.span, name_span);
+                    e = Expr::new(ExprKind::Field { e: Box::new(e), name, name_span }, span);
+                }
             } else if self.at_op("[") {
                 self.bump();
                 let was = std::mem::replace(&mut self.in_head, false);
@@ -800,7 +940,7 @@ impl<'a> Parser<'a> {
     /// Parses `{expr}` from a string; errors point at the string itself.
     fn parse_embedded(&mut self, src: &str, span: Span) -> PResult<Expr> {
         let mut sub_diags = Vec::new();
-        let mut toks = lexer::lex(src, &mut sub_diags);
+        let mut toks = lexer::lex(src, span.file, &mut sub_diags);
         for t in &mut toks {
             t.span = span;
         }
@@ -810,6 +950,9 @@ impl<'a> Parser<'a> {
         drop(p);
         if leftover {
             sub_diags.push(Diag::new("E0133", span, format!("cannot read `{src}` inside this string")));
+        }
+        for d in &mut sub_diags {
+            d.span = span;
         }
         let failed = !sub_diags.is_empty();
         self.diags.append(&mut sub_diags);
@@ -860,14 +1003,15 @@ impl<'a> Parser<'a> {
             }
             Tok::Ident(name) => {
                 self.bump();
+                let targs = if self.at_op("[") && self.looks_like_targs(&name) { self.parse_targs()? } else { Vec::new() };
                 if self.at_op("(") {
                     self.bump();
                     let (args, close) = self.parse_args(")")?;
-                    Ok(Expr::new(ExprKind::Call { name, name_span: span, args }, join(span, close)))
+                    Ok(Expr::new(ExprKind::Call { module: None, name, name_span: span, targs, args }, join(span, close)))
                 } else if self.at_op("{") && is_type_name(&name) && !self.in_head {
                     self.bump();
                     let (args, close) = self.parse_args("}")?;
-                    Ok(Expr::new(ExprKind::StructLit { name, name_span: span, args }, join(span, close)))
+                    Ok(Expr::new(ExprKind::StructLit { module: None, name, name_span: span, targs, args }, join(span, close)))
                 } else {
                     Ok(Expr::new(ExprKind::Var(name), span))
                 }

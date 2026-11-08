@@ -1,0 +1,10 @@
+// expect: body
+// expect: outer
+// expect: inner
+claw fn main() {
+    defer {
+        defer print("inner")
+        print("outer")
+    }
+    print("body")
+}

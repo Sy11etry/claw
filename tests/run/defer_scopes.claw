@@ -1,0 +1,18 @@
+// expect: body
+// expect: in if
+// expect: after if
+// expect: end f
+// expect: 2
+claw fn f(n int) int {
+    defer print("end f")
+    if n > 0 {
+        defer print("in if")
+        print("body")
+    }
+    print("after if")
+    ret n * 2
+}
+
+claw fn main() {
+    print(f(1))
+}

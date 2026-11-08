@@ -1,0 +1,31 @@
+// expect: 30
+// expect: 20
+// expect: 3
+// expect: -3
+// expect: true
+// expect: true
+// expect: false
+// expect: 20
+// expect: 10
+// expect: 4
+claw fn main() {
+    p := alloc[i32](4)
+    defer free(p)
+    for i in 0..4 {
+        p[i] = i32(i) * 10
+    }
+    q := p + 3
+    print(*q)
+    print(*(q - 1))
+    print(q - p)
+    print(p - q)
+    print(q > p)
+    print(p <= q)
+    print(p == q)
+    mut r := p
+    r += 2
+    print(*r)
+    r -= 1
+    print(*r)
+    print(sizeof[i32]())
+}

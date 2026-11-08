@@ -1,0 +1,11 @@
+// expect: 30
+// expect: 10
+claw fn main() {
+    p := alloc[int](3)
+    defer free(p)
+    p[0] = 10
+    p[1] = 20
+    p[2] = p[0] + p[1]
+    print(p[2])
+    print(*p)
+}

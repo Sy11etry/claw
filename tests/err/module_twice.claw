@@ -1,0 +1,7 @@
+// error: E0110
+use lib.priv
+use lib.priv
+
+fn main() {
+    print(priv.open_one())
+}

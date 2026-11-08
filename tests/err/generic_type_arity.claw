@@ -1,0 +1,10 @@
+// error: E0144
+// error: E0105
+type B[T] { x T }
+
+fn f(a B) {
+    print(1)
+}
+
+fn main() {
+}

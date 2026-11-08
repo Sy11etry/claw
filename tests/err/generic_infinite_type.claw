@@ -1,0 +1,9 @@
+// error: E0145
+type A[T] { next *A[[2]T] }
+
+claw fn f(a A[int]) {
+    print(a.next == none)
+}
+
+fn main() {
+}

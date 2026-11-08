@@ -1,0 +1,6 @@
+// error: E0101
+use lib.priv
+
+fn main() {
+    print(priv.nope)
+}

@@ -1,0 +1,25 @@
+// expect: [3, 3]
+// expect: [true, true]
+// expect: 1
+// expect: none
+// expect: 8
+fn id[T](x T) T {
+    ret x
+}
+
+fn twice[T](x T) [2]T {
+    ret [id(x), id(x)]
+}
+
+fn opt[T](x T, ok bool) ?T {
+    if ok { ret x }
+    ret none
+}
+
+fn main() {
+    print(twice(3))
+    print(twice(true))
+    print(opt(1, true))
+    print(opt(1.5, false))
+    print(opt(7, false) else 8)
+}

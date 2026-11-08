@@ -1,0 +1,6 @@
+// error: E0104
+extern fn f(p *int)
+
+claw fn main() {
+    f("a")
+}

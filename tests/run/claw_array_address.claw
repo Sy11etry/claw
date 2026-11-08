@@ -1,0 +1,15 @@
+// expect: 9
+// expect: [1, 2, 100, 4]
+claw fn sum(p *int, n int) int {
+    mut s := 0
+    for i in 0..n { s += p[i] }
+    ret s
+}
+
+claw fn main() {
+    mut a := [1, 2, 3, 4]
+    print(sum(&a[1], 3))
+    p := &a[2]
+    *p = 100
+    print(a)
+}

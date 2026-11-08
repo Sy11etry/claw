@@ -1,5 +1,6 @@
 // error: E0900
-claw fn f() {
+fn f(a &int) {
+    print(1)
 }
 
 fn main() {

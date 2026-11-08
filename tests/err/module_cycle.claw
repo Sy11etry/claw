@@ -1,0 +1,6 @@
+// error: E0146
+use lib.cycle_a
+
+fn main() {
+    print(cycle_a.a())
+}

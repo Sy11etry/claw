@@ -1,0 +1,6 @@
+// error: E0141
+extern fn abs(n i32) i32
+
+fn main() {
+    print(abs(1))
+}

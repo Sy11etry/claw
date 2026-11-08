@@ -1,0 +1,35 @@
+// expect: 7
+// expect: 9
+// expect: 11
+// expect: 12
+// expect: -6
+// expect: 2.5
+// expect: true
+claw fn set(p *int, v int) {
+    *p = v
+}
+
+claw fn main() {
+    mut x := 5
+    p := &x
+    *p = 7
+    print(x)
+    set(&x, 9)
+    print(x)
+    x = 11
+    print(*p)
+    *p += 1
+    print(x)
+    mut y i32 = -3
+    q := &y
+    *q = *q * 2
+    print(y)
+    mut f f64 = 1.5
+    r := &f
+    *r = *r + 1.0
+    print(f)
+    mut b := false
+    s := &b
+    *s = true
+    print(b)
+}

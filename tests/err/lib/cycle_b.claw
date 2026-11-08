@@ -1,0 +1,5 @@
+use cycle_a
+
+pub fn b() int {
+    ret cycle_a.a()
+}

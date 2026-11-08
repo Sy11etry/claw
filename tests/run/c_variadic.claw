@@ -1,0 +1,27 @@
+// expect: 12
+// expect: 12
+// expect: 55
+// expect: 97
+// expect: 21
+// expect: 641
+extern fn snprintf(buf *u8, size u64, fmt *u8, ...) i32
+extern fn strlen(s *u8) u64
+
+claw fn show(p *u8, n int) int {
+    mut sum := 0
+    for i in 0..n { sum = sum * 3 + int(p[i]) }
+    ret sum
+}
+
+claw fn main() {
+    mut buf [64]u8 = [0...]
+    n := snprintf(&buf[0], 64, "%d %s %.2f %d", 7, "ab", 1.5, -3)
+    print(n)
+    print(strlen(&buf[0]))
+    print(buf[0])
+    print(buf[2])
+    x f32 = 2.5
+    m := snprintf(&buf[0], 64, "%.1f|%d|%d|%d|%d|%d|%d|%d|%d|%d", x, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+    print(m)
+    print(show(&buf[0], 3))
+}

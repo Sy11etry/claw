@@ -1,0 +1,27 @@
+// expect: 5
+// expect: 5
+// expect: 1234
+// expect: 1.5
+// expect: 1024
+// expect: 1.5
+// expect: 65
+// expect: 12
+extern fn abs(n i32) i32
+extern fn strlen(s *u8) u64
+extern fn atoi(s *u8) i32
+extern fn sqrt(x f64) f64
+extern fn pow(x f64, y f64) f64
+extern fn sqrtf(x f32) f32
+extern fn toupper(c i32) i32
+extern fn ldexp(x f64, e i32) f64
+
+claw fn main() {
+    print(abs(-5))
+    print(strlen("hello"))
+    print(atoi("1234"))
+    print(sqrt(2.25))
+    print(pow(2, 10))
+    print(sqrtf(2.25))
+    print(toupper(97))
+    print(ldexp(1.5, 3))
+}

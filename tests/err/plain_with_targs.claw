@@ -1,0 +1,8 @@
+// error: E0144
+fn f(x int) int {
+    ret x
+}
+
+fn main() {
+    print(f[int](1))
+}

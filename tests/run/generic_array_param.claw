@@ -1,0 +1,16 @@
+// expect: 7
+// expect: 1.5
+// expect: 3
+fn first[T](a [3]T) T {
+    ret a[0]
+}
+
+fn wrap[T](x ?T) ?T {
+    ret x
+}
+
+fn main() {
+    print(first([7, 8, 9]))
+    print(first([1.5, 2.5, 3.5]))
+    print(wrap(3))
+}

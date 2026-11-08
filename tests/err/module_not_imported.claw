@@ -1,0 +1,4 @@
+// error: E0146
+fn main() {
+    print(geo.area(1))
+}

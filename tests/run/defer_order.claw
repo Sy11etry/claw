@@ -1,0 +1,6 @@
+// expect: b
+// expect: a
+claw fn main() {
+    defer print("a")
+    defer print("b")
+}

@@ -1,0 +1,5 @@
+// error: E0146
+use nothing_here
+
+fn main() {
+}

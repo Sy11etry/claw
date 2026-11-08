@@ -8,7 +8,7 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "out"
 CLAW = HERE.parent / "compiler/target/release/claw"
-BENCHES = ["fib", "primes", "collatz", "sieve", "mandel"]
+BENCHES = ["fib", "primes", "collatz", "sieve", "mandel", "list"]
 RUNS = 5
 
 

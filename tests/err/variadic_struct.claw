@@ -1,0 +1,8 @@
+// error: E0149
+type P { x int }
+
+extern fn f(a int, ...)
+
+claw fn main() {
+    f(1, P{1})
+}

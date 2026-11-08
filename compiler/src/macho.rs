@@ -234,7 +234,7 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     let got_off = text_filesize;
     let got_addr = BASE + got_off;
     let got_size = obj.imports.len() as u64 * 8;
-    let data_size = PAGE;
+    let data_size = align(got_size.max(1), PAGE);
     let linkedit_off = got_off + data_size;
     // Zero-filled writable memory: takes address space, not file space.
     let bss_addr = got_addr + data_size;

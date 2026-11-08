@@ -1,23 +1,28 @@
 //! Turns a checked AST into CIR.
 
-use crate::ast::{self, BinOp, Coerce, Else, ElseKind, Expr, ExprKind, Part, Pat, Stmt, StmtKind, UnOp};
+use crate::ast::{self, BinOp, Coerce, Else, ElseKind, Expr, ExprKind, Part, Pat, Res, Stmt, StmtKind, UnOp};
 use crate::cir::*;
 use crate::diag::Span;
-use crate::sema::{Checked, ConstVal, NameDef};
+use crate::modules::Unit;
+use crate::sema::{Checked, ConstVal};
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-struct FnLower<'a> {
+struct FnLower<'a, 'i> {
     c: &'a Checked,
-    file: &'a str,
-    ids: &'a HashMap<String, FuncId>,
+    files: &'a [String],
+    ids: &'i HashMap<String, FuncId>,
     vars: HashMap<String, VReg>,
+    /// Scalars that had their address taken: `vars` holds their memory address.
+    addressed: HashSet<String>,
     nvregs: u32,
     objects: Vec<(u64, u64)>,
     blocks: Vec<Block>,
     cur: BlockId,
-    /// (continue target, break target) of each enclosing loop.
-    loops: Vec<(BlockId, BlockId)>,
+    /// (continue target, break target, defer depth) of each enclosing loop.
+    loops: Vec<(BlockId, BlockId, usize)>,
+    /// Pending `defer` bodies of each open block, innermost last.
+    defers: Vec<Vec<&'a ast::Block>>,
     ret: Ty,
     sret: Option<VReg>,
     is_main: bool,
@@ -29,30 +34,41 @@ enum Place {
 }
 
 fn loc(s: Span) -> Loc {
-    Loc { line: s.line, col: s.col }
+    Loc { line: s.line, col: s.col, file: s.file }
 }
 
-pub fn lower(p: &ast::Program, c: &Checked, file: &str) -> Module {
-    let ids: HashMap<String, FuncId> = p.funcs.iter().enumerate().map(|(i, f)| (f.name.clone(), i)).collect();
-    let funcs = p.funcs.iter().map(|f| lower_func(f, c, &ids, file)).collect();
+pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String]) -> Module {
+    let mut list: Vec<(String, &'a ast::Func)> = Vec::new();
+    for u in units {
+        for f in u.program.funcs.iter().filter(|f| f.tparams.is_empty()) {
+            list.push((format!("{}{}", u.prefix, f.name), f));
+        }
+    }
+    for f in &c.instances {
+        list.push((f.name.clone(), f));
+    }
+    let ids: HashMap<String, FuncId> = list.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
+    let funcs = list.iter().map(|(n, f)| lower_func(n, f, c, &ids, files)).collect();
     Module { funcs, main: ids["main"] }
 }
 
-fn lower_func(f: &ast::Func, c: &Checked, ids: &HashMap<String, FuncId>, file: &str) -> Func {
-    let sig = &c.sigs[&f.name];
+fn lower_func<'a>(full: &str, f: &'a ast::Func, c: &'a Checked, ids: &HashMap<String, FuncId>, files: &'a [String]) -> Func {
+    let sig = &c.sigs[full];
     let mut l = FnLower {
         c,
-        file,
+        files,
         ids,
         vars: HashMap::new(),
+        addressed: f.addressed.borrow().clone(),
         nvregs: 0,
         objects: Vec::new(),
         blocks: Vec::new(),
         cur: 0,
         loops: Vec::new(),
+        defers: Vec::new(),
         ret: sig.ret,
         sret: None,
-        is_main: f.name == "main",
+        is_main: full == "main",
     };
     l.new_block();
     if c.types.is_aggregate(sig.ret) {
@@ -71,10 +87,10 @@ fn lower_func(f: &ast::Func, c: &Checked, ids: &HashMap<String, FuncId>, file: &
     } else {
         l.finish(Term::Unreachable);
     }
-    Func { name: f.name.clone(), nparams, nvregs: l.nvregs, objects: l.objects, blocks: l.blocks }
+    Func { name: full.to_string(), nparams, nvregs: l.nvregs, objects: l.objects, blocks: l.blocks }
 }
 
-impl<'a> FnLower<'a> {
+impl<'a, 'i> FnLower<'a, 'i> {
     fn t(&self) -> &'a Types {
         &self.c.types
     }
@@ -138,6 +154,7 @@ impl<'a> FnLower<'a> {
     fn num_of(&self, ty: Ty) -> Num {
         match self.t().kind(ty) {
             Kind::Int { bits, signed } => Num { bits, signed },
+            Kind::Pointer(_) => Num { bits: 64, signed: false },
             _ => Num { bits: 64, signed: true },
         }
     }
@@ -200,17 +217,31 @@ impl<'a> FnLower<'a> {
         self.finish(Term::Ret(None));
     }
 
-    fn block(&mut self, b: &ast::Block) {
+    fn block(&mut self, b: &'a ast::Block) {
+        self.defers.push(Vec::new());
         for s in &b.stmts {
             self.stmt(s);
         }
+        let depth = self.defers.len() - 1;
+        self.run_defers(depth);
+        self.defers.pop();
     }
 
-    fn place(&mut self, e: &Expr) -> Place {
+    /// Emits the pending `defer` bodies of every block from `from` inward, newest first.
+    fn run_defers(&mut self, from: usize) {
+        for level in (from..self.defers.len()).rev() {
+            let pending = self.defers[level].clone();
+            for body in pending.into_iter().rev() {
+                self.block(body);
+            }
+        }
+    }
+
+    fn place(&mut self, e: &'a Expr) -> Place {
         match &e.kind {
             ExprKind::Var(name) => {
                 let v = self.vars[name];
-                if self.t().is_aggregate(e.ty.get()) {
+                if self.t().is_aggregate(e.ty.get()) || self.addressed.contains(name) {
                     Place::Mem(v, 0)
                 } else {
                     Place::Reg(v)
@@ -218,10 +249,18 @@ impl<'a> FnLower<'a> {
             }
             ExprKind::Field { e: base, name, .. } => {
                 let off = self.field_offset(base.ty.get(), name);
+                if self.t().is_ptr(base.ty.get()) {
+                    return Place::Mem(self.expr_value(base), off);
+                }
                 match self.place(base) {
                     Place::Mem(a, o) => Place::Mem(a, o + off),
                     Place::Reg(_) => unreachable!("structs live in memory"),
                 }
+            }
+            ExprKind::Deref(inner) => Place::Mem(self.expr_value(inner), 0),
+            ExprKind::Index { e: base, i } if self.t().is_ptr(base.ty.get()) => {
+                let a = self.expr_value(base);
+                Place::Mem(self.element_addr(base.ty.get(), a, i, e.span), 0)
             }
             ExprKind::Index { e: base, i } => {
                 let Place::Mem(a, o) = self.place(base) else { unreachable!("arrays live in memory") };
@@ -233,11 +272,22 @@ impl<'a> FnLower<'a> {
     }
 
     fn field_offset(&self, ty: Ty, name: &str) -> u64 {
+        let ty = match self.t().kind(ty) {
+            Kind::Pointer(p) => p,
+            _ => ty,
+        };
         let Kind::Struct(id) = self.t().kind(ty) else { unreachable!("field of a non-struct") };
         self.t().structs[id].fields.iter().find(|f| f.name == name).unwrap().offset
     }
 
-    fn element_addr(&mut self, array: Ty, addr: VReg, i: &Expr, span: Span) -> VReg {
+    fn element_addr(&mut self, array: Ty, addr: VReg, i: &'a Expr, span: Span) -> VReg {
+        if let Kind::Pointer(elem) = self.t().kind(array) {
+            // A raw pointer has no length, so there is nothing to check.
+            let idx = self.expr_value(i);
+            let d = self.vreg();
+            self.emit(Inst::IndexAddr { d, base: addr, idx, size: self.t().size(elem) });
+            return d;
+        }
         let Kind::Array(elem, n) = self.t().kind(array) else { unreachable!("index of a non-array") };
         let idx = self.expr_value(i);
         self.emit(Inst::Bounds { idx, len: n, loc: loc(span) });
@@ -246,7 +296,7 @@ impl<'a> FnLower<'a> {
         d
     }
 
-    fn stmt(&mut self, s: &Stmt) {
+    fn stmt(&mut self, s: &'a Stmt) {
         match &s.kind {
             StmtKind::Let { name, init, .. } => {
                 let ty = init.ty.get();
@@ -258,7 +308,15 @@ impl<'a> FnLower<'a> {
                 // A value just built in its own temporary needs no second copy.
                 let fresh = init.coerce.get() != Coerce::No
                     || matches!(init.kind, ExprKind::ArrayLit(_) | ExprKind::ArrayFill(_) | ExprKind::StructLit { .. } | ExprKind::Call { .. } | ExprKind::None);
-                let d = if fresh && self.t().is_aggregate(ty) { v } else { self.new_local(v, ty) };
+                let d = if self.addressed.contains(name) && !self.t().is_aggregate(ty) {
+                    let a = self.temp_obj(ty);
+                    self.store(a, 0, v, ty);
+                    a
+                } else if fresh && self.t().is_aggregate(ty) {
+                    v
+                } else {
+                    self.new_local(v, ty)
+                };
                 self.vars.insert(name.clone(), d);
             }
             StmtKind::Assign { target, op, value } => self.assign(target, *op, value),
@@ -295,7 +353,7 @@ impl<'a> FnLower<'a> {
                 self.switch(head);
                 self.branch(cond, body_b, exit);
                 self.switch(body_b);
-                self.loops.push((head, exit));
+                self.loops.push((head, exit, self.defers.len()));
                 self.block(body);
                 self.loops.pop();
                 self.finish(Term::Jmp(head));
@@ -306,7 +364,7 @@ impl<'a> FnLower<'a> {
                 let exit = self.new_block();
                 self.finish(Term::Jmp(head));
                 self.switch(head);
-                self.loops.push((head, exit));
+                self.loops.push((head, exit, self.defers.len()));
                 self.block(body);
                 self.loops.pop();
                 self.finish(Term::Jmp(head));
@@ -320,14 +378,18 @@ impl<'a> FnLower<'a> {
                 let sret = self.sret.expect("Result is returned in memory");
                 self.set_tag(sret, 1);
                 self.store(sret, TAG_SIZE, v, err);
+                self.run_defers(0);
                 self.finish_dead(Term::Ret(None));
             }
+            StmtKind::Defer(body) => self.defers.last_mut().unwrap().push(body),
             StmtKind::Break => {
-                let t = self.loops.last().unwrap().1;
+                let (_, t, depth) = *self.loops.last().unwrap();
+                self.run_defers(depth);
                 self.finish_dead(Term::Jmp(t));
             }
             StmtKind::Continue => {
-                let t = self.loops.last().unwrap().0;
+                let (t, _, depth) = *self.loops.last().unwrap();
+                self.run_defers(depth);
                 self.finish_dead(Term::Jmp(t));
             }
         }
@@ -347,7 +409,7 @@ impl<'a> FnLower<'a> {
         self.finish(Term::Br { c, t: body_b, f: exit });
 
         self.switch(body_b);
-        self.loops.push((latch, exit));
+        self.loops.push((latch, exit, self.defers.len()));
         body(self);
         self.loops.pop();
         self.finish(Term::Jmp(latch));
@@ -358,7 +420,7 @@ impl<'a> FnLower<'a> {
         self.switch(exit);
     }
 
-    fn for_in(&mut self, elem: &str, index: Option<&(String, Span)>, subject: &Expr, body: &ast::Block) {
+    fn for_in(&mut self, elem: &str, index: Option<&(String, Span)>, subject: &'a Expr, body: &'a ast::Block) {
         let Kind::Array(elem_ty, n) = self.t().kind(subject.ty.get()) else { unreachable!("sema checked `for in`") };
         let base = self.expr_value(subject);
         let counter = self.constant(0);
@@ -384,9 +446,10 @@ impl<'a> FnLower<'a> {
         });
     }
 
-    fn ret_stmt(&mut self, v: Option<&Expr>) {
+    fn ret_stmt(&mut self, v: Option<&'a Expr>) {
         match v {
             None => {
+                self.run_defers(0);
                 if matches!(self.t().kind(self.ret), Kind::Result(VOID, _)) {
                     self.return_ok_void();
                     let dead = self.new_block();
@@ -400,15 +463,18 @@ impl<'a> FnLower<'a> {
                 if self.t().is_aggregate(self.ret) {
                     let sret = self.sret.expect("aggregates are returned in memory");
                     self.store(sret, 0, r, self.ret);
+                    self.run_defers(0);
                     self.finish_dead(Term::Ret(None));
                 } else {
+                    // The value is computed first: a `defer` must not change what is returned.
+                    self.run_defers(0);
                     self.finish_dead(Term::Ret(Some(r)));
                 }
             }
         }
     }
 
-    fn assign(&mut self, target: &Expr, op: Option<BinOp>, value: &Expr) {
+    fn assign(&mut self, target: &'a Expr, op: Option<BinOp>, value: &'a Expr) {
         let ty = target.ty.get();
         let p = self.place(target);
         match op {
@@ -435,7 +501,7 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn if_stmt(&mut self, cond: &Expr, then: &ast::Block, els: Option<&Else>) {
+    fn if_stmt(&mut self, cond: &'a Expr, then: &'a ast::Block, els: Option<&'a Else>) {
         let t = self.new_block();
         let join = self.new_block();
         let f = if els.is_some() { self.new_block() } else { join };
@@ -461,7 +527,7 @@ impl<'a> FnLower<'a> {
         self.finish(Term::Br { c, t, f });
     }
 
-    fn match_stmt(&mut self, subject: &Expr, arms: &[ast::Arm]) {
+    fn match_stmt(&mut self, subject: &'a Expr, arms: &'a [ast::Arm]) {
         let ty = subject.ty.get();
         let v = self.expr_value(subject);
         let enum_id = match self.t().kind(ty) {
@@ -514,7 +580,7 @@ impl<'a> FnLower<'a> {
     }
 
     /// Branches on a condition, short-circuiting `and` / `or` / `not`.
-    fn branch(&mut self, e: &Expr, t: BlockId, f: BlockId) {
+    fn branch(&mut self, e: &'a Expr, t: BlockId, f: BlockId) {
         match &e.kind {
             ExprKind::Binary { op: BinOp::And, l, r } => {
                 let mid = self.new_block();
@@ -536,11 +602,11 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn expr_value(&mut self, e: &Expr) -> VReg {
+    fn expr_value(&mut self, e: &'a Expr) -> VReg {
         self.expr(e).expect("sema guarantees a value")
     }
 
-    fn expr(&mut self, e: &Expr) -> Option<VReg> {
+    fn expr(&mut self, e: &'a Expr) -> Option<VReg> {
         let v = self.expr_raw(e);
         match e.coerce.get() {
             Coerce::No => v,
@@ -566,7 +632,36 @@ impl<'a> FnLower<'a> {
         self.constant(raw)
     }
 
+    fn pointer_step(&mut self, op: BinOp, a: VReg, b: VReg, ty: Ty) -> VReg {
+        let Kind::Pointer(elem) = self.t().kind(ty) else { unreachable!("pointer arithmetic") };
+        let idx = if op == BinOp::Sub {
+            let zero = self.constant(0);
+            let n = self.vreg();
+            let at = Loc { line: 0, col: 0, file: 0 };
+            self.emit(Inst::Bin { op: Arith::Sub, d: n, a: zero, b, num: Num { bits: 64, signed: false }, loc: at });
+            n
+        } else {
+            b
+        };
+        let d = self.vreg();
+        self.emit(Inst::IndexAddr { d, base: a, idx, size: self.t().size(elem) });
+        d
+    }
+
+    fn pointer_diff(&mut self, a: VReg, b: VReg, ty: Ty, span: Span) -> VReg {
+        let Kind::Pointer(elem) = self.t().kind(ty) else { unreachable!("pointer difference") };
+        let bytes = self.vreg();
+        self.emit(Inst::Bin { op: Arith::Sub, d: bytes, a, b, num: Num { bits: 64, signed: false }, loc: loc(span) });
+        let size = self.constant(self.t().size(elem).max(1) as i64);
+        let d = self.vreg();
+        self.emit(Inst::Bin { op: Arith::Div, d, a: bytes, b: size, num: Num { bits: 64, signed: true }, loc: loc(span) });
+        d
+    }
+
     fn arith(&mut self, op: BinOp, a: VReg, b: VReg, ty: Ty, span: Span) -> VReg {
+        if self.t().is_ptr(ty) {
+            return self.pointer_step(op, a, b, ty);
+        }
         let d = self.vreg();
         if let Some(bits) = self.float_bits(ty) {
             let fop = match op {
@@ -583,7 +678,7 @@ impl<'a> FnLower<'a> {
         d
     }
 
-    fn expr_raw(&mut self, e: &Expr) -> Option<VReg> {
+    fn expr_raw(&mut self, e: &'a Expr) -> Option<VReg> {
         let ty = e.ty.get();
         Some(match &e.kind {
             ExprKind::Int(v) => {
@@ -596,14 +691,28 @@ impl<'a> FnLower<'a> {
             ExprKind::Float(v) => self.float_const(*v, ty),
             ExprKind::Char(c) => self.constant(*c as i64),
             ExprKind::Bool(b) => self.constant(*b as i64),
-            ExprKind::Str(_) | ExprKind::Interp(_) => unreachable!("strings only occur inside print"),
+            ExprKind::Str(text) => {
+                let d = self.vreg();
+                self.emit(Inst::StrAddr { d, text: text.clone() });
+                d
+            }
+            ExprKind::Interp(_) => unreachable!("interpolation only occurs inside print"),
+            ExprKind::AddrOf(inner) => {
+                let Place::Mem(a, o) = self.place(inner) else { unreachable!("sema made this addressable") };
+                self.offset_addr(a, o)
+            }
+            ExprKind::Deref(inner) => {
+                let p = self.expr_value(inner);
+                self.load(p, 0, ty)
+            }
             ExprKind::RetVal => unreachable!("contracts are not lowered in 0.2"),
+            ExprKind::None if self.t().is_ptr(ty) => self.constant(0),
             ExprKind::None => {
                 let a = self.temp_obj(ty);
                 self.set_tag(a, 0);
                 a
             }
-            ExprKind::Var(name) => return Some(self.var(name, ty)),
+            ExprKind::Var(name) => return Some(self.var(e, name, ty)),
             ExprKind::Unary { op, e: inner } => self.unary(*op, inner, ty, e.span),
             ExprKind::Binary { op, l, r } => match op {
                 BinOp::And | BinOp::Or => return Some(self.short_circuit(e)),
@@ -623,11 +732,15 @@ impl<'a> FnLower<'a> {
                 _ => {
                     let a = self.expr_value(l);
                     let b = self.expr_value(r);
-                    self.arith(*op, a, b, ty, e.span)
+                    if self.t().is_ptr(l.ty.get()) && self.t().is_ptr(r.ty.get()) {
+                        self.pointer_diff(a, b, l.ty.get(), e.span)
+                    } else {
+                        self.arith(*op, a, b, l.ty.get(), e.span)
+                    }
                 }
             },
             ExprKind::Call { name, args, .. } => return self.call(e, name, args),
-            ExprKind::StructLit { name, args, .. } => self.struct_lit(name, args, ty),
+            ExprKind::StructLit { args, .. } => self.struct_lit(e, args, ty),
             ExprKind::ArrayLit(items) => {
                 let Kind::Array(elem, _) = self.t().kind(ty) else { unreachable!("array literal type") };
                 let a = self.temp_obj(ty);
@@ -652,6 +765,7 @@ impl<'a> FnLower<'a> {
                 });
                 a
             }
+            ExprKind::Field { .. } if !matches!(*e.res.borrow(), Res::None) => self.resolved(e, ty),
             ExprKind::Field { e: base, name, .. } => {
                 let off = self.field_offset(base.ty.get(), name);
                 let a = self.expr_value(base);
@@ -667,10 +781,13 @@ impl<'a> FnLower<'a> {
         })
     }
 
-    fn var(&mut self, name: &str, ty: Ty) -> VReg {
+    fn var(&mut self, e: &Expr, name: &str, ty: Ty) -> VReg {
         if let Some(&v) = self.vars.get(name) {
             if self.t().is_aggregate(ty) {
                 return v;
+            }
+            if self.addressed.contains(name) {
+                return self.load(v, 0, ty);
             }
             // Copy so a later assignment cannot change an operand that was
             // already evaluated (left-to-right order is guaranteed).
@@ -678,20 +795,25 @@ impl<'a> FnLower<'a> {
             self.emit(Inst::Mov { d, s: v });
             return d;
         }
-        if let Some((v, t)) = self.c.consts.get(name) {
-            return match *v {
-                ConstVal::Int(n) => self.constant(n as i64),
-                ConstVal::Bool(b) => self.constant(b as i64),
-                ConstVal::Float(x) => self.float_const(x, *t),
-            };
-        }
-        let Some(NameDef::Variant(_, idx, _)) = self.c.names.get(name) else { unreachable!("sema resolved this name") };
-        let a = self.temp_obj(ty);
-        self.set_tag(a, *idx as i64);
-        a
+        self.resolved(e, ty)
     }
 
-    fn unary(&mut self, op: UnOp, inner: &Expr, ty: Ty, span: Span) -> VReg {
+    /// A constant or a field-less variant, as sema resolved it.
+    fn resolved(&mut self, e: &Expr, ty: Ty) -> VReg {
+        match *e.res.borrow() {
+            Res::Const(ConstVal::Int(n), _) => self.constant(n as i64),
+            Res::Const(ConstVal::Bool(b), _) => self.constant(b as i64),
+            Res::Const(ConstVal::Float(x), t) => self.float_const(x, t),
+            Res::Variant(_, idx) => {
+                let a = self.temp_obj(ty);
+                self.set_tag(a, idx as i64);
+                a
+            }
+            _ => unreachable!("sema resolved this name"),
+        }
+    }
+
+    fn unary(&mut self, op: UnOp, inner: &'a Expr, ty: Ty, span: Span) -> VReg {
         let s = self.expr_value(inner);
         let d = self.vreg();
         match op {
@@ -705,20 +827,18 @@ impl<'a> FnLower<'a> {
         d
     }
 
-    fn call(&mut self, e: &Expr, name: &str, args: &[Expr]) -> Option<VReg> {
-        if name == "print" {
-            self.print(&args[0]);
-            return None;
-        }
-        if name == "len" {
-            let Kind::Array(_, n) = self.t().kind(args[0].ty.get()) else { unreachable!("sema checked `len`") };
-            self.expr(&args[0]);
-            return Some(self.constant(n as i64));
-        }
-        if !self.c.sigs.contains_key(name) {
-            return Some(self.cast(&args[0], e.ty.get(), e.span));
-        }
+    fn call(&mut self, e: &'a Expr, name: &str, args: &'a [Expr]) -> Option<VReg> {
         let ty = e.ty.get();
+        let res = e.res.borrow().clone();
+        let full = match res {
+            Res::Const(..) => return Some(self.resolved(e, ty)),
+            Res::Func(full) => full,
+            _ => return self.builtin_call(e, name, args),
+        };
+        let sig = &self.c.sigs[&full];
+        if let Some(sym) = &sig.ext {
+            return self.call_c(sym.clone(), sig.params.len(), sig.variadic, args, ty);
+        }
         let aggregate = self.t().is_aggregate(ty);
         // Results land in a fresh temporary, so `x = f(x)` never overlaps.
         let mut vals = Vec::with_capacity(args.len() + 1);
@@ -729,7 +849,7 @@ impl<'a> FnLower<'a> {
             vals.push(v);
         }
         let d = if ty == VOID || aggregate { None } else { Some(self.vreg()) };
-        self.emit(Inst::Call { d, f: self.ids[name], args: vals });
+        self.emit(Inst::Call { d, f: self.ids[&full], args: vals });
         if aggregate {
             sret
         } else {
@@ -737,7 +857,65 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn cast(&mut self, arg: &Expr, to: Ty, span: Span) -> VReg {
+    fn builtin_call(&mut self, e: &'a Expr, name: &str, args: &'a [Expr]) -> Option<VReg> {
+        let ty = e.ty.get();
+        match name {
+            "print" => {
+                self.print(&args[0]);
+                None
+            }
+            "len" => {
+                let Kind::Array(_, n) = self.t().kind(args[0].ty.get()) else { unreachable!("sema checked `len`") };
+                self.expr(&args[0]);
+                Some(self.constant(n as i64))
+            }
+            "alloc" => {
+                let Kind::Pointer(elem) = self.t().kind(ty) else { unreachable!("sema checked `alloc`") };
+                let n = self.expr_value(&args[0]);
+                let d = self.vreg();
+                self.emit(Inst::Alloc { d, n, elem: self.t().size(elem), loc: loc(e.span) });
+                Some(d)
+            }
+            "free" => {
+                let p = self.expr_value(&args[0]);
+                self.emit(Inst::Free { p });
+                None
+            }
+            "cast" => {
+                let s = self.expr_value(&args[0]);
+                let d = self.vreg();
+                self.emit(Inst::Mov { d, s });
+                Some(d)
+            }
+            _ => Some(self.cast(&args[0], ty, e.span)),
+        }
+    }
+
+    fn call_c(&mut self, sym: String, fixed: usize, variadic: bool, args: &'a [Expr], ty: Ty) -> Option<VReg> {
+        let mut out = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let mut v = self.expr_value(a);
+            let mut at = a.ty.get();
+            // C's default promotion: a variadic float travels as a double.
+            if variadic && i >= fixed && at == F32 {
+                let d = self.vreg();
+                self.emit(Inst::FloatCast { d, s: v, to_bits: 64 });
+                v = d;
+                at = F64;
+            }
+            out.push(CArg { v, float: self.float_bits(at), size: self.t().size(at) as u32 });
+        }
+        let ret = match self.t().kind(ty) {
+            Kind::Void => CRet::None,
+            Kind::Float { bits } => CRet::Float(bits),
+            _ => CRet::Int(self.mem_of(ty)),
+        };
+        let d = if ty == VOID { None } else { Some(self.vreg()) };
+        self.emit(Inst::CallC { d, sym, args: out, variadic: variadic.then_some(fixed), ret });
+        d
+    }
+
+    fn cast(&mut self, arg: &'a Expr, to: Ty, span: Span) -> VReg {
         let from = arg.ty.get();
         let s = self.expr_value(arg);
         let d = self.vreg();
@@ -757,16 +935,17 @@ impl<'a> FnLower<'a> {
         d
     }
 
-    fn struct_lit(&mut self, name: &str, args: &[Expr], ty: Ty) -> VReg {
+    fn struct_lit(&mut self, e: &'a Expr, args: &'a [Expr], ty: Ty) -> VReg {
         let a = self.temp_obj(ty);
-        let fields = match self.c.names[name] {
-            NameDef::Type(_) => {
-                let Kind::Struct(id) = self.t().kind(ty) else { unreachable!("struct literal type") };
-                self.t().structs[id].fields.clone()
-            }
-            NameDef::Variant(eid, idx, _) => {
+        let res = e.res.borrow().clone();
+        let fields = match res {
+            Res::Variant(eid, idx) => {
                 self.set_tag(a, idx as i64);
                 self.t().enums[eid].variants[idx].fields.clone()
+            }
+            _ => {
+                let Kind::Struct(id) = self.t().kind(ty) else { unreachable!("struct literal type") };
+                self.t().structs[id].fields.clone()
             }
         };
         for (arg, f) in args.iter().zip(&fields) {
@@ -791,7 +970,7 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn try_expr(&mut self, e: &Expr, inner: &Expr) -> Option<VReg> {
+    fn try_expr(&mut self, e: &'a Expr, inner: &'a Expr) -> Option<VReg> {
         let ty = inner.ty.get();
         let v = self.expr_value(inner);
         let tag = self.vreg();
@@ -803,6 +982,7 @@ impl<'a> FnLower<'a> {
 
         self.switch(bad);
         if self.is_main {
+            self.run_defers(0);
             self.emit(Inst::BufStr { text: "error: ".to_string() });
             match self.t().kind(ty) {
                 Kind::Result(_, err) => {
@@ -811,7 +991,7 @@ impl<'a> FnLower<'a> {
                 }
                 _ => self.emit(Inst::BufStr { text: "none".to_string() }),
             }
-            let text = format!(" at {}:{}:{}\n", self.file, e.span.line, e.span.col);
+            let text = format!(" at {}:{}:{}\n", self.files[e.span.file as usize], e.span.line, e.span.col);
             self.emit(Inst::BufStr { text });
             self.emit(Inst::Flush { fd: 2 });
             self.emit(Inst::Exit { code: 1 });
@@ -826,6 +1006,7 @@ impl<'a> FnLower<'a> {
                 }
                 _ => self.set_tag(sret, 0),
             }
+            self.run_defers(0);
             self.finish(Term::Ret(None));
         }
 
@@ -838,7 +1019,7 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn else_expr(&mut self, inner: &Expr, handler: &ElseKind, payload: Ty) -> Option<VReg> {
+    fn else_expr(&mut self, inner: &'a Expr, handler: &'a ElseKind, payload: Ty) -> Option<VReg> {
         let ty = inner.ty.get();
         let v = self.expr_value(inner);
         let tag = self.vreg();
@@ -894,7 +1075,7 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn print(&mut self, a: &Expr) {
+    fn print(&mut self, a: &'a Expr) {
         // Evaluate first: a trap in an argument must not leave half a line.
         enum Piece<'b> {
             Lit(&'b str),
@@ -946,6 +1127,7 @@ impl<'a> FnLower<'a> {
     fn print_value(&mut self, v: VReg, ty: Ty) {
         match self.t().kind(ty) {
             Kind::Int { signed, .. } => self.emit(Inst::BufInt { s: v, signed }),
+            Kind::Pointer(_) => self.emit(Inst::BufInt { s: v, signed: false }),
             Kind::Bool => self.emit(Inst::BufBool { s: v }),
             Kind::Float { bits } => self.emit(Inst::BufFloat { s: v, bits }),
             Kind::Struct(id) => {
@@ -1031,7 +1213,7 @@ impl<'a> FnLower<'a> {
         }
     }
 
-    fn short_circuit(&mut self, e: &Expr) -> VReg {
+    fn short_circuit(&mut self, e: &'a Expr) -> VReg {
         let d = self.vreg();
         let t = self.new_block();
         let f = self.new_block();

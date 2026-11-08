@@ -1,0 +1,33 @@
+pub type Point { x int, y int }
+pub type Color = Red | Green{level int}
+pub const unit = 10
+const hidden = 3
+
+pub fn area(p Point) int {
+    ret helper(p) * hidden
+}
+
+fn helper(p Point) int {
+    ret p.x * p.y
+}
+
+pub fn make(x int) Point {
+    ret Point{x, x}
+}
+
+pub fn shade(c Color) int {
+    match c {
+        Red: ret 1
+        Green{level}: ret level
+    }
+}
+
+pub fn same[T](x T) T {
+    ret x
+}
+
+pub type Box[T] { v T }
+
+pub fn divide(a int, b int) int {
+    ret a / b
+}

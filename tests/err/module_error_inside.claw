@@ -1,0 +1,6 @@
+// error: E0104
+use lib.broken
+
+fn main() {
+    print(broken.f())
+}

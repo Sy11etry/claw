@@ -1,0 +1,5 @@
+// error: E0104
+claw fn main() {
+    a := 1
+    *a = 2
+}

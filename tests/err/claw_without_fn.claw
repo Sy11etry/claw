@@ -1,0 +1,5 @@
+// error: E0201
+claw int
+
+fn main() {
+}

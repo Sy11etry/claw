@@ -16,6 +16,7 @@ pub enum Kind {
     Struct(usize),
     Enum(usize),
     Array(Ty, u64),
+    Pointer(Ty),
     Option(Ty),
     Result(Ty, Ty),
 }
@@ -48,6 +49,10 @@ pub struct StructDef {
     pub fields: Vec<Field>,
     pub size: u64,
     pub align: u64,
+    /// The module that declared it, for finding its functions.
+    pub module: usize,
+    /// Layout progress: 0 not started, 1 in progress, 2 done.
+    pub state: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +67,8 @@ pub struct EnumDef {
     pub name: String,
     pub variants: Vec<Variant>,
     pub size: u64,
+    pub module: usize,
+    pub state: u8,
 }
 
 pub const TAG_SIZE: u64 = 8;
@@ -123,6 +130,10 @@ impl Types {
         matches!(self.kind(t), Kind::Float { .. })
     }
 
+    pub fn is_ptr(&self, t: Ty) -> bool {
+        matches!(self.kind(t), Kind::Pointer(_))
+    }
+
     pub fn is_num(&self, t: Ty) -> bool {
         self.is_int(t) || self.is_float(t)
     }
@@ -141,6 +152,7 @@ impl Types {
             Kind::Int { bits, .. } | Kind::Float { bits } => ((bits / 8) as u64, (bits / 8) as u64),
             Kind::Bool => (1, 1),
             Kind::Void | Kind::StrLit | Kind::Err => (0, 1),
+            Kind::Pointer(_) => (8, 8),
             Kind::Struct(id) => (self.structs[id].size, self.structs[id].align),
             Kind::Enum(id) => (self.enums[id].size, 8),
             Kind::Array(e, n) => {
@@ -164,6 +176,7 @@ impl Types {
             Kind::Struct(id) => self.structs[id].name.clone(),
             Kind::Enum(id) => self.enums[id].name.clone(),
             Kind::Array(e, n) => format!("[{}]{}", n, self.name(e)),
+            Kind::Pointer(p) => format!("*{}", self.name(p)),
             Kind::Option(p) => format!("?{}", self.name(p)),
             Kind::Result(ok, err) => {
                 if ok == VOID {

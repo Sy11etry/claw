@@ -1,0 +1,22 @@
+// expect: 8
+type Handle { p *int }
+
+claw fn make(v int) Handle {
+    h := alloc[int](1)
+    *h = v
+    ret Handle{h}
+}
+
+claw fn value(h Handle) int {
+    ret *h.p
+}
+
+claw fn close(h Handle) {
+    free(h.p)
+}
+
+fn main() {
+    h := make(8)
+    print(value(h))
+    close(h)
+}

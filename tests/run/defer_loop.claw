@@ -1,0 +1,14 @@
+// expect: body 0
+// expect: end 0
+// expect: end 1
+// expect: end 2
+// expect: done
+claw fn main() {
+    for i in 0..4 {
+        defer print("end {i}")
+        if i == 1 { continue }
+        if i == 2 { break }
+        print("body {i}")
+    }
+    print("done")
+}

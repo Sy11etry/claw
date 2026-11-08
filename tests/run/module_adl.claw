@@ -1,0 +1,9 @@
+// expect: 27
+// expect: 1
+use lib.geo
+
+fn main() {
+    p := geo.make(3)
+    print(area(p))
+    print(shade(geo.Red))
+}

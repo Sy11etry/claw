@@ -1,4 +1,4 @@
-# Claw 0.2 card
+# Claw 0.3 card
 
 One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -76,4 +76,54 @@ changing an array while `for` walks it, ignoring a `T ! E`.
 Stops the program with exit code 101 and `file:line:col`: signed overflow, division by zero, bad shift, array index
 out of range, a conversion that does not fit a signed type (unsigned types wrap).
 
-Not yet (`E0900`): strings as values, `[]T`, pointers, modules, generics.
+## Templates and modules
+
+```claw
+use lib.geo                              // the file lib/geo.claw, known here as `geo`
+
+type Pair[A, B] { a A, b B }
+
+pub fn max[T](a T, b T) T {              // `pub` is visible from other modules
+    if a > b { ret a }
+    ret b
+}
+
+fn demo() {
+    print(max(1, 2))                     // types are worked out from the values
+    print(max[i32](1, 2))                // or written out
+    p := Pair[int, f64]{1, 2.5}
+    q := geo.make(3)                     // `module.name`
+    print(area(q))                       // or by the module of the first argument's type
+}
+```
+
+There are no methods: write `area(q)`, not `q.area()`.
+
+## Claw mode: `claw fn` is C
+
+```claw
+extern fn strlen(s *u8) u64              // any libSystem function; callable from `claw fn`
+
+type Node { next *Node, v int }
+
+claw fn sum() int {
+    p := alloc[int](3)                   // n items on the heap; check-free pointer
+    defer free(p)                        // runs when this block ends, however it ends
+    p[0] = 1
+    q := p + 1                           // moves by whole items
+    *q = 2
+    mut x := 5
+    r := &x                              // `&` needs a `mut` variable
+    *r += 1
+    n *Node = none                       // the null pointer
+    if n == none { print(strlen("hi")) }
+    ret p[0] + p[1] + x
+}
+```
+
+`*T` values, `&`, `*`, `alloc`, `free`, `cast[T](x)`, `defer`, `extern` calls: only in `claw fn`. `p.x` reads through
+a pointer. `sizeof[T]()` is the size in bytes. `cast` converts between pointers, `int` and `u64`. A string passed
+where `*u8` is expected is its NUL-terminated bytes. Arithmetic and array bounds stay checked in `claw fn`;
+raw pointers do not.
+
+Not yet (`E0900`): strings as values, `[]T`, `own`, `&` parameters, generic variants, `test`.

@@ -9,6 +9,7 @@ mod fmt;
 mod lexer;
 mod lower;
 mod macho;
+mod modules;
 mod parser;
 mod sema;
 mod sha256;
@@ -68,46 +69,35 @@ fn die(msg: &str) -> ! {
     exit(2);
 }
 
-fn report(o: &Options, mut diags: Vec<Diag>) -> ! {
+fn report(o: &Options, mut diags: Vec<Diag>, files: &[String]) -> ! {
     diag::sort(&mut diags);
     if o.json {
-        print!("{}", diag::render_json(&o.file, &diags));
+        print!("{}", diag::render_json(files, &diags));
     } else {
-        eprint!("{}", diag::render_text(&o.file, &diags));
+        eprint!("{}", diag::render_text(files, &diags));
     }
     exit(1);
 }
 
 /// Runs the front end; never returns on a source error.
-fn compile_to_cir(o: &Options) -> cir::Module {
-    let src = match std::fs::read_to_string(&o.file) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("claw: cannot read {}: {e}", o.file);
-            exit(2);
-        }
+fn compile_to_cir(o: &Options) -> (cir::Module, Vec<String>) {
+    let loaded = match modules::load(&o.file) {
+        Ok(l) => l,
+        Err((diags, files)) => report(o, diags, &files),
     };
     let mut diags = Vec::new();
-    let toks = lexer::lex(&src, &mut diags);
+    let checked = sema::check(&loaded.units, &mut diags);
     if !diags.is_empty() {
-        // A broken token only produces noise in the parser.
-        report(o, diags);
+        report(o, diags, &loaded.files);
     }
-    let program = parser::Parser::new(toks, &mut diags).parse_program();
-    if !diags.is_empty() {
-        report(o, diags);
-    }
-    let checked = sema::check(&program, &mut diags);
-    if !diags.is_empty() {
-        report(o, diags);
-    }
-    let contracts: usize = program.funcs.iter().map(|f| f.contracts.len()).sum();
-    let effects: usize = program.funcs.iter().map(|f| f.effects.len()).sum();
+    let funcs = || loaded.units.iter().flat_map(|u| u.program.funcs.iter());
+    let contracts: usize = funcs().map(|f| f.contracts.len()).sum();
+    let effects: usize = funcs().map(|f| f.effects.len()).sum();
     if contracts + effects > 0 {
         eprintln!("claw: note: {contracts} contracts and {effects} effects were parsed but NOT checked; checking arrives in 0.5");
     }
-    let base = Path::new(&o.file).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    lower::lower(&program, &checked, &base)
+    let module = lower::lower(&loaded.units, &checked, &loaded.base_names);
+    (module, loaded.base_names.clone())
 }
 
 fn format_file(o: &Options) -> ! {
@@ -120,7 +110,7 @@ fn format_file(o: &Options) -> ! {
     };
     let out = match fmt::format(&src) {
         Ok(s) => s,
-        Err(diags) => report(o, diags),
+        Err(diags) => report(o, diags, std::slice::from_ref(&o.file)),
     };
     if out == src {
         exit(0);
@@ -137,12 +127,11 @@ fn format_file(o: &Options) -> ! {
 }
 
 fn compile(o: &Options, out: &Path) {
-    let module = compile_to_cir(o);
+    let (module, files) = compile_to_cir(o);
     if o.emit_cir {
         print!("{}", cir::dump(&module));
     }
-    let base = Path::new(&o.file).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let object = match codegen::generate(&module, &base) {
+    let object = match codegen::generate(&module, &files) {
         Ok(obj) => obj,
         Err(e) => {
             eprintln!("{}:1:1 {e}", o.file);

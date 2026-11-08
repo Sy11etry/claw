@@ -1,0 +1,10 @@
+// expect: 5
+use lib.geo
+
+fn area(p geo.Point) int {
+    ret p.x
+}
+
+fn main() {
+    print(area(geo.make(5)))
+}

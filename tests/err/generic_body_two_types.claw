@@ -1,0 +1,10 @@
+// error: E0104
+// error: E0104
+fn f[T](a T) int {
+    ret a
+}
+
+fn main() {
+    print(f(true))
+    print(f(1.5))
+}

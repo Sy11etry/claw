@@ -12,6 +12,7 @@ pub type ObjId = usize;
 pub struct Loc {
     pub line: u32,
     pub col: u32,
+    pub file: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +64,21 @@ pub enum Cc {
     Ge,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct CArg {
+    pub v: VReg,
+    /// Set for floats, which travel in d-registers.
+    pub float: Option<u8>,
+    pub size: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CRet {
+    None,
+    Int(Mem),
+    Float(u8),
+}
+
 #[derive(Clone, Debug)]
 pub enum Inst {
     Const { d: VReg, v: i64 },
@@ -89,6 +105,12 @@ pub enum Inst {
     MemCopy { dst: VReg, src: VReg, size: u64 },
     IndexAddr { d: VReg, base: VReg, idx: VReg, size: u64 },
     Bounds { idx: VReg, len: u64, loc: Loc },
+    /// `malloc` of `n` items, trapping on a bad size or on failure.
+    Alloc { d: VReg, n: VReg, elem: u64, loc: Loc },
+    Free { p: VReg },
+    /// The address of NUL-terminated bytes, for handing to C.
+    StrAddr { d: VReg, text: String },
+    CallC { d: Option<VReg>, sym: String, args: Vec<CArg>, variadic: Option<usize>, ret: CRet },
     BufStr { text: String },
     BufInt { s: VReg, signed: bool },
     BufBool { s: VReg },

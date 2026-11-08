@@ -1,0 +1,13 @@
+// expect: cleanup
+// exit: 1
+// stderr: error: Bad at defer_main_try.claw:
+type E = Bad
+
+claw fn f() int ! E {
+    fail Bad
+}
+
+claw fn main() {
+    defer print("cleanup")
+    print(f()?)
+}

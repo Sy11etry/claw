@@ -1,0 +1,10 @@
+// error: E0104
+// error: E0105
+fn f[T](a T, b T) T {
+    ret a
+}
+
+fn main() {
+    x := f(1, 1.5)
+    print(x)
+}

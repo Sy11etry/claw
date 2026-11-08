@@ -2,12 +2,17 @@
 
 use crate::ast::*;
 use crate::diag::{Diag, Span};
+use crate::modules::Unit;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+#[derive(Clone)]
 pub struct FnSig {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// The C symbol, for `extern fn`.
+    pub ext: Option<String>,
+    pub variadic: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -26,8 +31,8 @@ pub enum NameDef {
 pub struct Checked {
     pub types: Types,
     pub sigs: HashMap<String, FnSig>,
-    pub names: HashMap<String, NameDef>,
-    pub consts: HashMap<String, (ConstVal, Ty)>,
+    /// One checked copy of a template per set of type arguments.
+    pub instances: Vec<Func>,
 }
 
 struct Var {
@@ -39,7 +44,9 @@ struct Var {
     decl: Span,
 }
 
-const BUILTINS: &[&str] = &["print", "len", "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool"];
+const BUILTINS: &[&str] = &[
+    "print", "len", "alloc", "free", "cast", "sizeof", "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
+];
 
 fn prim(name: &str) -> Option<Ty> {
     Some(match name {
@@ -58,40 +65,73 @@ fn prim(name: &str) -> Option<Ty> {
     })
 }
 
-struct Global {
-    types: Types,
-    names: HashMap<String, NameDef>,
-    consts: HashMap<String, (ConstVal, Ty)>,
+struct Mod<'a> {
+    prefix: String,
+    imports: &'a HashMap<String, usize>,
+    used: HashSet<String>,
+    /// Each entry remembers whether it is `pub`.
+    names: HashMap<String, (NameDef, bool)>,
+    consts: HashMap<String, (ConstVal, Ty, bool)>,
+    funcs: HashMap<String, (Option<&'a Func>, bool)>,
+    gtypes: HashMap<String, (&'a TypeDecl, bool)>,
 }
 
-impl Global {
+struct Global<'a> {
+    types: Types,
+    mods: Vec<Mod<'a>>,
+    cur: usize,
+    /// Type parameters currently in force, inside a template instance.
+    tenv: HashMap<String, Ty>,
+    sigs: HashMap<String, FnSig>,
+    struct_insts: HashMap<(usize, String, Vec<Ty>), Ty>,
+    instance_of: HashMap<Ty, (usize, String, Vec<Ty>)>,
+    spans: HashMap<Ty, Span>,
+    layout_ready: bool,
+    depth: u32,
+    work: Vec<(&'a Func, usize, Vec<Ty>, String)>,
+}
+
+const MAX_INSTANCE_DEPTH: u32 = 32;
+const MAX_INSTANCES: usize = 20_000;
+
+fn private_msg(name: &str) -> String {
+    format!("`{name}` is private to its module; mark it `pub` there")
+}
+
+fn type_list(types: &Types, args: &[Ty]) -> String {
+    args.iter().map(|t| types.name(*t)).collect::<Vec<_>>().join(", ")
+}
+
+impl<'a> Global<'a> {
+    fn import(&mut self, alias: &str, span: Span, diags: &mut Vec<Diag>) -> Option<usize> {
+        let m = &mut self.mods[self.cur];
+        match m.imports.get(alias) {
+            Some(&i) => {
+                m.used.insert(alias.to_string());
+                Some(i)
+            }
+            None => {
+                diags.push(Diag::new("E0146", span, format!("no imported module named `{alias}`; add `use {alias}`")));
+                None
+            }
+        }
+    }
+
     fn resolve(&mut self, t: &TypeExpr, diags: &mut Vec<Diag>) -> Ty {
         match &t.kind {
-            TypeKind::Name(n) => {
-                if let Some(p) = prim(n) {
-                    return p;
-                }
-                if n == "str" {
-                    diags.push(Diag::new("E0900", t.span, "type `str` is not available in claw 0.2"));
+            TypeKind::Name { module, name, targs } => self.resolve_name(t.span, module.as_deref(), name, targs, diags),
+            TypeKind::Pointer(inner) => {
+                let p = self.resolve(inner, diags);
+                if p == ERR {
                     return ERR;
                 }
-                match self.names.get(n) {
-                    Some(NameDef::Type(ty)) => *ty,
-                    Some(NameDef::Variant(..)) => {
-                        diags.push(Diag::new("E0112", t.span, format!("`{n}` is a variant, not a type")));
-                        ERR
-                    }
-                    None => {
-                        diags.push(Diag::new("E0112", t.span, format!("unknown type `{n}`")));
-                        ERR
-                    }
-                }
+                self.types.intern(Kind::Pointer(p))
             }
             TypeKind::Array(size, elem) => {
                 let n = match size {
                     Size::Lit(v) => *v,
-                    Size::Name(name) => match self.consts.get(name) {
-                        Some((ConstVal::Int(v), _)) => *v,
+                    Size::Name(name) => match self.mods[self.cur].consts.get(name) {
+                        Some((ConstVal::Int(v), ty, _)) if *ty != ERR => *v,
                         _ => {
                             diags.push(Diag::new("E0126", t.span, format!("array size `{name}` must be a number or an integer `const`")));
                             return ERR;
@@ -128,6 +168,251 @@ impl Global {
             }
         }
     }
+
+    fn resolve_name(&mut self, span: Span, module: Option<&str>, name: &str, targs: &[TypeExpr], diags: &mut Vec<Diag>) -> Ty {
+        if module.is_none() && targs.is_empty() {
+            if let Some(t) = self.tenv.get(name) {
+                return *t;
+            }
+            if let Some(p) = prim(name) {
+                return p;
+            }
+            if name == "str" {
+                diags.push(Diag::new("E0900", span, "type `str` is not available in claw 0.3"));
+                return ERR;
+            }
+        }
+        let m = match module {
+            Some(alias) => match self.import(alias, span, diags) {
+                Some(m) => m,
+                None => return ERR,
+            },
+            None => self.cur,
+        };
+        let local = m == self.cur;
+        if let Some(&(d, public)) = self.mods[m].gtypes.get(name) {
+            if !public && !local {
+                diags.push(Diag::new("E0147", span, private_msg(name)));
+                return ERR;
+            }
+            if targs.len() != d.tparams.len() {
+                diags.push(Diag::new("E0144", span, format!("`{name}` takes {} type arguments, found {}", d.tparams.len(), targs.len())));
+                return ERR;
+            }
+            let mut args = Vec::with_capacity(targs.len());
+            for a in targs {
+                let t = self.resolve(a, diags);
+                if t == ERR {
+                    return ERR;
+                }
+                args.push(t);
+            }
+            return self.instantiate_type(d, m, args, diags);
+        }
+        match self.mods[m].names.get(name).copied() {
+            Some((NameDef::Type(ty), public)) => {
+                if !public && !local {
+                    diags.push(Diag::new("E0147", span, private_msg(name)));
+                    return ERR;
+                }
+                if !targs.is_empty() {
+                    diags.push(Diag::new("E0144", span, format!("`{name}` takes no type arguments")));
+                    return ERR;
+                }
+                ty
+            }
+            Some((NameDef::Variant(..), _)) => {
+                diags.push(Diag::new("E0112", span, format!("`{name}` is a variant, not a type")));
+                ERR
+            }
+            None => {
+                diags.push(Diag::new("E0112", span, format!("unknown type `{name}`")));
+                ERR
+            }
+        }
+    }
+
+    fn instantiate_type(&mut self, d: &'a TypeDecl, m: usize, targs: Vec<Ty>, diags: &mut Vec<Diag>) -> Ty {
+        let key = (m, d.name.clone(), targs.clone());
+        if let Some(t) = self.struct_insts.get(&key) {
+            return *t;
+        }
+        if self.depth >= MAX_INSTANCE_DEPTH {
+            diags.push(Diag::new("E0145", d.span, format!("`{}` keeps instantiating itself with new types", d.name)));
+            return ERR;
+        }
+        let TypeBody::Struct(fields) = &d.body else { return ERR };
+        let name = format!("{}[{}]", d.name, type_list(&self.types, &targs));
+        self.types.structs.push(StructDef { name, fields: Vec::new(), size: 0, align: 1, module: m, state: 0 });
+        let id = self.types.structs.len() - 1;
+        let ty = self.types.intern(Kind::Struct(id));
+        self.struct_insts.insert(key, ty);
+        self.instance_of.insert(ty, (m, d.name.clone(), targs.clone()));
+        self.spans.insert(ty, d.span);
+
+        let tenv: HashMap<String, Ty> = d.tparams.iter().map(|p| p.0.clone()).zip(targs).collect();
+        let saved_env = std::mem::replace(&mut self.tenv, tenv);
+        let saved_cur = std::mem::replace(&mut self.cur, m);
+        self.depth += 1;
+        let resolved: Vec<Field> =
+            fields.iter().map(|f| Field { name: f.name.clone(), ty: self.resolve(&f.ty, diags), offset: 0 }).collect();
+        self.depth -= 1;
+        self.tenv = saved_env;
+        self.cur = saved_cur;
+        self.types.structs[id].fields = resolved;
+        if self.layout_ready {
+            self.ensure_layout(ty, diags);
+        }
+        ty
+    }
+
+    /// Lays out `t` after everything it contains by value.
+    fn ensure_layout(&mut self, t: Ty, diags: &mut Vec<Diag>) {
+        let cycle = |g: &Global, t: Ty, diags: &mut Vec<Diag>| {
+            let span = g.spans.get(&t).copied().unwrap_or_default();
+            diags.push(Diag::new("E0127", span, format!("type `{}` contains itself, so it would be infinitely large; use a pointer", g.types.name(t))));
+        };
+        match self.types.kind(t) {
+            Kind::Struct(id) => {
+                match self.types.structs[id].state {
+                    2 => return,
+                    1 => return cycle(self, t, diags),
+                    _ => {}
+                }
+                self.types.structs[id].state = 1;
+                let fields = self.types.structs[id].fields.clone();
+                for f in &fields {
+                    self.ensure_layout(f.ty, diags);
+                }
+                let (placed, end, al) = self.place_fields(&fields, 0);
+                let def = &mut self.types.structs[id];
+                def.fields = placed;
+                def.size = align_up(end, al);
+                def.align = al;
+                def.state = 2;
+            }
+            Kind::Enum(id) => {
+                match self.types.enums[id].state {
+                    2 => return,
+                    1 => return cycle(self, t, diags),
+                    _ => {}
+                }
+                self.types.enums[id].state = 1;
+                let vars = self.types.enums[id].variants.clone();
+                for v in &vars {
+                    for f in &v.fields {
+                        self.ensure_layout(f.ty, diags);
+                    }
+                }
+                let mut size = TAG_SIZE;
+                let mut built = Vec::new();
+                for v in &vars {
+                    let (placed, end, _) = self.place_fields(&v.fields, TAG_SIZE);
+                    size = size.max(end);
+                    built.push(Variant { name: v.name.clone(), fields: placed });
+                }
+                let def = &mut self.types.enums[id];
+                def.variants = built;
+                def.size = align_up(size, 8);
+                def.state = 2;
+            }
+            Kind::Array(e, _) | Kind::Option(e) => self.ensure_layout(e, diags),
+            Kind::Result(a, b) => {
+                self.ensure_layout(a, diags);
+                self.ensure_layout(b, diags);
+            }
+            _ => {}
+        }
+    }
+
+    fn place_fields(&self, fields: &[Field], start: u64) -> (Vec<Field>, u64, u64) {
+        let (mut off, mut al) = (start, 1u64);
+        let mut out = Vec::with_capacity(fields.len());
+        for f in fields {
+            let (s, a) = self.types.layout(f.ty);
+            off = align_up(off, a);
+            out.push(Field { name: f.name.clone(), ty: f.ty, offset: off });
+            off += s;
+            al = al.max(a);
+        }
+        (out, off, al)
+    }
+
+    fn instantiate_fn(&mut self, f: &'a Func, m: usize, targs: Vec<Ty>, diags: &mut Vec<Diag>) -> String {
+        let full = format!("{}{}[{}]", self.mods[m].prefix, f.name, type_list(&self.types, &targs));
+        if self.sigs.contains_key(&full) {
+            return full;
+        }
+        if self.work.len() >= MAX_INSTANCES || self.sigs.len() >= MAX_INSTANCES {
+            diags.push(Diag::new("E0145", f.name_span, format!("`{}` keeps instantiating itself with new types", f.name)));
+            return full;
+        }
+        let tenv: HashMap<String, Ty> = f.tparams.iter().map(|p| p.0.clone()).zip(targs.iter().copied()).collect();
+        let saved_env = std::mem::replace(&mut self.tenv, tenv);
+        let saved_cur = std::mem::replace(&mut self.cur, m);
+        let params = f.params.iter().map(|p| self.resolve(&p.ty, diags)).collect();
+        let ret = f.ret.as_ref().map(|t| self.resolve(t, diags)).unwrap_or(VOID);
+        self.tenv = saved_env;
+        self.cur = saved_cur;
+        self.sigs.insert(full.clone(), FnSig { params, ret, ext: None, variadic: false });
+        self.work.push((f, m, targs, full.clone()));
+        full
+    }
+
+    fn unify(&self, p: &TypeExpr, a: Ty, bind: &mut HashMap<String, Ty>, tparams: &[(String, Span)]) {
+        if a == ERR {
+            return;
+        }
+        match &p.kind {
+            TypeKind::Name { module: None, name, targs } if targs.is_empty() && tparams.iter().any(|t| t.0 == *name) => {
+                bind.entry(name.clone()).or_insert(a);
+            }
+            TypeKind::Name { targs, .. } if !targs.is_empty() => {
+                if let Some((_, _, args)) = self.instance_of.get(&a) {
+                    for (x, y) in targs.iter().zip(args.clone()) {
+                        self.unify(x, y, bind, tparams);
+                    }
+                }
+            }
+            TypeKind::Pointer(x) => {
+                if let Kind::Pointer(t) = self.types.kind(a) {
+                    self.unify(x, t, bind, tparams);
+                }
+            }
+            TypeKind::Array(_, x) => {
+                if let Kind::Array(t, _) = self.types.kind(a) {
+                    self.unify(x, t, bind, tparams);
+                }
+            }
+            TypeKind::Option(x) => match self.types.kind(a) {
+                Kind::Option(t) => self.unify(x, t, bind, tparams),
+                _ => self.unify(x, a, bind, tparams),
+            },
+            TypeKind::Result(ok, err) => match self.types.kind(a) {
+                Kind::Result(o, e) => {
+                    if let Some(k) = ok {
+                        self.unify(k, o, bind, tparams);
+                    }
+                    self.unify(err, e, bind, tparams);
+                }
+                _ => {
+                    if let Some(k) = ok {
+                        self.unify(k, a, bind, tparams);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn owner_of(&self, t: Ty) -> Option<usize> {
+        match self.types.kind(t) {
+            Kind::Struct(id) => Some(self.types.structs[id].module),
+            Kind::Enum(id) => Some(self.types.enums[id].module),
+            Kind::Pointer(p) => self.owner_of(p),
+            _ => None,
+        }
+    }
 }
 
 fn int_range(bits: u8, signed: bool) -> (i128, i128) {
@@ -157,8 +442,8 @@ fn eval_const(g: &Global, e: &Expr, diags: &mut Vec<Diag>) -> Option<ConstVal> {
         ExprKind::Float(v) => Some(ConstVal::Float(*v)),
         ExprKind::Char(c) => Some(ConstVal::Int(*c as i128)),
         ExprKind::Bool(b) => Some(ConstVal::Bool(*b)),
-        ExprKind::Var(n) => match g.consts.get(n) {
-            Some((v, _)) => Some(*v),
+        ExprKind::Var(n) => match g.mods[g.cur].consts.get(n) {
+            Some((v, _, _)) => Some(*v),
             None => bad(diags, e.span),
         },
         ExprKind::Unary { op, e: inner } => match (op, eval_const(g, inner, diags)?) {
@@ -207,7 +492,7 @@ fn eval_const(g: &Global, e: &Expr, diags: &mut Vec<Diag>) -> Option<ConstVal> {
 fn collect_consts(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
     for c in &p.consts {
         check_case(&c.name, false, "constant", c.span, diags);
-        if g.consts.contains_key(&c.name) || BUILTINS.contains(&c.name.as_str()) {
+        if g.mods[g.cur].consts.contains_key(&c.name) || BUILTINS.contains(&c.name.as_str()) {
             diags.push(Diag::new("E0102", c.span, format!("`{}` is already defined", c.name)));
             continue;
         }
@@ -216,7 +501,7 @@ fn collect_consts(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
             Some(v) => v,
             None => {
                 // Already reported: uses of this name should not report again.
-                g.consts.insert(c.name.clone(), (ConstVal::Int(0), ERR));
+                g.mods[g.cur].consts.insert(c.name.clone(), (ConstVal::Int(0), ERR, c.public));
                 continue;
             }
         };
@@ -241,225 +526,282 @@ fn collect_consts(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
                 continue;
             }
         }
-        g.consts.insert(c.name.clone(), (v, ty));
+        g.mods[g.cur].consts.insert(c.name.clone(), (v, ty, c.public));
     }
 }
 
-fn define_name(g: &mut Global, name: &str, def: NameDef, span: Span, diags: &mut Vec<Diag>) -> bool {
-    if g.names.contains_key(name) || prim(name).is_some() {
+fn define_name(g: &mut Global, name: &str, def: NameDef, public: bool, span: Span, diags: &mut Vec<Diag>) -> bool {
+    let m = &mut g.mods[g.cur];
+    if m.names.contains_key(name) || m.gtypes.contains_key(name) || prim(name).is_some() {
         diags.push(Diag::new("E0110", span, format!("`{name}` is defined twice")));
         return false;
     }
-    g.names.insert(name.to_string(), def);
+    m.names.insert(name.to_string(), (def, public));
     true
 }
 
-fn collect_types(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
-    // Names first, so types can refer to each other in any order.
-    let mut ids: Vec<Option<Ty>> = Vec::new();
+/// Declares the names of a module's types, so they can refer to each other freely.
+fn declare_types<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) -> Vec<Option<Ty>> {
+    let mut ids = Vec::new();
+    let module = g.cur;
     for d in &p.types {
         check_case(&d.name, true, "type", d.span, diags);
+        if !d.tparams.is_empty() {
+            for (n, sp) in &d.tparams {
+                check_case(n, true, "type parameter", *sp, diags);
+            }
+            if matches!(d.body, TypeBody::Variants(_)) {
+                diags.push(Diag::new("E0900", d.span, "generic variants are not available in claw 0.3; use a generic struct or `?T`"));
+            } else {
+                let m = &mut g.mods[g.cur];
+                if m.names.contains_key(&d.name) || m.gtypes.contains_key(&d.name) {
+                    diags.push(Diag::new("E0110", d.span, format!("`{}` is defined twice", d.name)));
+                } else {
+                    m.gtypes.insert(d.name.clone(), (d, d.public));
+                }
+            }
+            ids.push(None);
+            continue;
+        }
         let ty = match &d.body {
             TypeBody::Struct(_) => {
-                g.types.structs.push(StructDef { name: d.name.clone(), fields: Vec::new(), size: 0, align: 1 });
+                g.types.structs.push(StructDef { name: d.name.clone(), fields: Vec::new(), size: 0, align: 1, module, state: 0 });
                 g.types.intern(Kind::Struct(g.types.structs.len() - 1))
             }
-            TypeBody::Variants(_) => {
-                g.types.enums.push(EnumDef { name: d.name.clone(), variants: Vec::new(), size: TAG_SIZE });
+            TypeBody::Variants(vars) => {
+                let variants = vars.iter().map(|v| Variant { name: v.name.clone(), fields: Vec::new() }).collect();
+                g.types.enums.push(EnumDef { name: d.name.clone(), variants, size: TAG_SIZE, module, state: 0 });
                 g.types.intern(Kind::Enum(g.types.enums.len() - 1))
             }
         };
-        ids.push(if define_name(g, &d.name, NameDef::Type(ty), d.span, diags) { Some(ty) } else { None });
-    }
-
-    let mut field_types: Vec<Vec<Vec<(String, Ty)>>> = Vec::new();
-    for (d, id) in p.types.iter().zip(&ids) {
-        let resolve_fields = |g: &mut Global, fields: &[FieldDecl], diags: &mut Vec<Diag>| -> Vec<(String, Ty)> {
-            let mut out: Vec<(String, Ty)> = Vec::new();
-            for f in fields {
-                check_case(&f.name, false, "field", f.span, diags);
-                if out.iter().any(|(n, _)| *n == f.name) {
-                    diags.push(Diag::new("E0137", f.span, format!("field `{}` appears twice", f.name)));
-                }
-                out.push((f.name.clone(), g.resolve(&f.ty, diags)));
+        g.spans.insert(ty, d.span);
+        if !define_name(g, &d.name, NameDef::Type(ty), d.public, d.span, diags) {
+            ids.push(None);
+            continue;
+        }
+        if let (TypeBody::Variants(vars), Kind::Enum(eid)) = (&d.body, g.types.kind(ty)) {
+            for (i, v) in vars.iter().enumerate() {
+                check_case(&v.name, true, "variant", v.span, diags);
+                define_name(g, &v.name, NameDef::Variant(eid, i, ty), d.public, v.span, diags);
             }
-            out
-        };
-        let mut groups = Vec::new();
-        match &d.body {
-            TypeBody::Struct(fields) => groups.push(resolve_fields(g, fields, diags)),
-            TypeBody::Variants(vars) => {
+        }
+        ids.push(Some(ty));
+    }
+    ids
+}
+
+fn resolve_field_list(g: &mut Global, fields: &[FieldDecl], diags: &mut Vec<Diag>) -> Vec<Field> {
+    let mut out: Vec<Field> = Vec::new();
+    for f in fields {
+        check_case(&f.name, false, "field", f.span, diags);
+        if out.iter().any(|x| x.name == f.name) {
+            diags.push(Diag::new("E0137", f.span, format!("field `{}` appears twice", f.name)));
+        }
+        let ty = g.resolve(&f.ty, diags);
+        out.push(Field { name: f.name.clone(), ty, offset: 0 });
+    }
+    out
+}
+
+fn fill_types(g: &mut Global, p: &Program, ids: &[Option<Ty>], diags: &mut Vec<Diag>) {
+    for (d, id) in p.types.iter().zip(ids) {
+        let Some(ty) = *id else { continue };
+        match (&d.body, g.types.kind(ty)) {
+            (TypeBody::Struct(fields), Kind::Struct(sid)) => {
+                g.types.structs[sid].fields = resolve_field_list(g, fields, diags);
+            }
+            (TypeBody::Variants(vars), Kind::Enum(eid)) => {
                 for (i, v) in vars.iter().enumerate() {
-                    check_case(&v.name, true, "variant", v.span, diags);
-                    if let (Some(ty), Kind::Enum(eid)) = (*id, id.map(|t| g.types.kind(t)).unwrap_or(Kind::Err)) {
-                        define_name(g, &v.name, NameDef::Variant(eid, i, ty), v.span, diags);
-                    }
-                    groups.push(resolve_fields(g, &v.fields, diags));
+                    g.types.enums[eid].variants[i].fields = resolve_field_list(g, &v.fields, diags);
                 }
             }
+            _ => {}
         }
-        field_types.push(groups);
-    }
-
-    // Lay out each declaration after everything it contains by value.
-    let mut state = vec![0u8; p.types.len()];
-    let index: HashMap<Ty, usize> = ids.iter().enumerate().filter_map(|(i, t)| t.map(|t| (t, i))).collect();
-    for i in 0..p.types.len() {
-        layout_decl(g, p, &field_types, &ids, &index, &mut state, i, diags);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn layout_decl(
-    g: &mut Global,
-    p: &Program,
-    field_types: &[Vec<Vec<(String, Ty)>>],
-    ids: &[Option<Ty>],
-    index: &HashMap<Ty, usize>,
-    state: &mut Vec<u8>,
-    i: usize,
-    diags: &mut Vec<Diag>,
-) {
-    if state[i] != 0 {
-        return;
-    }
-    state[i] = 1;
-    let d = &p.types[i];
-    for group in &field_types[i] {
-        for (_, t) in group {
-            let mut deps = Vec::new();
-            direct_deps(&g.types, *t, &mut deps);
-            for dep in deps {
-                if let Some(&j) = index.get(&dep) {
-                    if state[j] == 1 {
-                        diags.push(Diag::new("E0127", d.span, format!("type `{}` contains itself, so it would be infinitely large", d.name)));
-                    } else {
-                        layout_decl(g, p, field_types, ids, index, state, j, diags);
-                    }
-                }
-            }
-        }
-    }
-    state[i] = 2;
-    let Some(ty) = ids[i] else { return };
-    let lay = |g: &Global, group: &[(String, Ty)], start: u64| -> (Vec<Field>, u64, u64) {
-        let (mut off, mut al) = (start, 1u64);
-        let mut fields = Vec::new();
-        for (name, t) in group {
-            let (s, a) = g.types.layout(*t);
-            off = align_up(off, a);
-            fields.push(Field { name: name.clone(), ty: *t, offset: off });
-            off += s;
-            al = al.max(a);
-        }
-        (fields, off, al)
-    };
-    match g.types.kind(ty) {
-        Kind::Struct(id) => {
-            let (fields, end, al) = lay(g, &field_types[i][0], 0);
-            let def = &mut g.types.structs[id];
-            def.fields = fields;
-            def.size = align_up(end, al);
-            def.align = al;
-        }
-        Kind::Enum(id) => {
-            let TypeBody::Variants(vars) = &d.body else { return };
-            let mut size = TAG_SIZE;
-            let mut built = Vec::new();
-            for (v, group) in vars.iter().zip(&field_types[i]) {
-                let (fields, end, _) = lay(g, group, TAG_SIZE);
-                size = size.max(end);
-                built.push(Variant { name: v.name.clone(), fields });
-            }
-            let def = &mut g.types.enums[id];
-            def.variants = built;
-            def.size = align_up(size, 8);
-        }
-        _ => {}
-    }
+fn is_c_type(types: &Types, t: Ty) -> bool {
+    t == ERR || !types.is_aggregate(t)
 }
 
-fn direct_deps(types: &Types, t: Ty, out: &mut Vec<Ty>) {
-    match types.kind(t) {
-        Kind::Struct(_) | Kind::Enum(_) => out.push(t),
-        Kind::Array(e, _) | Kind::Option(e) => direct_deps(types, e, out),
-        Kind::Result(a, b) => {
-            direct_deps(types, a, out);
-            direct_deps(types, b, out);
-        }
-        _ => {}
-    }
-}
-
-pub fn check(p: &Program, diags: &mut Vec<Diag>) -> Checked {
-    let mut g = Global { types: Types::new(), names: HashMap::new(), consts: HashMap::new() };
-    collect_consts(&mut g, p, diags);
-    collect_types(&mut g, p, diags);
-
-    let mut sigs: HashMap<String, FnSig> = HashMap::new();
+fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) {
+    let prefix = g.mods[g.cur].prefix.clone();
     for f in &p.funcs {
         check_case(&f.name, false, "function", f.name_span, diags);
         if BUILTINS.contains(&f.name.as_str()) {
             diags.push(Diag::new("E0102", f.name_span, format!("`{}` is a built-in name", f.name)));
             continue;
         }
-        if sigs.contains_key(&f.name) || g.consts.contains_key(&f.name) {
+        let taken = g.mods[g.cur].funcs.contains_key(&f.name) || g.mods[g.cur].consts.contains_key(&f.name);
+        if taken {
             diags.push(Diag::new("E0110", f.name_span, format!("function `{}` is defined twice", f.name)));
             continue;
         }
-        let params = f.params.iter().map(|x| g.resolve(&x.ty, diags)).collect();
+        if !f.tparams.is_empty() {
+            for (n, sp) in &f.tparams {
+                check_case(n, true, "type parameter", *sp, diags);
+            }
+            g.mods[g.cur].funcs.insert(f.name.clone(), (Some(f), f.public));
+            continue;
+        }
+        let params: Vec<Ty> = f.params.iter().map(|x| g.resolve(&x.ty, diags)).collect();
         let ret = f.ret.as_ref().map(|t| g.resolve(t, diags)).unwrap_or(VOID);
-        sigs.insert(f.name.clone(), FnSig { params, ret });
+        if !f.claw {
+            let bad = f.params.iter().zip(&params).find(|(_, t)| g.types.is_ptr(**t)).map(|(x, _)| x.span);
+            if let Some(span) = bad.or(if g.types.is_ptr(ret) { Some(f.name_span) } else { None }) {
+                diags.push(Diag::new("E0140", span, "pointers only exist inside `claw fn`").fix(f.name_span, "claw ", "make it a `claw fn`"));
+            }
+        }
+        g.mods[g.cur].funcs.insert(f.name.clone(), (None, f.public));
+        g.sigs.insert(format!("{prefix}{}", f.name), FnSig { params, ret, ext: None, variadic: false });
+    }
+    for x in &p.externs {
+        if g.mods[g.cur].funcs.contains_key(&x.name) || BUILTINS.contains(&x.name.as_str()) {
+            diags.push(Diag::new("E0110", x.span, format!("function `{}` is defined twice", x.name)));
+            continue;
+        }
+        let params: Vec<Ty> = x.params.iter().map(|a| g.resolve(&a.ty, diags)).collect();
+        let ret = x.ret.as_ref().map(|t| g.resolve(t, diags)).unwrap_or(VOID);
+        for (a, t) in x.params.iter().zip(&params) {
+            if !is_c_type(&g.types, *t) {
+                diags.push(Diag::new("E0149", a.span, "`extern fn` takes only numbers, bool and pointers; pass a pointer to the struct"));
+            }
+        }
+        if !is_c_type(&g.types, ret) {
+            diags.push(Diag::new("E0149", x.span, "`extern fn` returns only numbers, bool and pointers"));
+        }
+        g.mods[g.cur].funcs.insert(x.name.clone(), (None, x.public));
+        g.sigs.insert(format!("{prefix}{}", x.name), FnSig { params, ret, ext: Some(x.name.clone()), variadic: x.variadic });
+    }
+}
+
+fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: usize, full: &str, is_main: bool) {
+    let Some(sig) = g.sigs.get(full).cloned() else { return };
+    g.cur = module;
+    let mut cx = Ctx {
+        g,
+        func: f,
+        scopes: vec![HashMap::new()],
+        diags,
+        ret: sig.ret,
+        loops: 0,
+        is_main,
+        locks: Vec::new(),
+        in_defer: false,
+    };
+    for (x, ty) in f.params.iter().zip(sig.params) {
+        if x.name != "_" {
+            cx.declare(&x.name, ty, false, x.span, x.span);
+        }
+    }
+    let ends = cx.block(&f.body);
+    cx.pop_scope();
+    if !ends && sig.ret != VOID && sig.ret != ERR && !matches!(cx.kind(sig.ret), Kind::Result(VOID, _)) {
+        let msg = format!("`{}` can reach its end without `ret`", f.name);
+        cx.diags.push(Diag::new("E0107", f.body.end, msg));
+    }
+}
+
+pub fn check(units: &[Unit], diags: &mut Vec<Diag>) -> Checked {
+    let mut g = Global {
+        types: Types::new(),
+        mods: units
+            .iter()
+            .map(|u| Mod {
+                prefix: u.prefix.clone(),
+                imports: &u.imports,
+                used: HashSet::new(),
+                names: HashMap::new(),
+                consts: HashMap::new(),
+                funcs: HashMap::new(),
+                gtypes: HashMap::new(),
+            })
+            .collect(),
+        cur: 0,
+        tenv: HashMap::new(),
+        sigs: HashMap::new(),
+        struct_insts: HashMap::new(),
+        instance_of: HashMap::new(),
+        spans: HashMap::new(),
+        layout_ready: false,
+        depth: 0,
+        work: Vec::new(),
+    };
+
+    for (i, u) in units.iter().enumerate() {
+        g.cur = i;
+        collect_consts(&mut g, &u.program, diags);
+    }
+    let mut ids = Vec::new();
+    for (i, u) in units.iter().enumerate() {
+        g.cur = i;
+        ids.push(declare_types(&mut g, &u.program, diags));
+    }
+    for (i, u) in units.iter().enumerate() {
+        g.cur = i;
+        fill_types(&mut g, &u.program, &ids[i], diags);
+    }
+    let every: Vec<Ty> = g.instance_of.keys().copied().chain(ids.iter().flatten().flatten().copied()).collect();
+    for t in every {
+        g.ensure_layout(t, diags);
+    }
+    g.layout_ready = true;
+
+    for (i, u) in units.iter().enumerate() {
+        g.cur = i;
+        collect_funcs(&mut g, &u.program, diags);
     }
 
-    match p.funcs.iter().find(|f| f.name == "main") {
-        None => diags.push(Diag::new("E0109", Span { start: 0, end: 0, line: 1, col: 1 }, "no `fn main()`; every program needs one")),
+    let root = units.len() - 1;
+    match units[root].program.funcs.iter().find(|f| f.name == "main") {
+        None => diags.push(Diag::new("E0109", Span { start: 0, end: 0, line: 1, col: 1, file: 0 }, "no `fn main()`; every program needs one")),
         Some(f) => {
-            if !f.params.is_empty() || f.ret.is_some() {
+            if !f.params.is_empty() || f.ret.is_some() || !f.tparams.is_empty() {
                 diags.push(Diag::new("E0109", f.name_span, "`main` takes no parameters and returns nothing"));
             }
         }
     }
 
-    for f in &p.funcs {
-        let Some(sig) = sigs.get(&f.name) else { continue };
-        let param_types = sig.params.clone();
-        let ret = sig.ret;
-        let mut cx = Ctx {
-            g: &mut g,
-            sigs: &sigs,
-            scopes: vec![HashMap::new()],
-            diags: &mut *diags,
-            ret,
-            loops: 0,
-            is_main: f.name == "main",
-            locks: Vec::new(),
-        };
-        for (x, ty) in f.params.iter().zip(param_types) {
-            if x.name != "_" {
-                cx.declare(&x.name, ty, false, x.span, x.span);
-            }
-        }
-        let ends = cx.block(&f.body);
-        cx.pop_scope();
-        if !ends && ret != VOID && ret != ERR && !matches!(cx.kind(ret), Kind::Result(VOID, _)) {
-            let msg = format!("`{}` can reach its end without `ret`", f.name);
-            cx.diags.push(Diag::new("E0107", f.body.end, msg));
+    for (i, u) in units.iter().enumerate() {
+        for f in u.program.funcs.iter().filter(|f| f.tparams.is_empty()) {
+            let full = format!("{}{}", u.prefix, f.name);
+            check_body(&mut g, diags, f, i, &full, i == root && f.name == "main");
         }
     }
-    Checked { types: g.types, sigs, names: g.names, consts: g.consts }
+
+    // Each template instance is checked as ordinary code with its types filled in.
+    let mut instances = Vec::new();
+    while let Some((f, m, targs, full)) = g.work.pop() {
+        let mut inst = f.clone();
+        inst.name = full.clone();
+        g.tenv = f.tparams.iter().map(|p| p.0.clone()).zip(targs).collect();
+        check_body(&mut g, diags, &inst, m, &full, false);
+        g.tenv.clear();
+        instances.push(inst);
+    }
+
+    for (i, u) in units.iter().enumerate() {
+        for (alias, span) in &u.import_spans {
+            if !g.mods[i].used.contains(alias) {
+                diags.push(Diag::new("E0148", *span, format!("module `{alias}` is imported but not used")));
+            }
+        }
+    }
+
+    Checked { types: g.types, sigs: g.sigs, instances }
 }
 
-struct Ctx<'a> {
-    g: &'a mut Global,
-    sigs: &'a HashMap<String, FnSig>,
+struct Ctx<'a, 'b> {
+    g: &'b mut Global<'a>,
+    func: &'b Func,
     scopes: Vec<HashMap<String, Var>>,
-    diags: &'a mut Vec<Diag>,
+    diags: &'b mut Vec<Diag>,
     ret: Ty,
     loops: u32,
     is_main: bool,
     /// Arrays being walked by an enclosing `for ... in`.
     locks: Vec<String>,
+    in_defer: bool,
 }
 
 fn is_lit(e: &Expr) -> bool {
@@ -475,6 +817,43 @@ fn is_lit(e: &Expr) -> bool {
     }
 }
 
+/// Literals whose type depends on what is expected of them.
+fn hint_dep(e: &Expr) -> bool {
+    is_lit(e) || matches!(e.kind, ExprKind::None | ExprKind::ArrayLit(_) | ExprKind::ArrayFill(_) | ExprKind::Str(_))
+}
+
+/// Does this parameter type still contain a type parameter nobody has decided?
+fn mentions_unbound(p: &TypeExpr, bind: &HashMap<String, Ty>, tparams: &[(String, Span)]) -> bool {
+    let rec = |x: &TypeExpr| mentions_unbound(x, bind, tparams);
+    match &p.kind {
+        TypeKind::Name { name, targs, .. } => (tparams.iter().any(|t| t.0 == *name) && !bind.contains_key(name)) || targs.iter().any(rec),
+        TypeKind::Pointer(x) | TypeKind::Array(_, x) | TypeKind::Option(x) => rec(x),
+        TypeKind::Result(ok, err) => ok.as_deref().is_some_and(rec) || rec(err),
+    }
+}
+
+enum Root {
+    Var(String),
+    /// The write lands behind a pointer, so the variable itself does not change.
+    Through,
+    Other,
+}
+
+fn root_of(e: &Expr, types: &Types) -> Root {
+    match &e.kind {
+        ExprKind::Var(n) => Root::Var(n.clone()),
+        ExprKind::Deref(_) => Root::Through,
+        ExprKind::Field { e: b, .. } | ExprKind::Index { e: b, .. } => {
+            if types.is_ptr(b.ty.get()) {
+                Root::Through
+            } else {
+                root_of(b, types)
+            }
+        }
+        _ => Root::Other,
+    }
+}
+
 fn root_name(e: &Expr) -> Option<&str> {
     match &e.kind {
         ExprKind::Var(n) => Some(n),
@@ -483,7 +862,7 @@ fn root_name(e: &Expr) -> Option<&str> {
     }
 }
 
-impl<'a> Ctx<'a> {
+impl<'a, 'b> Ctx<'a, 'b> {
     fn kind(&self, t: Ty) -> Kind {
         self.g.types.kind(t)
     }
@@ -505,8 +884,8 @@ impl<'a> Ctx<'a> {
         check_case(name, false, "name", span, self.diags);
         let taken = self.lookup(name).is_some()
             || BUILTINS.contains(&name)
-            || self.sigs.contains_key(name)
-            || self.g.consts.contains_key(name);
+            || self.g.mods[self.g.cur].funcs.contains_key(name)
+            || self.g.mods[self.g.cur].consts.contains_key(name);
         if taken {
             self.diags.push(Diag::new("E0102", span, format!("`{name}` is already defined; names cannot be reused or hidden")));
             if self.lookup(name).is_none() {
@@ -558,6 +937,10 @@ impl<'a> Ctx<'a> {
     /// Checks `e` against `want`, allowing `T` where `?T` or `T ! E` is expected.
     fn check(&mut self, e: &Expr, want: Ty) {
         let got = self.expr(e, Some(want));
+        self.accept(e, got, want);
+    }
+
+    fn accept(&mut self, e: &Expr, got: Ty, want: Ty) {
         if got == want || got == ERR || want == ERR {
             return;
         }
@@ -589,7 +972,7 @@ impl<'a> Ctx<'a> {
     fn value_type(&mut self, span: Span, ty: Ty) -> Ty {
         match self.kind(ty) {
             Kind::Void => self.err("E0104", span, "this has no value"),
-            Kind::StrLit => self.err("E0900", span, "strings outside `print` are not available in claw 0.2"),
+            Kind::StrLit => self.err("E0900", span, "strings outside `print` are not available in claw 0.3"),
             _ => ty,
         }
     }
@@ -610,20 +993,55 @@ impl<'a> Ctx<'a> {
                 None => self.err("E0101", e.span, format!("unknown name `{name}`; declare it with `{name} := ...`")),
             },
             ExprKind::Field { e: base, name, name_span } => {
-                let b = self.place(base);
+                let b = self.place_base(base);
                 self.field_type(b, name, *name_span)
             }
             ExprKind::Index { e: base, i } => {
-                let b = self.place(base);
+                let b = self.place_base(base);
                 self.index_type(b, i, base.span)
             }
-            _ => self.err("E0131", e.span, "this cannot be assigned to"),
+            ExprKind::Deref(inner) => self.deref_type(e, inner),
+            _ => {
+                self.expr(e, None);
+                self.err("E0131", e.span, "this cannot be assigned to")
+            }
         };
         e.ty.set(t);
         t
     }
 
+    /// The base of a field or index on the left of `=`. Going through a pointer reads it.
+    fn place_base(&mut self, base: &Expr) -> Ty {
+        let t = self.place(base);
+        if self.g.types.is_ptr(t) {
+            if let Some(n) = root_name(base) {
+                let n = n.to_string();
+                if let Some(v) = self.lookup(&n) {
+                    v.read = true;
+                }
+            }
+        }
+        t
+    }
+
+    fn deref_type(&mut self, e: &Expr, inner: &Expr) -> Ty {
+        let t = self.expr(inner, None);
+        match self.kind(t) {
+            Kind::Pointer(p) => p,
+            Kind::Err => ERR,
+            _ => {
+                let n = self.tname(t);
+                self.err("E0104", e.span, format!("`*` needs a pointer, found {n}"))
+            }
+        }
+    }
+
     fn field_type(&mut self, base: Ty, name: &str, span: Span) -> Ty {
+        // `p.x` reads through a pointer to a struct.
+        let base = match self.kind(base) {
+            Kind::Pointer(p) => p,
+            _ => base,
+        };
         match self.kind(base) {
             Kind::Struct(id) => match self.g.types.structs[id].fields.iter().find(|f| f.name == name) {
                 Some(f) => f.ty,
@@ -643,6 +1061,7 @@ impl<'a> Ctx<'a> {
     fn index_type(&mut self, base: Ty, i: &Expr, base_span: Span) -> Ty {
         self.check(i, INT);
         match self.kind(base) {
+            Kind::Pointer(elem) => elem,
             Kind::Array(elem, n) => {
                 if let ExprKind::Int(v) = i.kind {
                     if v < 0 || v >= n as i128 {
@@ -664,7 +1083,11 @@ impl<'a> Ctx<'a> {
             StmtKind::Let { mutable, name, name_span, ty, init } => {
                 let final_ty = match ty {
                     Some(t) => {
-                        let want = self.g.resolve(t, self.diags);
+                        let mut want = self.g.resolve(t, self.diags);
+                        if !self.func.claw && self.g.types.is_ptr(want) {
+                            self.diags.push(Diag::new("E0140", t.span, "pointers only exist inside `claw fn`"));
+                            want = ERR;
+                        }
                         self.check(init, want);
                         want
                     }
@@ -674,18 +1097,17 @@ impl<'a> Ctx<'a> {
                     }
                 };
                 let decl = if *mutable {
-                    Span { start: s.span.start, end: name_span.start, line: s.span.line, col: s.span.col }
+                    Span { start: s.span.start, end: name_span.start, line: s.span.line, col: s.span.col, file: s.span.file }
                 } else {
-                    Span { start: s.span.start, end: s.span.start, line: s.span.line, col: s.span.col }
+                    Span { start: s.span.start, end: s.span.start, line: s.span.line, col: s.span.col, file: s.span.file }
                 };
                 self.declare(name, final_ty, *mutable, *name_span, decl);
                 false
             }
             StmtKind::Assign { target, op, value } => {
                 let ty = self.place(target);
-                match root_name(target) {
-                    Some(root) => {
-                        let root = root.to_string();
+                match root_of(target, &self.g.types) {
+                    Root::Var(root) => {
                         let info = self.lookup(&root).map(|v| (v.mutable, v.decl));
                         if let Some((mutable, decl)) = info {
                             if !mutable {
@@ -698,12 +1120,21 @@ impl<'a> Ctx<'a> {
                             self.diags.push(Diag::new("E0122", target.span, format!("`{root}` cannot change while a `for` is walking it")));
                         }
                     }
-                    None if ty != ERR => {
-                        self.diags.push(Diag::new("E0131", target.span, "this cannot be assigned to"));
+                    Root::Through => {}
+                    Root::Other => {
+                        if ty != ERR {
+                            self.diags.push(Diag::new("E0131", target.span, "this cannot be assigned to"));
+                        }
                     }
-                    None => {}
                 }
                 if let Some(o) = op {
+                    if self.g.types.is_ptr(ty) {
+                        if !matches!(o, BinOp::Add | BinOp::Sub) {
+                            self.diags.push(Diag::new("E0104", target.span, format!("`{}=` does not work on pointers", o.text())));
+                        }
+                        self.check(value, INT);
+                        return false;
+                    }
                     if !self.g.types.is_num(ty) && ty != ERR {
                         let n = self.tname(ty);
                         self.diags.push(Diag::new("E0104", target.span, format!("`{}=` needs a number, found {n}", o.text())));
@@ -802,7 +1233,22 @@ impl<'a> Ctx<'a> {
                 !has_break(body)
             }
             StmtKind::Match { subject, arms } => self.match_stmt(s.span, subject, arms),
+            StmtKind::Defer(body) => {
+                if !self.func.claw {
+                    self.diags.push(Diag::new("E0142", s.span, "`defer` only exists inside `claw fn`"));
+                }
+                let (loops, was) = (self.loops, self.in_defer);
+                self.loops = 0;
+                self.in_defer = true;
+                self.block(body);
+                self.loops = loops;
+                self.in_defer = was;
+                false
+            }
             StmtKind::Ret(v) => {
+                if self.in_defer {
+                    self.diags.push(Diag::new("E0143", s.span, "`defer` cannot leave the function"));
+                }
                 match v {
                     Some(e) => {
                         if self.ret == VOID {
@@ -823,6 +1269,9 @@ impl<'a> Ctx<'a> {
                 true
             }
             StmtKind::Fail(e) => {
+                if self.in_defer {
+                    self.diags.push(Diag::new("E0143", s.span, "`defer` cannot leave the function"));
+                }
                 match self.kind(self.ret) {
                     Kind::Result(_, err) => self.check(e, err),
                     Kind::Err => {
@@ -974,7 +1423,11 @@ impl<'a> Ctx<'a> {
     }
 
     fn expr(&mut self, e: &Expr, hint: Option<Ty>) -> Ty {
-        let t = self.expr_inner(e, hint);
+        let mut t = self.expr_inner(e, hint);
+        if !self.func.claw && self.g.types.is_ptr(t) {
+            self.diags.push(Diag::new("E0140", e.span, "pointers only exist inside `claw fn`"));
+            t = ERR;
+        }
         e.ty.set(t);
         t
     }
@@ -1002,18 +1455,29 @@ impl<'a> Ctx<'a> {
             },
             ExprKind::Char(_) => U8,
             ExprKind::Bool(_) => BOOL,
-            ExprKind::Str(_) | ExprKind::Interp(_) => STRLIT,
+            ExprKind::Str(_) => {
+                // Handed to C: a pointer to the NUL-terminated bytes.
+                let bytes = self.g.types.intern(Kind::Pointer(U8));
+                if hint == Some(bytes) {
+                    bytes
+                } else {
+                    STRLIT
+                }
+            }
+            ExprKind::Interp(_) => STRLIT,
             ExprKind::None => match hint.map(|h| self.kind(h)) {
-                Some(Kind::Option(_)) => hint.unwrap(),
+                Some(Kind::Option(_)) | Some(Kind::Pointer(_)) => hint.unwrap(),
                 Some(Kind::Err) => ERR,
                 _ => self.err("E0123", e.span, "cannot tell which `?T` this `none` is; give the variable a type"),
             },
             ExprKind::RetVal => ERR,
             ExprKind::Var(name) => self.var(e, name),
+            ExprKind::AddrOf(inner) => self.addr_of(e, inner),
+            ExprKind::Deref(inner) => self.deref_type(e, inner),
             ExprKind::Unary { op, e: inner } => self.unary(e, *op, inner, num_hint),
             ExprKind::Binary { op, l, r } => self.binary(*op, l, r, num_hint),
-            ExprKind::Call { name, name_span, args } => self.call(name, *name_span, args),
-            ExprKind::StructLit { name, name_span, args } => self.struct_lit(name, *name_span, args),
+            ExprKind::Call { module, name, name_span, targs, args } => self.call(e, module.as_deref(), name, *name_span, targs, args),
+            ExprKind::StructLit { module, name, name_span, targs, args } => self.struct_lit(e, module.as_deref(), name, *name_span, targs, args),
             ExprKind::ArrayLit(items) => self.array_lit(e, items, num_hint),
             ExprKind::ArrayFill(item) => match num_hint.map(|h| self.kind(h)) {
                 Some(Kind::Array(elem, _)) => {
@@ -1030,6 +1494,12 @@ impl<'a> Ctx<'a> {
                 }
             },
             ExprKind::Field { e: base, name, name_span } => {
+                if let ExprKind::Var(alias) = &base.kind {
+                    if self.lookup(alias).is_none() && self.g.mods[self.g.cur].imports.contains_key(alias) {
+                        let m = self.g.import(alias, base.span, self.diags).unwrap();
+                        return self.member(e, m, name, *name_span);
+                    }
+                }
                 let b = self.expr(base, None);
                 self.field_type(b, name, *name_span)
             }
@@ -1047,20 +1517,77 @@ impl<'a> Ctx<'a> {
             v.read = true;
             return v.ty;
         }
-        if let Some((_, t)) = self.g.consts.get(name) {
-            return *t;
+        let m = self.g.cur;
+        if self.g.mods[m].consts.contains_key(name) || self.g.mods[m].names.contains_key(name) {
+            return self.member(e, m, name, e.span);
         }
-        match self.g.names.get(name).copied() {
-            Some(NameDef::Variant(eid, idx, ty)) => {
-                if !self.g.types.enums[eid].variants[idx].fields.is_empty() {
-                    return self.err("E0106", e.span, format!("`{name}` needs its fields: `{name}{{...}}`"));
+        if name == "_" {
+            return self.err("E0101", e.span, "`_` can only be assigned to, not read");
+        }
+        self.err("E0101", e.span, format!("unknown name `{name}`"))
+    }
+
+    /// A constant or a field-less variant of module `m`.
+    fn member(&mut self, e: &Expr, m: usize, name: &str, span: Span) -> Ty {
+        let local = m == self.g.cur;
+        if let Some(&(v, t, public)) = self.g.mods[m].consts.get(name) {
+            if !public && !local {
+                return self.err("E0147", span, private_msg(name));
+            }
+            *e.res.borrow_mut() = Res::Const(v, t);
+            return t;
+        }
+        match self.g.mods[m].names.get(name).copied() {
+            Some((NameDef::Variant(eid, idx, ty), public)) => {
+                if !public && !local {
+                    return self.err("E0147", span, private_msg(name));
                 }
+                if !self.g.types.enums[eid].variants[idx].fields.is_empty() {
+                    return self.err("E0106", span, format!("`{name}` needs its fields: `{name}{{...}}`"));
+                }
+                *e.res.borrow_mut() = Res::Variant(eid, idx);
                 ty
             }
-            Some(NameDef::Type(_)) => self.err("E0101", e.span, format!("`{name}` is a type, not a value")),
-            None if name == "_" => self.err("E0101", e.span, "`_` can only be assigned to, not read"),
-            None => self.err("E0101", e.span, format!("unknown name `{name}`")),
+            Some((NameDef::Type(_), _)) => self.err("E0101", span, format!("`{name}` is a type, not a value")),
+            None => self.err("E0101", span, format!("unknown name `{name}`")),
         }
+    }
+
+    fn addr_of(&mut self, e: &Expr, inner: &Expr) -> Ty {
+        if !self.func.claw {
+            self.expr(inner, None);
+            return self.err("E0900", e.span, "`&` in an ordinary `fn` is not available in claw 0.3; use `claw fn`");
+        }
+        if !matches!(inner.kind, ExprKind::Var(_) | ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Deref(_)) {
+            self.expr(inner, None);
+            return self.err("E0131", inner.span, "only variables, fields and elements have an address");
+        }
+        let t = self.place(inner);
+        match root_of(inner, &self.g.types) {
+            Root::Var(root) => {
+                let info = self.lookup(&root).map(|v| (v.mutable, v.decl));
+                if let Some((mutable, decl)) = info {
+                    if !mutable {
+                        let d = Diag::new("E0103", inner.span, format!("cannot take the address of `{root}`, it is not `mut`")).fix(decl, "mut ", format!("declare `mut {root}`"));
+                        self.diags.push(d);
+                    }
+                    let v = self.lookup(&root).unwrap();
+                    v.read = true;
+                    v.written = true;
+                }
+                if matches!(inner.kind, ExprKind::Var(_)) && !self.g.types.is_aggregate(t) {
+                    self.func.addressed.borrow_mut().insert(root);
+                }
+            }
+            Root::Through => {}
+            Root::Other => {
+                return self.err("E0131", inner.span, "only variables, fields and elements have an address");
+            }
+        }
+        if t == ERR {
+            return ERR;
+        }
+        self.g.types.intern(Kind::Pointer(t))
     }
 
     fn unary(&mut self, e: &Expr, op: UnOp, inner: &Expr, hint: Option<Ty>) -> Ty {
@@ -1114,7 +1641,7 @@ impl<'a> Ctx<'a> {
                 let (a, b) = self.operands(l, r, None);
                 if a != b {
                     self.mismatch(r.span, b, a);
-                } else if a != ERR && !self.g.types.is_num(a) && a != BOOL {
+                } else if a != ERR && !self.g.types.is_num(a) && a != BOOL && !self.g.types.is_ptr(a) {
                     let n = self.tname(a);
                     self.diags.push(Diag::new("E0104", l.span, format!("`{}` works on numbers and bool, not {n}; use `match`", op.text())));
                 }
@@ -1124,7 +1651,7 @@ impl<'a> Ctx<'a> {
                 let (a, b) = self.operands(l, r, None);
                 if a != b {
                     self.mismatch(r.span, b, a);
-                } else if a != ERR && !self.g.types.is_num(a) {
+                } else if a != ERR && !self.g.types.is_num(a) && !self.g.types.is_ptr(a) {
                     let n = self.tname(a);
                     self.diags.push(Diag::new("E0104", l.span, format!("`{}` needs numbers, found {n}", op.text())));
                 }
@@ -1132,6 +1659,16 @@ impl<'a> Ctx<'a> {
             }
             _ => {
                 let (a, b) = self.operands(l, r, hint);
+                if self.g.types.is_ptr(a) && matches!(op, BinOp::Add | BinOp::Sub) {
+                    if b == INT {
+                        return a;
+                    }
+                    if b == a && op == BinOp::Sub {
+                        return INT;
+                    }
+                    let want = if op == BinOp::Sub { "int or the same pointer type" } else { "int" };
+                    return self.err("E0104", r.span, format!("pointer arithmetic needs {want}"));
+                }
                 if a != b {
                     self.mismatch(r.span, b, a);
                     return ERR;
@@ -1169,85 +1706,338 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn call(&mut self, name: &str, span: Span, args: &[Expr]) -> Ty {
-        if name == "print" {
-            if args.len() != 1 {
-                self.diags.push(Diag::new("E0106", span, format!("`print` takes 1 value, found {}", args.len())));
+    fn builtin(&mut self, e: &Expr, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr]) -> Option<Ty> {
+        Some(match name {
+            "print" => {
+                if args.len() != 1 {
+                    self.diags.push(Diag::new("E0106", span, format!("`print` takes 1 value, found {}", args.len())));
+                }
+                for a in args {
+                    self.print_arg(a);
+                }
+                VOID
             }
-            for a in args {
-                self.print_arg(a);
+            "len" => {
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, format!("`len` takes 1 value, found {}", args.len())));
+                }
+                let t = self.expr(&args[0], None);
+                match self.kind(t) {
+                    Kind::Array(..) | Kind::Err => INT,
+                    _ => {
+                        let n = self.tname(t);
+                        self.err("E0104", args[0].span, format!("`len` needs an array, found {n}"))
+                    }
+                }
             }
-            return VOID;
-        }
-        if name == "len" {
-            if args.len() != 1 {
-                return self.err("E0106", span, format!("`len` takes 1 value, found {}", args.len()));
+            "sizeof" => {
+                let Some(t) = self.one_targ(name, span, targs) else { return Some(ERR) };
+                if !args.is_empty() {
+                    return Some(self.err("E0106", span, "`sizeof[T]()` takes no values"));
+                }
+                self.g.ensure_layout(t, self.diags);
+                *e.res.borrow_mut() = Res::Const(ConstVal::Int(self.g.types.size(t) as i128), INT);
+                INT
             }
-            let t = self.expr(&args[0], None);
-            return match self.kind(t) {
-                Kind::Array(..) | Kind::Err => INT,
-                _ => {
+            "alloc" => {
+                let t = self.one_targ(name, span, targs);
+                if !self.func.claw {
+                    return Some(self.err("E0140", span, "`alloc` only exists inside `claw fn`"));
+                }
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, "`alloc[T](n)` takes the number of items"));
+                }
+                self.check(&args[0], INT);
+                match t {
+                    Some(t) => self.g.types.intern(Kind::Pointer(t)),
+                    None => ERR,
+                }
+            }
+            "free" => {
+                if !self.func.claw {
+                    return Some(self.err("E0140", span, "`free` only exists inside `claw fn`"));
+                }
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, "`free(p)` takes one pointer"));
+                }
+                let t = self.expr(&args[0], None);
+                if !self.g.types.is_ptr(t) && t != ERR {
                     let n = self.tname(t);
-                    self.err("E0104", args[0].span, format!("`len` needs an array, found {n}"))
+                    return Some(self.err("E0104", args[0].span, format!("`free` needs a pointer, found {n}")));
                 }
-            };
-        }
-        if let Some(target) = prim(name) {
-            if args.len() != 1 {
-                return self.err("E0106", span, format!("`{name}(...)` converts 1 value, found {}", args.len()));
+                VOID
             }
-            let hint = if is_lit(&args[0]) { Some(target) } else { None };
-            let t = self.expr(&args[0], hint);
-            let ok = t == ERR
-                || (self.g.types.is_num(t) && self.g.types.is_num(target))
-                || (t == BOOL && self.g.types.is_int(target))
-                || (t == BOOL && target == BOOL);
-            if !ok {
-                let n = self.tname(t);
-                return self.err("E0104", args[0].span, format!("cannot convert {n} to {name}"));
-            }
-            return target;
-        }
-        let sigs = self.sigs;
-        let Some(sig) = sigs.get(name) else {
-            for a in args {
-                self.expr(a, None);
-            }
-            return self.err("E0101", span, format!("unknown function `{name}`"));
-        };
-        if sig.params.len() != args.len() {
-            self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", sig.params.len(), args.len())));
-        }
-        for (i, a) in args.iter().enumerate() {
-            match sig.params.get(i) {
-                Some(want) => self.check(a, *want),
-                None => {
-                    self.expr(a, None);
+            "cast" => {
+                let t = self.one_targ(name, span, targs);
+                if !self.func.claw {
+                    return Some(self.err("E0140", span, "`cast` only exists inside `claw fn`"));
                 }
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, "`cast[T](x)` converts 1 value"));
+                }
+                let from = self.expr(&args[0], None);
+                let Some(t) = t else { return Some(ERR) };
+                let word = |g: &Types, x: Ty| g.is_ptr(x) || x == INT || x == U64;
+                if from != ERR && (!word(&self.g.types, from) || !word(&self.g.types, t)) {
+                    return Some(self.err("E0104", span, "`cast` converts between pointers, `int` and `u64`; use `T(x)` for numbers"));
+                }
+                t
             }
-        }
-        sig.ret
+            _ => {
+                let target = prim(name)?;
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, format!("`{name}(...)` converts 1 value, found {}", args.len())));
+                }
+                let hint = if is_lit(&args[0]) { Some(target) } else { None };
+                let t = self.expr(&args[0], hint);
+                let ok = t == ERR
+                    || (self.g.types.is_num(t) && self.g.types.is_num(target))
+                    || (t == BOOL && self.g.types.is_int(target))
+                    || (t == BOOL && target == BOOL);
+                if !ok {
+                    let n = self.tname(t);
+                    return Some(self.err("E0104", args[0].span, format!("cannot convert {n} to {name}")));
+                }
+                target
+            }
+        })
     }
 
-    fn struct_lit(&mut self, name: &str, span: Span, args: &[Expr]) -> Ty {
-        let (fields, ty) = match self.g.names.get(name).copied() {
-            Some(NameDef::Type(t)) => match self.kind(t) {
-                Kind::Struct(id) => (self.g.types.structs[id].fields.clone(), t),
-                _ => {
+    fn one_targ(&mut self, name: &str, span: Span, targs: &[TypeExpr]) -> Option<Ty> {
+        if targs.len() != 1 {
+            self.diags.push(Diag::new("E0144", span, format!("write `{name}[T](...)` with one type")));
+            return None;
+        }
+        let t = self.g.resolve(&targs[0], self.diags);
+        (t != ERR).then_some(t)
+    }
+
+    fn resolve_targs(&mut self, targs: &[TypeExpr]) -> Option<Vec<Ty>> {
+        let mut out = Vec::with_capacity(targs.len());
+        for a in targs {
+            let t = self.g.resolve(a, self.diags);
+            if t == ERR {
+                return None;
+            }
+            out.push(t);
+        }
+        Some(out)
+    }
+
+    /// Works out type parameters from the arguments; each argument is checked once.
+    fn infer(&mut self, tparams: &[(String, Span)], pats: &[&TypeExpr], args: &[Expr], explicit: &[Ty], first: Option<Ty>) -> (HashMap<String, Ty>, Vec<Option<Ty>>) {
+        let mut bind: HashMap<String, Ty> = tparams.iter().map(|p| p.0.clone()).zip(explicit.iter().copied()).collect();
+        let mut got: Vec<Option<Ty>> = vec![None; args.len()];
+        got[..first.map_or(0, |_| 1).min(args.len())].fill(first);
+        for (i, a) in args.iter().enumerate() {
+            if hint_dep(a) {
+                continue;
+            }
+            let t = match got[i] {
+                Some(t) => t,
+                None => self.expr(a, None),
+            };
+            got[i] = Some(t);
+            if let Some(p) = pats.get(i) {
+                self.g.unify(p, t, &mut bind, tparams);
+            }
+        }
+        for (i, a) in args.iter().enumerate() {
+            if got[i].is_some() {
+                continue;
+            }
+            // A literal decides a parameter only if nothing else has.
+            let open = pats.get(i).is_some_and(|p| mentions_unbound(p, &bind, tparams));
+            if open && !matches!(a.kind, ExprKind::None | ExprKind::ArrayFill(_)) {
+                let t = self.expr(a, None);
+                got[i] = Some(t);
+                self.g.unify(pats[i], t, &mut bind, tparams);
+            }
+        }
+        (bind, got)
+    }
+
+    fn finish_args(&mut self, args: &[Expr], wants: &[Ty], got: &[Option<Ty>]) {
+        for (i, a) in args.iter().enumerate() {
+            match (wants.get(i), got.get(i).copied().flatten()) {
+                (Some(want), Some(g)) => self.accept(a, g, *want),
+                (Some(want), None) => self.check(a, *want),
+                (None, Some(_)) => {}
+                (None, None) => {
+                    // Past the named parameters of a C function: a string means its bytes.
+                    let bytes = self.g.types.intern(Kind::Pointer(U8));
+                    let hint = matches!(a.kind, ExprKind::Str(_)).then_some(bytes);
+                    self.expr(a, hint);
+                }
+            }
+        }
+    }
+
+    fn call(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr]) -> Ty {
+        if module.is_none() {
+            if let Some(t) = self.builtin(e, name, span, targs, args) {
+                return t;
+            }
+        }
+        let cur = self.g.cur;
+        let mut first: Option<Ty> = None;
+        let target = match module {
+            Some(alias) => {
+                if let Some(v) = self.lookup(alias) {
+                    v.read = true;
                     for a in args {
                         self.expr(a, None);
                     }
+                    return self.err("E0150", span, format!("Claw has no methods; write `{name}({alias}, ...)`"));
+                }
+                self.g.import(alias, span, self.diags)
+            }
+            None if self.g.mods[cur].funcs.contains_key(name) => Some(cur),
+            None => {
+                // Not here: look in the module that declares the first argument's type.
+                let mut found = None;
+                if let Some(a) = args.first().filter(|a| !hint_dep(a)) {
+                    let t = self.expr(a, None);
+                    first = Some(t);
+                    found = self.g.owner_of(t).filter(|m| self.g.mods[*m].funcs.get(name).is_some_and(|f| f.1));
+                }
+                found
+            }
+        };
+        let entry = target.and_then(|m| self.g.mods[m].funcs.get(name).copied().map(|f| (m, f)));
+        let Some((m, (generic, public))) = entry else {
+            if module.is_none() || target.is_some() {
+                self.diags.push(Diag::new("E0101", span, format!("unknown function `{name}`")));
+            }
+            for (i, a) in args.iter().enumerate() {
+                if !(i == 0 && first.is_some()) {
+                    self.expr(a, None);
+                }
+            }
+            return ERR;
+        };
+        if !public && m != cur {
+            self.diags.push(Diag::new("E0147", span, private_msg(name)));
+        }
+
+        let (full, got) = if let Some(f) = generic {
+            let Some(explicit) = self.resolve_targs(targs) else { return ERR };
+            if explicit.len() > f.tparams.len() {
+                return self.err("E0144", span, format!("`{name}` takes {} type arguments, found {}", f.tparams.len(), explicit.len()));
+            }
+            if f.params.len() != args.len() {
+                self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", f.params.len(), args.len())));
+            }
+            let pats: Vec<&TypeExpr> = f.params.iter().map(|p| &p.ty).collect();
+            let (bind, got) = self.infer(&f.tparams, &pats, args, &explicit, first);
+            let mut ordered = Vec::with_capacity(f.tparams.len());
+            for (p, _) in &f.tparams {
+                match bind.get(p) {
+                    Some(&ERR) => return ERR,
+                    Some(t) => ordered.push(*t),
+                    None => return self.err("E0144", span, format!("cannot work out `{p}`; write `{name}[...](...)`")),
+                }
+            }
+            (self.g.instantiate_fn(f, m, ordered, self.diags), got)
+        } else {
+            if !targs.is_empty() {
+                self.diags.push(Diag::new("E0144", span, format!("`{name}` takes no type arguments")));
+            }
+            let mut got = vec![None; args.len()];
+            if !args.is_empty() {
+                got[0] = first;
+            }
+            (format!("{}{}", self.g.mods[m].prefix, name), got)
+        };
+
+        let Some(sig) = self.g.sigs.get(&full).cloned() else { return ERR };
+        if sig.ext.is_some() && !self.func.claw {
+            self.diags.push(Diag::new("E0141", span, format!("`extern fn {name}` can only be called from `claw fn`")));
+        }
+        let arity_ok = args.len() == sig.params.len() || (sig.variadic && args.len() > sig.params.len());
+        if !arity_ok && generic.is_none() {
+            self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", sig.params.len(), args.len())));
+        }
+        self.finish_args(args, &sig.params, &got);
+        if sig.variadic {
+            for a in args.iter().skip(sig.params.len()) {
+                if !is_c_type(&self.g.types, a.ty.get()) || a.ty.get() == STRLIT {
+                    self.diags.push(Diag::new("E0149", a.span, "only numbers, bool and pointers can be passed to C"));
+                }
+            }
+        }
+        *e.res.borrow_mut() = Res::Func(full);
+        sig.ret
+    }
+
+    fn struct_lit(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr]) -> Ty {
+        let cur = self.g.cur;
+        let m = match module {
+            Some(alias) => match self.g.import(alias, span, self.diags) {
+                Some(m) => m,
+                None => {
+                    for a in args {
+                        self.expr(a, None);
+                    }
+                    return ERR;
+                }
+            },
+            None => cur,
+        };
+        let check_all = |cx: &mut Self| {
+            for a in args {
+                cx.expr(a, None);
+            }
+        };
+        if let Some(&(d, public)) = self.g.mods[m].gtypes.get(name) {
+            if !public && m != cur {
+                check_all(self);
+                return self.err("E0147", span, private_msg(name));
+            }
+            let TypeBody::Struct(fields) = &d.body else { return ERR };
+            let Some(explicit) = self.resolve_targs(targs) else { return ERR };
+            if args.len() != fields.len() {
+                self.diags.push(Diag::new("E0106", span, format!("`{name}` has {} fields, found {}", fields.len(), args.len())));
+            }
+            let pats: Vec<&TypeExpr> = fields.iter().map(|f| &f.ty).collect();
+            let (bind, got) = self.infer(&d.tparams, &pats, args, &explicit, None);
+            let mut ordered = Vec::with_capacity(d.tparams.len());
+            for (p, _) in &d.tparams {
+                match bind.get(p) {
+                    Some(&ERR) => return ERR,
+                    Some(t) => ordered.push(*t),
+                    None => return self.err("E0144", span, format!("cannot work out `{p}`; write `{name}[...]{{...}}`")),
+                }
+            }
+            let ty = self.g.instantiate_type(d, m, ordered, self.diags);
+            if ty == ERR {
+                return ERR;
+            }
+            let Kind::Struct(id) = self.kind(ty) else { return ERR };
+            let wants: Vec<Ty> = self.g.types.structs[id].fields.iter().map(|f| f.ty).collect();
+            self.finish_args(args, &wants, &got);
+            return ty;
+        }
+        let (fields, ty, public) = match self.g.mods[m].names.get(name).copied() {
+            Some((NameDef::Type(t), public)) => match self.kind(t) {
+                Kind::Struct(id) => (self.g.types.structs[id].fields.clone(), t, public),
+                _ => {
+                    check_all(self);
                     return self.err("E0101", span, format!("`{name}` is a variant type; build one of its variants"));
                 }
             },
-            Some(NameDef::Variant(eid, idx, t)) => (self.g.types.enums[eid].variants[idx].fields.clone(), t),
+            Some((NameDef::Variant(eid, idx, t), public)) => {
+                *e.res.borrow_mut() = Res::Variant(eid, idx);
+                (self.g.types.enums[eid].variants[idx].fields.clone(), t, public)
+            }
             None => {
-                for a in args {
-                    self.expr(a, None);
-                }
+                check_all(self);
                 return self.err("E0112", span, format!("unknown type `{name}`"));
             }
         };
+        if !public && m != cur {
+            self.diags.push(Diag::new("E0147", span, private_msg(name)));
+        }
         if args.len() != fields.len() {
             self.diags.push(Diag::new("E0106", span, format!("`{name}` has {} fields, found {}", fields.len(), args.len())));
         }
@@ -1288,6 +2078,9 @@ impl<'a> Ctx<'a> {
     }
 
     fn try_expr(&mut self, e: &Expr, inner: &Expr) -> Ty {
+        if self.in_defer {
+            self.diags.push(Diag::new("E0143", e.span, "`defer` cannot leave the function"));
+        }
         let t = self.expr(inner, None);
         match self.kind(t) {
             Kind::Option(p) => {
@@ -1377,7 +2170,7 @@ fn expr_breaks(e: &Expr) -> bool {
                     ElseKind::Value(v) => expr_breaks(v),
                 }
         }
-        ExprKind::Try(e) | ExprKind::Field { e, .. } | ExprKind::Unary { e, .. } => expr_breaks(e),
+        ExprKind::Try(e) | ExprKind::Field { e, .. } | ExprKind::Unary { e, .. } | ExprKind::AddrOf(e) | ExprKind::Deref(e) => expr_breaks(e),
         ExprKind::Index { e, i } => expr_breaks(e) || expr_breaks(i),
         ExprKind::Binary { l, r, .. } => expr_breaks(l) || expr_breaks(r),
         ExprKind::Call { args, .. } | ExprKind::StructLit { args, .. } | ExprKind::ArrayLit(args) => args.iter().any(expr_breaks),

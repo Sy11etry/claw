@@ -1,0 +1,12 @@
+// expect: bye
+// expect: P{1, 2}
+type P { x int, y int }
+
+claw fn f() P {
+    defer print("bye")
+    ret P{1, 2}
+}
+
+claw fn main() {
+    print(f())
+}

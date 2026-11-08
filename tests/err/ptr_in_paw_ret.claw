@@ -1,0 +1,8 @@
+// error: E0140
+// error: E0140
+fn f() *int {
+    ret none
+}
+
+fn main() {
+}

@@ -6,6 +6,8 @@ pub struct Span {
     pub end: u32,
     pub line: u32,
     pub col: u32,
+    /// Index into the list of source files.
+    pub file: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -36,13 +38,16 @@ impl Diag {
 
 pub const MAX_ERRORS: usize = 20;
 
-pub fn sort(diags: &mut [Diag]) {
-    diags.sort_by_key(|d| (d.span.line, d.span.col));
+/// Orders errors by position and drops repeats (one template body, several instances).
+pub fn sort(diags: &mut Vec<Diag>) {
+    diags.sort_by_key(|d| (d.span.file, d.span.line, d.span.col));
+    diags.dedup_by_key(|d| (d.code, d.span.file, d.span.start, d.msg.clone()));
 }
 
-pub fn render_text(file: &str, diags: &[Diag]) -> String {
+pub fn render_text(files: &[String], diags: &[Diag]) -> String {
     let mut out = String::new();
     for d in diags.iter().take(MAX_ERRORS) {
+        let file = &files[d.span.file as usize];
         out.push_str(&format!("{}:{}:{} {} {}", file, d.span.line, d.span.col, d.code, d.msg));
         if let Some(f) = &d.fix {
             out.push_str(&format!("; fix: {}", f.label));
@@ -72,7 +77,7 @@ fn json_str(s: &str) -> String {
     out
 }
 
-pub fn render_json(file: &str, diags: &[Diag]) -> String {
+pub fn render_json(files: &[String], diags: &[Diag]) -> String {
     let items: Vec<String> = diags
         .iter()
         .take(MAX_ERRORS)
@@ -89,7 +94,7 @@ pub fn render_json(file: &str, diags: &[Diag]) -> String {
             };
             format!(
                 "{{\"file\":{},\"line\":{},\"col\":{},\"code\":{},\"msg\":{},\"fix\":{}}}",
-                json_str(file),
+                json_str(&files[d.span.file as usize]),
                 d.span.line,
                 d.span.col,
                 json_str(d.code),

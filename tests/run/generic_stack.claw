@@ -1,0 +1,45 @@
+// expect: 2
+// expect: 1
+// expect: none
+// expect: P{3, 4}
+// expect: 1.5
+type Stack[T] { data *T, len int, cap int }
+
+claw fn stack_new[T](cap int) Stack[T] {
+    ret Stack[T]{alloc[T](cap), 0, cap}
+}
+
+claw fn stack_push[T](s *Stack[T], v T) {
+    s.data[s.len] = v
+    s.len += 1
+}
+
+claw fn stack_pop[T](s *Stack[T]) ?T {
+    if s.len == 0 { ret none }
+    s.len -= 1
+    ret s.data[s.len]
+}
+
+claw fn stack_free[T](s *Stack[T]) {
+    free(s.data)
+}
+
+type P { x int, y int }
+
+claw fn main() {
+    mut s := stack_new[int](4)
+    defer stack_free(&s)
+    stack_push(&s, 1)
+    stack_push(&s, 2)
+    print(stack_pop(&s))
+    print(stack_pop(&s))
+    print(stack_pop(&s))
+    mut t := stack_new[P](2)
+    defer stack_free(&t)
+    stack_push(&t, P{3, 4})
+    print(stack_pop(&t))
+    mut f := stack_new[f32](1)
+    defer stack_free(&f)
+    stack_push(&f, 1.5)
+    print(stack_pop(&f) else 0)
+}

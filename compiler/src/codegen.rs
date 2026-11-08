@@ -8,11 +8,13 @@
 use crate::arm64::*;
 use crate::cir::*;
 
-const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy"];
+const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"];
 const IMP_WRITE: usize = 0;
 const IMP_EXIT: usize = 1;
 const IMP_SNPRINTF: usize = 2;
 const IMP_MEMCPY: usize = 3;
+const IMP_MALLOC: usize = 4;
+const IMP_FREE: usize = 5;
 
 /// Output buffer: 8 bytes of length, then the bytes.
 const BUF_CAP: u64 = 1 << 16;
@@ -23,6 +25,8 @@ const MAX_FRAME: u64 = 7 << 20;
 enum Target {
     User(FuncId),
     Trap,
+    RtAlloc,
+    RtFree,
     Flush,
     BufStr,
     BufInt,
@@ -56,8 +60,42 @@ struct Gen {
     got_refs: Vec<(usize, usize)>,
     /// Instructions waiting for a `b`/`bl` displacement.
     calls: Vec<(usize, Target)>,
-    file: String,
+    files: Vec<String>,
+    imports: Vec<String>,
     too_large: Option<String>,
+}
+
+/// Where one C argument travels.
+enum Slot {
+    X(u32),
+    D(u32),
+    Stack(u32),
+}
+
+/// Apple's ARM64 rules: 8 integer and 8 float registers, then the stack with each
+/// value at its natural size. Everything variadic goes on the stack in 8-byte slots.
+fn assign_c(args: &[CArg], variadic: Option<usize>) -> (Vec<Slot>, u32) {
+    let (mut x, mut d, mut stack) = (0u32, 0u32, 0u32);
+    let mut out = Vec::with_capacity(args.len());
+    for (i, a) in args.iter().enumerate() {
+        if variadic.is_some_and(|v| i >= v) {
+            stack = (stack + 7) & !7;
+            out.push(Slot::Stack(stack));
+            stack += 8;
+        } else if a.float.is_some() && d < 8 {
+            out.push(Slot::D(d));
+            d += 1;
+        } else if a.float.is_none() && x < 8 {
+            out.push(Slot::X(x));
+            x += 1;
+        } else {
+            let size = a.size.max(1);
+            stack = (stack + size - 1) & !(size - 1);
+            out.push(Slot::Stack(stack));
+            stack += size;
+        }
+    }
+    (out, stack)
 }
 
 #[derive(Clone, Copy)]
@@ -67,6 +105,8 @@ enum Trap {
     Shift,
     Bounds,
     Convert,
+    AllocSize,
+    OutOfMemory,
 }
 
 impl Trap {
@@ -77,6 +117,8 @@ impl Trap {
             Trap::Shift => "shift out of range",
             Trap::Bounds => "index out of bounds",
             Trap::Convert => "value does not fit the target type",
+            Trap::AllocSize => "invalid allocation size",
+            Trap::OutOfMemory => "out of memory",
         }
     }
 }
@@ -363,6 +405,9 @@ impl Gen {
                 if let Inst::Call { args, .. } = i {
                     outgoing = outgoing.max(args.len().saturating_sub(8) as u32 * 8);
                 }
+                if let Inst::CallC { args, variadic, .. } = i {
+                    outgoing = outgoing.max((assign_c(args, *variadic).1 + 7) & !7);
+                }
             }
         }
         let mut off = (outgoing + f.nvregs * 8) as u64;
@@ -457,7 +502,7 @@ impl Gen {
         for (at, kind, loc) in traps {
             let disp = self.here() as i64 - at as i64;
             self.patch_cond(at, disp, &f.name);
-            let msg = format!("trap: {} at {}:{}:{}\n", kind.text(), self.file, loc.line, loc.col);
+            let msg = format!("trap: {} at {}:{}:{}\n", kind.text(), self.files[loc.file as usize], loc.line, loc.col);
             let off = self.add_str(msg.as_bytes());
             self.data_addr(X0, off);
             self.e(movz(X1, msg.len() as u32, 0));
@@ -677,6 +722,32 @@ impl Gen {
                 // Unsigned compare: a negative index looks huge.
                 self.trap_if(Cond::Hs, Trap::Bounds, *loc, traps);
             }
+            Inst::Alloc { d, n, elem, loc } => {
+                self.load(fr, X9, *n);
+                self.e(cmp_imm(X9, 0));
+                self.trap_if(Cond::Lt, Trap::AllocSize, *loc, traps);
+                self.mov_imm(X10, *elem as i64);
+                self.e(umulh(X12, X9, X10));
+                self.e(cmp_imm(X12, 0));
+                self.trap_if(Cond::Ne, Trap::AllocSize, *loc, traps);
+                self.e(mul(X0, X9, X10));
+                self.call(BL, Target::RtAlloc);
+                self.e(cmp_imm(X0, 0));
+                self.trap_if(Cond::Eq, Trap::OutOfMemory, *loc, traps);
+                self.store(fr, X0, *d);
+            }
+            Inst::Free { p } => {
+                self.load(fr, X0, *p);
+                self.call(BL, Target::RtFree);
+            }
+            Inst::StrAddr { d, text } => {
+                let mut bytes = text.as_bytes().to_vec();
+                bytes.push(0);
+                let off = self.add_str(&bytes);
+                self.data_addr(X9, off);
+                self.store(fr, X9, *d);
+            }
+            Inst::CallC { d, sym, args, variadic, ret } => self.call_c(fr, *d, sym, args, *variadic, *ret),
             Inst::BufStr { text } => {
                 let off = self.add_str(text.as_bytes());
                 self.data_addr(X0, off);
@@ -706,6 +777,56 @@ impl Gen {
             Inst::Exit { code } => {
                 self.e(movz(X0, *code, 0));
                 self.call(BL, Target::Import(IMP_EXIT));
+            }
+        }
+    }
+
+    fn call_c(&mut self, fr: &Frame, d: Option<VReg>, sym: &str, args: &[CArg], variadic: Option<usize>, ret: CRet) {
+        let (slots, _) = assign_c(args, variadic);
+        for (i, (a, slot)) in args.iter().zip(&slots).enumerate() {
+            if let Slot::Stack(off) = slot {
+                self.load(fr, X9, a.v);
+                self.e(add_imm(X10, SP, *off));
+                let size = if variadic.is_some_and(|v| i >= v) { 8 } else { a.size };
+                self.e(match size {
+                    1 => strb(X9, X10, 0),
+                    2 => strh(X9, X10),
+                    4 => str_w(X9, X10),
+                    _ => str(X9, X10, 0),
+                });
+            }
+        }
+        for (a, slot) in args.iter().zip(&slots) {
+            match slot {
+                Slot::X(r) => self.load(fr, *r, a.v),
+                Slot::D(r) => self.fload(fr, *r, a.v, a.float.unwrap_or(64)),
+                Slot::Stack(_) => {}
+            }
+        }
+        let want = format!("_{sym}");
+        let index = self.imports.iter().position(|n| *n == want).expect("imports were collected up front");
+        self.call(BL, Target::Import(index));
+        // C leaves the upper bits of a narrow result undefined.
+        match ret {
+            CRet::None => {}
+            CRet::Float(bits) => {
+                if let Some(d) = d {
+                    self.fstore(fr, D0, d, bits);
+                }
+            }
+            CRet::Int(mem) => {
+                match mem {
+                    Mem::I8 => self.e(sbfx(X0, X0, 8)),
+                    Mem::I16 => self.e(sbfx(X0, X0, 16)),
+                    Mem::I32 => self.e(sbfx(X0, X0, 32)),
+                    Mem::U8 => self.e(ubfx(X0, X0, 8)),
+                    Mem::U16 => self.e(ubfx(X0, X0, 16)),
+                    Mem::U32 => self.e(ubfx(X0, X0, 32)),
+                    Mem::X64 => {}
+                }
+                if let Some(d) = d {
+                    self.store(fr, X0, d);
+                }
             }
         }
     }
@@ -882,7 +1003,20 @@ impl Gen {
     }
 }
 
-pub fn generate(m: &Module, file: &str) -> Result<Object, String> {
+pub fn generate(m: &Module, files: &[String]) -> Result<Object, String> {
+    let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
+    for f in &m.funcs {
+        for b in &f.blocks {
+            for i in &b.insts {
+                if let Inst::CallC { sym, .. } = i {
+                    let name = format!("_{sym}");
+                    if !imports.contains(&name) {
+                        imports.push(name);
+                    }
+                }
+            }
+        }
+    }
     let mut g = Gen {
         code: Vec::new(),
         rodata: Vec::new(),
@@ -890,7 +1024,8 @@ pub fn generate(m: &Module, file: &str) -> Result<Object, String> {
         bss_refs: Vec::new(),
         got_refs: Vec::new(),
         calls: Vec::new(),
-        file: file.to_string(),
+        files: files.to_vec(),
+        imports: imports.clone(),
         too_large: None,
     };
     let mut symbols: Vec<(String, usize)> = Vec::new();
@@ -898,7 +1033,12 @@ pub fn generate(m: &Module, file: &str) -> Result<Object, String> {
     let fmt64 = g.add_str(b"%.15g\0");
     let fmt32 = g.add_str(b"%.7g\0");
 
-    let stubs: Vec<usize> = (0..IMPORTS.len()).map(|s| g.import_stub(s)).collect();
+    let stubs: Vec<usize> = (0..imports.len()).map(|s| g.import_stub(s)).collect();
+    // Every allocation passes through these two, so a later version can record them.
+    let rt_alloc = g.here();
+    g.call(B, Target::Import(IMP_MALLOC));
+    let rt_free = g.here();
+    g.call(B, Target::Import(IMP_FREE));
     let trap = g.rt_trap();
     let flush = g.rt_flush();
     let buf_str = g.rt_buf_str();
@@ -907,6 +1047,8 @@ pub fn generate(m: &Module, file: &str) -> Result<Object, String> {
     let buf_bool = g.rt_buf_bool();
     let buf_float = g.rt_buf_float();
     for (n, p) in [
+        ("alloc", rt_alloc),
+        ("free", rt_free),
         ("trap", trap),
         ("flush", flush),
         ("buf_str", buf_str),
@@ -938,6 +1080,8 @@ pub fn generate(m: &Module, file: &str) -> Result<Object, String> {
         let dest = match t {
             Target::User(f) => func_pos[f],
             Target::Trap => trap,
+            Target::RtAlloc => rt_alloc,
+            Target::RtFree => rt_free,
             Target::Flush => flush,
             Target::BufStr => buf_str,
             Target::BufInt => buf_int,
@@ -959,7 +1103,7 @@ pub fn generate(m: &Module, file: &str) -> Result<Object, String> {
         data_refs: g.data_refs,
         bss_refs: g.bss_refs,
         got_refs: g.got_refs,
-        imports: IMPORTS.iter().map(|s| s.to_string()).collect(),
+        imports,
         symbols,
         entry,
         bss_size: BUF_CAP + 8,

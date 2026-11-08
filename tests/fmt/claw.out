@@ -1,0 +1,19 @@
+use lib.geo
+extern fn snprintf(buf *u8, n u64, fmt *u8, ...) i32
+pub type Box[T] { v *T, n int }
+
+pub claw fn get[T](b *Box[T], i int) T {
+    x := b.v[i] * 2
+    mut p *int = none
+    *p = x - 1
+    q := &x
+    defer free(p)
+    ret max[T](*q, x)
+}
+fn main() {
+    y := Box[int]{none, 0}
+    z := geo.Point{1, 2}
+    if y.n == z.x {
+        print(a & b)
+    }
+}

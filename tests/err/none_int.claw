@@ -1,0 +1,5 @@
+// error: E0123
+claw fn main() {
+    x int = none
+    print(x)
+}

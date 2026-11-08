@@ -1,0 +1,5 @@
+// error: E0201
+pub use x
+
+fn main() {
+}

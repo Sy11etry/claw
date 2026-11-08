@@ -1,0 +1,11 @@
+// error: E0147
+// error: E0105
+use lib.priv
+
+fn f(h priv.Hidden) {
+    print(1)
+}
+
+fn main() {
+    print(priv.open_one())
+}

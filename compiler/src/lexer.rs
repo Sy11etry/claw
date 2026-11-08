@@ -47,6 +47,7 @@ struct Lexer<'a> {
     pos: usize,
     line: u32,
     col: u32,
+    file: u32,
 }
 
 impl<'a> Lexer<'a> {
@@ -67,12 +68,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn span_from(&self, start: usize, line: u32, col: u32) -> Span {
-        Span { start: start as u32, end: self.pos as u32, line, col }
+        Span { start: start as u32, end: self.pos as u32, line, col, file: self.file }
     }
 }
 
-pub fn lex(src: &str, diags: &mut Vec<Diag>) -> Vec<Token> {
-    let mut l = Lexer { src: src.as_bytes(), pos: 0, line: 1, col: 1 };
+pub fn lex(src: &str, file: u32, diags: &mut Vec<Diag>) -> Vec<Token> {
+    let mut l = Lexer { src: src.as_bytes(), pos: 0, line: 1, col: 1, file };
     let mut out: Vec<Token> = Vec::with_capacity(src.len() / 3);
     let mut brackets: Vec<u8> = Vec::new();
 
@@ -148,7 +149,7 @@ pub fn lex(src: &str, diags: &mut Vec<Diag>) -> Vec<Token> {
             }
         }
     }
-    let span = Span { start: l.pos as u32, end: l.pos as u32, line: l.line, col: l.col };
+    let span = Span { start: l.pos as u32, end: l.pos as u32, line: l.line, col: l.col, file };
     if out.last().map(|t| t.tok != Tok::Newline).unwrap_or(false) {
         out.push(Token { tok: Tok::Newline, span });
     }

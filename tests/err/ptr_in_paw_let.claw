@@ -1,0 +1,5 @@
+// error: E0140
+fn main() {
+    p *int = none
+    print(p)
+}

@@ -1,0 +1,13 @@
+// expect: 14
+claw fn squares(n int) int {
+    p := alloc[int](n)
+    defer free(p)
+    for i in 0..n { p[i] = i * i }
+    mut s := 0
+    for i in 0..n { s += p[i] }
+    ret s
+}
+
+fn main() {
+    print(squares(4))
+}

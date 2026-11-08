@@ -1,0 +1,6 @@
+// error: E0106
+extern fn f(a int) int
+
+claw fn main() {
+    print(f(1, 2))
+}

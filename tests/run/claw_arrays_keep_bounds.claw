@@ -1,0 +1,10 @@
+// exit: 101
+// stderr: trap: index out of bounds
+claw fn v(n int) int {
+    ret n
+}
+
+claw fn main() {
+    a := [1, 2]
+    print(a[v(5)])
+}

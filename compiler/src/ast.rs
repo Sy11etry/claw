@@ -1,76 +1,106 @@
 //! Syntax tree. Sema writes each expression's type into `Expr::ty`.
 
 use crate::diag::Span;
+use crate::sema::ConstVal;
 use crate::types::{Ty, ERR};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Size {
     Lit(i128),
     Name(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypeKind {
-    Name(String),
+    Name { module: Option<String>, name: String, targs: Vec<TypeExpr> },
+    Pointer(Box<TypeExpr>),
     Array(Size, Box<TypeExpr>),
     Option(Box<TypeExpr>),
     /// `T ! E`, or `! E` when the success value is nothing.
     Result(Option<Box<TypeExpr>>, Box<TypeExpr>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeExpr {
     pub kind: TypeKind,
     pub span: Span,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Program {
     pub funcs: Vec<Func>,
     pub types: Vec<TypeDecl>,
     pub consts: Vec<ConstDecl>,
+    pub externs: Vec<ExternDecl>,
+    pub uses: Vec<UseDecl>,
 }
 
-#[derive(Debug)]
+/// `use a.b`: the file a/b.claw, known here as `b`.
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub name: String,
+    pub span: Span,
+    pub public: bool,
+    pub params: Vec<Param>,
+    pub variadic: bool,
+    pub ret: Option<TypeExpr>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FieldDecl {
     pub name: String,
     pub span: Span,
     pub ty: TypeExpr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VariantDecl {
     pub name: String,
     pub span: Span,
     pub fields: Vec<FieldDecl>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypeBody {
     Struct(Vec<FieldDecl>),
     Variants(Vec<VariantDecl>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
     pub span: Span,
+    pub public: bool,
+    pub tparams: Vec<(String, Span)>,
     pub body: TypeBody,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConstDecl {
     pub name: String,
     pub span: Span,
+    pub public: bool,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Func {
     pub name: String,
     pub name_span: Span,
+    pub public: bool,
+    pub claw: bool,
+    pub tparams: Vec<(String, Span)>,
+    /// Scalar locals whose address is taken, so they must live in memory.
+    pub addressed: RefCell<HashSet<String>>,
     pub params: Vec<Param>,
     pub ret: Option<TypeExpr>,
     /// Parsed since 0.2, checked from 0.5.
@@ -79,32 +109,32 @@ pub struct Func {
     pub body: Block,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
     pub span: Span,
     pub ty: TypeExpr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub end: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stmt {
     pub kind: StmtKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Else {
     Block(Block),
     If(Box<Stmt>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Pat {
     Wild,
     Variant { name: String, binds: Vec<(String, Span)> },
@@ -112,14 +142,14 @@ pub enum Pat {
     Bool(bool),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Arm {
     pub pat: Pat,
     pub span: Span,
     pub body: Block,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StmtKind {
     Let { mutable: bool, name: String, name_span: Span, ty: Option<TypeExpr>, init: Expr },
     Assign { target: Expr, op: Option<BinOp>, value: Expr },
@@ -133,6 +163,7 @@ pub enum StmtKind {
     Match { subject: Expr, arms: Vec<Arm> },
     Ret(Option<Expr>),
     Fail(Expr),
+    Defer(Block),
     Break,
     Continue,
 }
@@ -191,6 +222,16 @@ pub enum UnOp {
     Not,
 }
 
+/// What a name turned out to mean, decided by sema and read by lowering.
+#[derive(Debug, Clone, Default)]
+pub enum Res {
+    #[default]
+    None,
+    Func(String),
+    Const(ConstVal, Ty),
+    Variant(usize, usize),
+}
+
 /// An implicit wrap sema decided on: `T` used where `?T` or `T ! E` is expected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coerce {
@@ -199,33 +240,34 @@ pub enum Coerce {
     Ok(Ty),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
     pub ty: Cell<Ty>,
     pub coerce: Cell<Coerce>,
+    pub res: RefCell<Res>,
 }
 
 impl Expr {
     pub fn new(kind: ExprKind, span: Span) -> Expr {
-        Expr { kind, span, ty: Cell::new(ERR), coerce: Cell::new(Coerce::No) }
+        Expr { kind, span, ty: Cell::new(ERR), coerce: Cell::new(Coerce::No), res: RefCell::new(Res::None) }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Part {
     Lit(String),
     Expr(Expr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ElseKind {
     Value(Box<Expr>),
     Block(Option<(String, Span)>, Block),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ExprKind {
     Int(i128),
     Float(f64),
@@ -239,8 +281,10 @@ pub enum ExprKind {
     Var(String),
     Unary { op: UnOp, e: Box<Expr> },
     Binary { op: BinOp, l: Box<Expr>, r: Box<Expr> },
-    Call { name: String, name_span: Span, args: Vec<Expr> },
-    StructLit { name: String, name_span: Span, args: Vec<Expr> },
+    Call { module: Option<String>, name: String, name_span: Span, targs: Vec<TypeExpr>, args: Vec<Expr> },
+    StructLit { module: Option<String>, name: String, name_span: Span, targs: Vec<TypeExpr>, args: Vec<Expr> },
+    AddrOf(Box<Expr>),
+    Deref(Box<Expr>),
     ArrayLit(Vec<Expr>),
     ArrayFill(Box<Expr>),
     Field { e: Box<Expr>, name: String, name_span: Span },

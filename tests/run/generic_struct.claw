@@ -1,0 +1,28 @@
+// expect: Pair[int, f64]{1, 2.5}
+// expect: Pair[f64, int]{2.5, 1}
+// expect: 2.5
+// expect: Pair[u8, bool]{200, true}
+// expect: 200
+// expect: Pair[int, [2]int]{1, [9, 3]}
+type Pair[A, B] { a A, b B }
+
+fn swap[A, B](p Pair[A, B]) Pair[B, A] {
+    ret Pair[B, A]{p.b, p.a}
+}
+
+fn first[A, B](p Pair[A, B]) A {
+    ret p.a
+}
+
+fn main() {
+    p := Pair{1, 2.5}
+    print(p)
+    print(swap(p))
+    print(first(swap(p)))
+    q := Pair[u8, bool]{200, true}
+    print(q)
+    print(q.a)
+    mut r Pair[int, [2]int] = Pair{1, [2, 3]}
+    r.b[0] = 9
+    print(r)
+}

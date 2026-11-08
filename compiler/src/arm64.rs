@@ -111,6 +111,9 @@ pub fn smulh(rd: Reg, rn: Reg, rm: Reg) -> u32 {
 pub fn msub(rd: Reg, rn: Reg, rm: Reg, ra: Reg) -> u32 {
     0x9B00_8000 | (rm << 16) | (ra << 10) | (rn << 5) | rd
 }
+pub fn umulh(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x9BC0_7C00, rd, rn, rm)
+}
 pub fn sdiv(rd: Reg, rn: Reg, rm: Reg) -> u32 {
     rrr(0x9AC0_0C00, rd, rn, rm)
 }
@@ -383,6 +386,7 @@ pub fn golden() -> Vec<(u32, String)> {
         s(br(X16), "br x16"),
         s(ret(), "ret"),
         s(brk(1), "brk #1"),
+        s(umulh(X12, X9, X10), "umulh x12, x9, x10"),
         s(add(X9, X9, X16), "add x9, x9, x16"),
         s(add_ext(X9, SP, X16), "add x9, sp, x16"),
         s(lsr(X11, X9, X10), "lsr x11, x9, x10"),

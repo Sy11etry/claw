@@ -1,0 +1,24 @@
+// expect: Point{3, 4}
+// expect: 36
+// expect: 10
+// expect: Point{2, 2}
+// expect: 1
+// expect: 7
+// expect: 5
+// expect: Box[int]{6}
+// expect: 7
+use lib.geo
+
+fn main() {
+    p := geo.Point{3, 4}
+    print(p)
+    print(geo.area(p))
+    print(geo.unit)
+    print(geo.make(2))
+    print(geo.shade(geo.Red))
+    print(geo.shade(geo.Green{7}))
+    print(geo.same(5))
+    print(geo.Box{6})
+    b geo.Box[u8] = geo.Box[u8]{7}
+    print(b.v)
+}

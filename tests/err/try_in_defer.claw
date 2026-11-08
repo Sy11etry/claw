@@ -1,0 +1,12 @@
+// error: E0143
+claw fn f() ?int {
+    ret 1
+}
+
+claw fn g() ?int {
+    defer print(f()?)
+    ret 1
+}
+
+fn main() {
+}

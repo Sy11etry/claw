@@ -47,8 +47,15 @@ fn value_end(t: &Tok) -> bool {
 }
 
 /// What sits between two tokens on one line.
-fn needs_space(prev: &Tok, cur: &Tok, prev2: Option<&Tok>, adjacent: bool) -> bool {
+fn needs_space(prev: &Tok, cur: &Tok, prev2: Option<&Tok>, adjacent: bool, gap_before_prev: bool) -> bool {
     use Tok::*;
+    // `s *u8`: glued to what follows but not to what precedes, so a prefix.
+    if matches!(prev, Op("*") | Op("&")) && adjacent && gap_before_prev {
+        return false;
+    }
+    if matches!((prev, cur), (Op(","), Op("..."))) {
+        return true;
+    }
     let unary_prev = matches!(prev, Op("-") | Op("~") | Op("&") | Op("*") | Op("!"))
         && !prev2.map(value_end).unwrap_or(false);
     if unary_prev {
@@ -69,13 +76,14 @@ fn needs_space(prev: &Tok, cur: &Tok, prev2: Option<&Tok>, adjacent: bool) -> bo
         (Ident(_), Op("(")) => false,
         (Ident(_), Op("[")) | (Op(")"), Op("[")) | (Op("]"), Op("(")) => !adjacent,
         (Ident(n), Op("{")) if is_type_name(n) => !adjacent,
+        (Op("]"), Op("{")) => !adjacent,
         (Op("{"), Op("}")) => false,
         _ => true,
     }
 }
 
 fn format_code(line: &str, diags: &mut Vec<Diag>) -> (String, Vec<Token>) {
-    let toks = lexer::lex(line, diags);
+    let toks = lexer::lex(line, 0, diags);
     let mut out = String::new();
     let real: Vec<&Token> = toks.iter().filter(|t| !matches!(t.tok, Tok::Newline | Tok::Eof)).collect();
     let type_decl = matches!(real.first().map(|t| &t.tok), Some(Tok::Kw("type"))) && matches!(real.get(2).map(|t| &t.tok), Some(Tok::Op("{")));
@@ -83,7 +91,7 @@ fn format_code(line: &str, diags: &mut Vec<Diag>) -> (String, Vec<Token>) {
     let mut braces: Vec<bool> = Vec::new();
     // In a signature or `if`/`for`/`match` head a bare `Name {` opens a block.
     let head = match (real.first().map(|t| &t.tok), real.get(1).map(|t| &t.tok)) {
-        (Some(Tok::Kw("fn" | "if" | "for" | "match")), _) => true,
+        (Some(Tok::Kw("fn" | "if" | "for" | "match" | "claw" | "pub")), _) => true,
         (Some(Tok::Op("}")), Some(Tok::Kw("else"))) => true,
         _ => false,
     };
@@ -92,7 +100,8 @@ fn format_code(line: &str, diags: &mut Vec<Diag>) -> (String, Vec<Token>) {
         if i > 0 {
             let adjacent = real[i - 1].span.end == t.span.start;
             let prev2 = if i >= 2 { Some(&real[i - 2].tok) } else { None };
-            let mut space = needs_space(&real[i - 1].tok, &t.tok, prev2, adjacent);
+            let gap_before_prev = i < 2 || real[i - 2].span.end != real[i - 1].span.start;
+            let mut space = needs_space(&real[i - 1].tok, &t.tok, prev2, adjacent, gap_before_prev);
             let empty = real[i - 1].tok == Tok::Op("{") && t.tok == Tok::Op("}");
             if !empty {
                 if real[i - 1].tok == Tok::Op("{") {
@@ -116,7 +125,7 @@ fn format_code(line: &str, diags: &mut Vec<Diag>) -> (String, Vec<Token>) {
             Tok::Op("{") => {
                 let literal = i > 0
                     && real[i - 1].span.end == t.span.start
-                    && matches!(&real[i - 1].tok, Tok::Ident(n) if is_type_name(n))
+                    && (matches!(&real[i - 1].tok, Tok::Ident(n) if is_type_name(n)) || real[i - 1].tok == Tok::Op("]"))
                     && !(type_decl && i == 2)
                     && !(head && parens == 0);
                 braces.push(literal);
@@ -167,7 +176,7 @@ fn ends_continued(toks: &[Token]) -> bool {
 
 pub fn format(src: &str) -> Result<String, Vec<Diag>> {
     let mut diags = Vec::new();
-    let original = lexer::lex(src, &mut diags);
+    let original = lexer::lex(src, 0, &mut diags);
     if !diags.is_empty() {
         return Err(diags);
     }
@@ -221,12 +230,12 @@ pub fn format(src: &str) -> Result<String, Vec<Diag>> {
 
     // The safety net: only whitespace may ever change.
     let mut after_diags = Vec::new();
-    let after = lexer::lex(&out, &mut after_diags);
+    let after = lexer::lex(&out, 0, &mut after_diags);
     let same = after_diags.is_empty()
         && original.len() == after.len()
         && original.iter().zip(&after).all(|(a, b)| a.tok == b.tok);
     if !same {
-        let at = crate::diag::Span { start: 0, end: 0, line: 1, col: 1 };
+        let at = crate::diag::Span { start: 0, end: 0, line: 1, col: 1, file: 0 };
         return Err(vec![Diag::new("E0902", at, "formatter would have changed this program; file left untouched")]);
     }
     Ok(out)

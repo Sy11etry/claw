@@ -1,0 +1,7 @@
+// error: E0128
+fn f[t](x t) t {
+    ret x
+}
+
+fn main() {
+}

@@ -1,0 +1,5 @@
+// error: E0900
+type O[T] = S{v T} | N
+
+fn main() {
+}

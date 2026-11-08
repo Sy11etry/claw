@@ -1,0 +1,5 @@
+use geo
+
+pub fn double(p geo.Point) geo.Point {
+    ret geo.Point{p.x * 2, p.y * 2}
+}

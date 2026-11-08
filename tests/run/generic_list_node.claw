@@ -1,0 +1,25 @@
+// expect: 2
+// expect: 2
+// expect: 16
+type Node[T] { next *Node[T], v T }
+
+claw fn cons[T](v T, tail *Node[T]) *Node[T] {
+    n := alloc[Node[T]](1)
+    n.next = tail
+    n.v = v
+    ret n
+}
+
+claw fn count[T](n *Node[T]) int {
+    if n == none { ret 0 }
+    ret 1 + count(n.next)
+}
+
+claw fn main() {
+    mut l *Node[int] = none
+    l = cons(1, l)
+    l = cons(2, l)
+    print(l.v)
+    print(count(l))
+    print(sizeof[Node[u8]]())
+}

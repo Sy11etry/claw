@@ -1,0 +1,9 @@
+// error: E0104
+fn f[T](a T) T {
+    ret a + true
+}
+
+fn main() {
+    print(f(1))
+    print(f(2))
+}

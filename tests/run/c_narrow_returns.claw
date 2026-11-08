@@ -1,0 +1,12 @@
+// expect: 67
+// expect: true
+// expect: false
+extern fn toupper(c i32) i32
+extern fn isdigit(c i32) i32
+
+claw fn main() {
+    a i32 = toupper(98)
+    print(int(a) + 1)
+    print(isdigit(50) != 0)
+    print(isdigit(65) != 0)
+}
