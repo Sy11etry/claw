@@ -1,0 +1,12 @@
+// removes-all-bounds
+fn sum(a []int) int {
+    mut t := 0
+    for i in 0..len(a) {
+        t += a[i]
+    }
+    ret t
+}
+
+fn main() {
+    print(sum([1, 2, 3]))
+}

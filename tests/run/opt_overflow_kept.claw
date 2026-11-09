@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: integer overflow at opt_overflow_kept.claw:6:9
+fn main() {
+    mut x := 9223372036854775800
+    for i in 0..100 {
+        x += i
+    }
+    print(x)
+}

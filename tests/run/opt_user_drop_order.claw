@@ -1,0 +1,14 @@
+// expect: 3
+// expect: 2
+// expect: 1
+type F { n int }
+
+fn drop(x &F) +io {
+    print(x.n)
+}
+
+fn main() {
+    a := F{1}
+    b := F{2}
+    print(a.n + b.n)
+}

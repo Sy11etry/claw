@@ -1,0 +1,10 @@
+// expect: 1
+// expect: 2
+// exit: 101
+// stderr: index out of bounds at opt_off_by_one.claw:8:15
+fn main() {
+    a []int = [1, 2]
+    for i in 0..len(a) + 1 {
+        print(a[i])
+    }
+}

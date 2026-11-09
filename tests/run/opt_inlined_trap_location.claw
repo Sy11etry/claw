@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: integer overflow at opt_inlined_trap_location.claw:4:9
+fn add(a int, b int) int {
+    ret a + b
+}
+
+fn main() {
+    print(add(9223372036854775807, 1))
+}

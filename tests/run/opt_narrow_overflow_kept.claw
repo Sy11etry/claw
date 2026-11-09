@@ -1,0 +1,10 @@
+// expect: 127
+// exit: 101
+// stderr: integer overflow
+fn main() {
+    mut x i8 = 126
+    for _ in 0..3 {
+        x += 1
+        print(x)
+    }
+}

@@ -1,0 +1,7 @@
+// expect: 9
+claw fn main() {
+    mut x := 1
+    p := &x
+    *p = 9
+    print(x)
+}

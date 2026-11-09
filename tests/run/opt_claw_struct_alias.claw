@@ -1,0 +1,13 @@
+// expect: 5
+type P { x int, y int }
+
+claw fn set(q *int) {
+    *q = 5
+}
+
+claw fn main() {
+    mut s := P{1, 2}
+    r := &s
+    set(&r.x)
+    print(s.x)
+}

@@ -1,0 +1,11 @@
+// expect: 5
+fn f(x int) int
+    need x < 0
+    sure ret < 0
+{
+    ret x
+}
+
+fn main() {
+    print(f(5))
+}

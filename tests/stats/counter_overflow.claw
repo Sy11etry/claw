@@ -1,0 +1,14 @@
+// removes-at-least: 1
+fn count(n int) int {
+    mut t := 0
+    mut i := 0
+    for i < n {
+        i += 1
+        t = i
+    }
+    ret t
+}
+
+fn main() {
+    print(count(10))
+}

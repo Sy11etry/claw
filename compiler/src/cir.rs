@@ -19,9 +19,11 @@ pub struct Loc {
 pub struct Num {
     pub bits: u8,
     pub signed: bool,
+    /// False once the optimizer has proved the operation cannot trap.
+    pub checked: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mem {
     I8,
     I16,
@@ -91,12 +93,14 @@ pub enum CRet {
 pub enum Inst {
     Const { d: VReg, v: i64 },
     Mov { d: VReg, s: VReg },
+    /// Only while the optimizer works; gone before code is generated.
+    Phi { d: VReg, args: Vec<(BlockId, VReg)> },
+    /// Also only inside the optimizer: `d` is `s`, and here `s cc other` is known to hold.
+    Pi { d: VReg, s: VReg, cc: Cc, other: VReg, unsigned: bool },
     Bin { op: Arith, d: VReg, a: VReg, b: VReg, num: Num, loc: Loc },
     Neg { d: VReg, s: VReg, num: Num, loc: Loc },
     BitNot { d: VReg, s: VReg, num: Num },
     BoolNot { d: VReg, s: VReg },
-    /// `d += 1` for a loop counter already known to be below its limit.
-    Inc { d: VReg },
     Cmp { cc: Cc, d: VReg, a: VReg, b: VReg, unsigned: bool },
     FBin { op: FArith, d: VReg, a: VReg, b: VReg, bits: u8 },
     FNeg { d: VReg, s: VReg, bits: u8 },
@@ -148,16 +152,24 @@ pub enum Term {
     Unreachable,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Block {
     pub insts: Vec<Inst>,
     pub term: Term,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Func {
     pub name: String,
     pub nparams: usize,
+    /// The registers holding the parameters, in order.
+    pub params: Vec<VReg>,
+    /// Written as `claw fn`: raw pointers may alias anything.
+    pub claw: bool,
+    /// Registers were allocated rather than every value living on the stack.
+    pub optimized: bool,
+    /// Nothing can reach it, so no code is generated.
+    pub dead: bool,
     pub nvregs: u32,
     /// Stack objects: (size, alignment).
     pub objects: Vec<(u64, u64)>,
@@ -181,9 +193,168 @@ pub struct CheckRt {
     pub finish: FuncId,
 }
 
+macro_rules! walk_inst {
+    ($i:expr, $f:ident, $($m:tt)?) => {
+        match $i {
+            Inst::Const { d, .. } | Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } => $f(d, true),
+            Inst::Mov { d, s } | Inst::BitNot { d, s, .. } | Inst::BoolNot { d, s } | Inst::Neg { d, s, .. } | Inst::FNeg { d, s, .. }
+            | Inst::IntCast { d, s, .. } | Inst::IntToFloat { d, s, .. } | Inst::FloatToInt { d, s, .. } | Inst::FloatCast { d, s, .. }
+            | Inst::AddImm { d, s, .. } => {
+                $f(s, false);
+                $f(d, true);
+            }
+            Inst::Pi { d, s, other, .. } => {
+                $f(s, false);
+                $f(other, false);
+                $f(d, true);
+            }
+            Inst::Phi { d, args } => {
+                for (_, v) in args {
+                    $f(v, false);
+                }
+                $f(d, true);
+            }
+            Inst::Bin { d, a, b, .. } | Inst::Cmp { d, a, b, .. } | Inst::FBin { d, a, b, .. } | Inst::FCmp { d, a, b, .. } => {
+                $f(a, false);
+                $f(b, false);
+                $f(d, true);
+            }
+            Inst::Call { d, args, .. } => {
+                for a in args {
+                    $f(a, false);
+                }
+                if let Some(d) = d {
+                    $f(d, true);
+                }
+            }
+            Inst::CallC { d, args, .. } => {
+                for a in args {
+                    $f(&$($m)? a.v, false);
+                }
+                if let Some(d) = d {
+                    $f(d, true);
+                }
+            }
+            Inst::Load { d, p, .. } => {
+                $f(p, false);
+                $f(d, true);
+            }
+            Inst::Store { p, s, .. } => {
+                $f(p, false);
+                $f(s, false);
+            }
+            Inst::MemCopy { dst, src, .. } => {
+                $f(dst, false);
+                $f(src, false);
+            }
+            Inst::MemCopyDyn { dst, src, n } => {
+                $f(dst, false);
+                $f(src, false);
+                $f(n, false);
+            }
+            Inst::IndexAddr { d, base, idx, .. } => {
+                $f(base, false);
+                $f(idx, false);
+                $f(d, true);
+            }
+            Inst::Bounds { idx, .. } => $f(idx, false),
+            Inst::BoundsDyn { idx, len, .. } => {
+                $f(idx, false);
+                $f(len, false);
+            }
+            Inst::Alloc { d, n, .. } => {
+                $f(n, false);
+                $f(d, true);
+            }
+            Inst::Free { p } => $f(p, false),
+            Inst::BufInt { s, .. } | Inst::BufBool { s } | Inst::BufFloat { s, .. } => $f(s, false),
+            Inst::BufPtr { p, n } => {
+                $f(p, false);
+                $f(n, false);
+            }
+            Inst::CaptureTake { ptr, len } => {
+                $f(ptr, true);
+                $f(len, true);
+            }
+            Inst::WideBin { dlo, dhi, alo, ahi, blo, bhi, .. } => {
+                $f(alo, false);
+                $f(ahi, false);
+                $f(blo, false);
+                $f(bhi, false);
+                $f(dlo, true);
+                $f(dhi, true);
+            }
+            Inst::WideCmp { d, alo, ahi, blo, bhi, .. } => {
+                $f(alo, false);
+                $f(ahi, false);
+                $f(blo, false);
+                $f(bhi, false);
+                $f(d, true);
+            }
+            Inst::BufStr { .. } | Inst::CaptureStart | Inst::Flush { .. } | Inst::Exit { .. } | Inst::SetSite { .. } => {}
+        }
+    };
+}
+
+impl Inst {
+    /// Calls `f` with every register, and whether this instruction writes it.
+    pub fn each(&self, f: &mut dyn FnMut(VReg, bool)) {
+        let mut g = |v: &VReg, def: bool| f(*v, def);
+        walk_inst!(self, g,);
+    }
+
+    pub fn each_mut(&mut self, f: &mut dyn FnMut(&mut VReg, bool)) {
+        let mut g = |v: &mut VReg, def: bool| f(v, def);
+        walk_inst!(self, g, mut);
+    }
+
+    /// The one register this writes, for instructions that write exactly one.
+    pub fn def(&self) -> Option<VReg> {
+        let mut out = None;
+        let mut n = 0;
+        self.each(&mut |v, def| {
+            if def {
+                out = Some(v);
+                n += 1;
+            }
+        });
+        if n == 1 {
+            out
+        } else {
+            None
+        }
+    }
+
+    /// Can a call's register rules touch this? Then x0-x7 are not safe across or into it.
+    pub fn is_call(&self) -> bool {
+        match self {
+            Inst::Call { .. } | Inst::CallC { .. } | Inst::MemCopyDyn { .. } | Inst::Alloc { .. } | Inst::Free { .. } | Inst::BufStr { .. } | Inst::BufInt { .. } | Inst::BufPtr { .. } | Inst::CaptureTake { .. } | Inst::BufBool { .. } | Inst::BufFloat { .. } | Inst::Flush { .. } | Inst::Exit { .. } => true,
+            Inst::MemCopy { size, .. } => *size > 64,
+            _ => false,
+        }
+    }
+
+    /// If the result is unused, may this instruction simply disappear?
+    pub fn removable(&self) -> bool {
+        match self {
+            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } => true,
+            Inst::Bin { op, num, .. } => match op {
+                Arith::And | Arith::Or | Arith::Xor => true,
+                Arith::Add | Arith::Sub | Arith::Mul => !num.signed || !num.checked,
+                _ => !num.checked,
+            },
+            Inst::Neg { num, .. } => !num.checked,
+            Inst::IntCast { from, to, .. } => {
+                !to.signed || (from.bits <= to.bits && (from.signed || from.bits < to.bits)) || !to.checked
+            }
+            _ => false,
+        }
+    }
+}
+
 pub fn dump(m: &Module) -> String {
     let mut out = String::new();
-    for f in &m.funcs {
+    for f in m.funcs.iter().filter(|f| !f.dead) {
         out.push_str(&format!("fn {} params={} vregs={} objects={:?}\n", f.name, f.nparams, f.nvregs, f.objects));
         for (i, b) in f.blocks.iter().enumerate() {
             out.push_str(&format!("  b{i}:\n"));

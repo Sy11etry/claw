@@ -7,6 +7,7 @@
 
 use crate::arm64::*;
 use crate::cir::*;
+use crate::regalloc::{self, Alloc, Place};
 
 const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"];
 const IMP_WRITE: usize = 0;
@@ -108,6 +109,33 @@ fn assign_c(args: &[CArg], variadic: Option<usize>) -> (Vec<Slot>, u32) {
     (out, stack)
 }
 
+fn int_cond(cc: Cc, unsigned: bool) -> Cond {
+    match (cc, unsigned) {
+        (Cc::Eq, _) => Cond::Eq,
+        (Cc::Ne, _) => Cond::Ne,
+        (Cc::Lt, false) => Cond::Lt,
+        (Cc::Le, false) => Cond::Le,
+        (Cc::Gt, false) => Cond::Gt,
+        (Cc::Ge, false) => Cond::Ge,
+        (Cc::Lt, true) => Cond::Lo,
+        (Cc::Le, true) => Cond::Ls,
+        (Cc::Gt, true) => Cond::Hi,
+        (Cc::Ge, true) => Cond::Hs,
+    }
+}
+
+/// These conditions are all false for NaN, except `!=`.
+fn float_cond(cc: Cc) -> Cond {
+    match cc {
+        Cc::Eq => Cond::Eq,
+        Cc::Ne => Cond::Ne,
+        Cc::Lt => Cond::Mi,
+        Cc::Le => Cond::Ls,
+        Cc::Gt => Cond::Gt,
+        Cc::Ge => Cond::Ge,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Trap {
     Overflow,
@@ -141,13 +169,21 @@ enum Pending {
 }
 
 struct Frame {
-    outgoing: u32,
     objects: Vec<u64>,
+    alloc: Alloc,
+    /// Where spilled values start in the frame.
+    spill_base: u32,
+    /// Where callee-saved registers are kept.
+    save_base: u32,
 }
 
 impl Frame {
-    fn slot(&self, v: VReg) -> u32 {
-        self.outgoing + v * 8
+    fn place(&self, v: VReg) -> Place {
+        self.alloc.places[v as usize]
+    }
+
+    fn slot(&self, n: u32) -> u32 {
+        self.spill_base + n * 8
     }
 }
 
@@ -192,29 +228,123 @@ impl Gen {
         }
     }
 
-    fn load(&mut self, f: &Frame, r: Reg, v: VReg) {
-        let off = f.slot(v);
-        if off <= 32760 {
-            self.e(ldr(r, SP, off));
+    /// A register holding `v`: its own if it has one, otherwise `scratch`.
+    fn use_x(&mut self, f: &Frame, v: VReg, scratch: Reg) -> Reg {
+        if let Place::Reg(x) = f.place(v) {
+            return x;
+        }
+        self.load(f, scratch, v);
+        scratch
+    }
+
+    /// Where to compute `v`; `done_x` then puts it in place.
+    fn def_x(&self, f: &Frame, v: VReg, scratch: Reg) -> Reg {
+        match f.place(v) {
+            Place::Reg(x) => x,
+            _ => scratch,
+        }
+    }
+
+    fn done_x(&mut self, f: &Frame, r: Reg, v: VReg) {
+        self.store(f, r, v);
+    }
+
+    fn use_d(&mut self, f: &Frame, v: VReg, scratch: Reg, bits: u8) -> Reg {
+        if let Place::Fpr(d) = f.place(v) {
+            return d;
+        }
+        self.fload(f, scratch, v, bits);
+        scratch
+    }
+
+    fn def_d(&self, f: &Frame, v: VReg, scratch: Reg) -> Reg {
+        match f.place(v) {
+            Place::Fpr(d) => d,
+            _ => scratch,
+        }
+    }
+
+    /// `v` if it is a small non-negative constant an instruction can carry itself.
+    fn small_const(f: &Frame, v: VReg) -> Option<u32> {
+        match f.place(v) {
+            Place::Const(c) if (0..4096).contains(&c) => Some(c as u32),
+            _ => None,
+        }
+    }
+
+    fn compare(&mut self, fr: &Frame, a: VReg, b: VReg) {
+        let x = self.use_x(fr, a, X9);
+        match Self::small_const(fr, b) {
+            Some(k) => self.e(cmp_imm(x, k)),
+            None => {
+                let y = self.use_x(fr, b, X10);
+                self.e(cmp(x, y));
+            }
+        }
+    }
+
+    fn fcompare(&mut self, fr: &Frame, a: VReg, b: VReg, bits: u8) {
+        let x = self.use_d(fr, a, D0, bits);
+        let y = self.use_d(fr, b, D1, bits);
+        self.e(fcmp(x, y, bits));
+    }
+
+    fn obj_addr(&mut self, f: &Frame, r: Reg, obj: usize) {
+        let off = f.objects[obj];
+        if off < 4096 {
+            self.e(add_imm(r, SP, off as u32));
         } else {
             self.mov_imm(X16, off as i64);
-            self.e(ldr_reg(r, SP, X16));
+            self.e(add_ext(r, SP, X16));
+        }
+    }
+
+    fn load(&mut self, f: &Frame, r: Reg, v: VReg) {
+        match f.place(v) {
+            Place::Reg(x) => {
+                if x != r {
+                    self.e(mov(r, x));
+                }
+            }
+            Place::Fpr(d) => self.e(fmov_x_d(r, d)),
+            Place::Const(c) => self.mov_imm(r, c),
+            Place::Obj(o) => self.obj_addr(f, r, o),
+            Place::Slot(n) => {
+                let off = f.slot(n);
+                if off <= 32760 {
+                    self.e(ldr(r, SP, off));
+                } else {
+                    self.mov_imm(X16, off as i64);
+                    self.e(ldr_reg(r, SP, X16));
+                }
+            }
+            Place::None => self.e(movz(r, 0, 0)),
         }
     }
 
     fn store(&mut self, f: &Frame, r: Reg, v: VReg) {
-        let off = f.slot(v);
-        if off <= 32760 {
-            self.e(str(r, SP, off));
-        } else {
-            self.mov_imm(X16, off as i64);
-            self.e(str_reg(r, SP, X16));
+        match f.place(v) {
+            Place::Reg(x) => {
+                if x != r {
+                    self.e(mov(x, r));
+                }
+            }
+            Place::Fpr(d) => self.e(fmov_d_x(d, r)),
+            Place::Slot(n) => {
+                let off = f.slot(n);
+                if off <= 32760 {
+                    self.e(str(r, SP, off));
+                } else {
+                    self.mov_imm(X16, off as i64);
+                    self.e(str_reg(r, SP, X16));
+                }
+            }
+            Place::Const(_) | Place::Obj(_) | Place::None => {}
         }
     }
 
     /// Far slots are reached through x16; returns the base register and offset.
-    fn float_slot(&mut self, f: &Frame, v: VReg) -> (Reg, u32) {
-        let off = f.slot(v);
+    fn float_slot(&mut self, off: u32) -> (Reg, u32) {
         if off <= 16380 {
             (SP, off)
         } else {
@@ -225,13 +355,39 @@ impl Gen {
     }
 
     fn fload(&mut self, f: &Frame, r: Reg, v: VReg, bits: u8) {
-        let (base, off) = self.float_slot(f, v);
-        self.e(if bits == 64 { ldr_d(r, base, off) } else { ldr_s(r, base, off) });
+        match f.place(v) {
+            Place::Fpr(d) => {
+                if d != r {
+                    self.e(fmov_d_d(r, d));
+                }
+            }
+            Place::Reg(x) => self.e(fmov_d_x(r, x)),
+            Place::Const(c) => {
+                self.mov_imm(X16, c);
+                self.e(fmov_d_x(r, X16));
+            }
+            Place::Slot(n) => {
+                let (base, off) = self.float_slot(f.slot(n));
+                self.e(if bits == 64 { ldr_d(r, base, off) } else { ldr_s(r, base, off) });
+            }
+            Place::Obj(_) | Place::None => self.e(fmov_d_x(r, XZR)),
+        }
     }
 
     fn fstore(&mut self, f: &Frame, r: Reg, v: VReg, bits: u8) {
-        let (base, off) = self.float_slot(f, v);
-        self.e(if bits == 64 { str_d(r, base, off) } else { str_s(r, base, off) });
+        match f.place(v) {
+            Place::Fpr(d) => {
+                if d != r {
+                    self.e(fmov_d_d(d, r));
+                }
+            }
+            Place::Reg(x) => self.e(fmov_x_d(x, r)),
+            Place::Slot(n) => {
+                let (base, off) = self.float_slot(f.slot(n));
+                self.e(if bits == 64 { str_d(r, base, off) } else { str_s(r, base, off) });
+            }
+            Place::Const(_) | Place::Obj(_) | Place::None => {}
+        }
     }
 
     fn data_addr(&mut self, r: Reg, off: usize) {
@@ -493,7 +649,10 @@ impl Gen {
                 }
             }
         }
-        let mut off = (outgoing + f.nvregs * 8) as u64;
+        let alloc = if f.optimized { regalloc::allocate(f) } else { regalloc::naive(f) };
+        let save_base = outgoing;
+        let spill_base = save_base + (alloc.saved_x.len() + alloc.saved_d.len()) as u32 * 8;
+        let mut off = (spill_base + alloc.slots * 8) as u64;
         let mut objects = Vec::with_capacity(f.objects.len());
         for (size, align) in &f.objects {
             off = (off + align - 1) & !(align - 1);
@@ -506,7 +665,7 @@ impl Gen {
             return;
         }
         let size = size as u32;
-        let fr = Frame { outgoing, objects };
+        let fr = Frame { objects, alloc, spill_base, save_base };
 
         self.e(stp_pre(FP, LR, SP, -16));
         self.e(mov_sp(FP, SP));
@@ -516,12 +675,17 @@ impl Gen {
         if size & 0xFFF != 0 {
             self.e(sub_imm(SP, SP, size & 0xFFF));
         }
-        for i in 0..f.nparams as u32 {
+        self.save_regs(&fr, false);
+        for (i, p) in f.params.iter().enumerate() {
+            let i = i as u32;
+            if fr.place(*p) == Place::None {
+                continue;
+            }
             if i < 8 {
-                self.store(&fr, i, i);
+                self.store(&fr, i, *p);
             } else {
                 self.e(ldr(X9, FP, 16 + (i - 8) * 8));
-                self.store(&fr, X9, i);
+                self.store(&fr, X9, *p);
             }
         }
 
@@ -529,12 +693,68 @@ impl Gen {
         let mut pending: Vec<Pending> = Vec::new();
         let mut traps: Traps = Vec::new();
 
+        // How often each register is read, to spot values only one instruction wants.
+        let mut uses = vec![0u32; f.nvregs as usize];
+        if f.optimized {
+            for b in &f.blocks {
+                for i in &b.insts {
+                    i.each(&mut |v, def| {
+                        if !def {
+                            uses[v as usize] += 1;
+                        }
+                    });
+                }
+                let mut t = b.term.clone();
+                crate::ssa::term_each_use(&mut t, &mut |v| uses[*v as usize] += 1);
+            }
+        }
+
         for (idx, b) in f.blocks.iter().enumerate() {
             block_pos[idx] = self.here();
-            for i in &b.insts {
-                self.inst(&fr, i, &mut traps, fmts);
+            // A comparison used only by the branch right after it needs no 0-or-1 value.
+            let fused = match (&b.term, b.insts.last()) {
+                (Term::Br { c, .. }, Some(Inst::Cmp { d, .. } | Inst::FCmp { d, .. })) if f.optimized && c == d && uses[*c as usize] == 1 => true,
+                _ => false,
+            };
+            let count = b.insts.len() - fused as usize;
+            let mut k = 0;
+            while k < count {
+                // `a[i]` loaded or stored at once: the address never needs a register.
+                if f.optimized && k + 1 < count && self.indexed_access(&fr, &b.insts[k], &b.insts[k + 1], &uses) {
+                    k += 2;
+                    continue;
+                }
+                self.inst(&fr, &b.insts[k], &mut traps, fmts);
+                k += 1;
             }
             let next = idx + 1;
+            if fused {
+                let Term::Br { t, f: fb, .. } = b.term else { unreachable!() };
+                let cond = match b.insts.last() {
+                    Some(Inst::Cmp { cc, a, b, unsigned, .. }) => {
+                        self.compare(&fr, *a, *b);
+                        int_cond(*cc, *unsigned)
+                    }
+                    Some(Inst::FCmp { cc, a, b, bits, .. }) => {
+                        self.fcompare(&fr, *a, *b, *bits);
+                        float_cond(*cc)
+                    }
+                    _ => unreachable!(),
+                };
+                if t == next {
+                    // Flipping the low bit gives the exact opposite, NaN included.
+                    pending.push(Pending::Cond(self.here(), fb));
+                    self.e(b_cond(cond, 0) ^ 1);
+                } else {
+                    pending.push(Pending::Cond(self.here(), t));
+                    self.e(b_cond(cond, 0));
+                    if fb != next {
+                        pending.push(Pending::B(self.here(), fb));
+                        self.e(B);
+                    }
+                }
+                continue;
+            }
             match &b.term {
                 Term::Jmp(t) => {
                     if *t != next {
@@ -560,6 +780,7 @@ impl Gen {
                     if let Some(v) = v {
                         self.load(&fr, X0, *v);
                     }
+                    self.save_regs(&fr, true);
                     self.e(mov_sp(SP, FP));
                     self.e(ldp_post(FP, LR, SP, 16));
                     self.e(ret());
@@ -593,6 +814,75 @@ impl Gen {
         }
     }
 
+    /// Emits `IndexAddr` + `Load`/`Store` as one instruction when the sizes allow it.
+    fn indexed_access(&mut self, fr: &Frame, first: &Inst, second: &Inst, uses: &[u32]) -> bool {
+        let Inst::IndexAddr { d, base, idx, size } = first else { return false };
+        if uses[*d as usize] != 1 {
+            return false;
+        }
+        match second {
+            Inst::Load { d: value, p, off: 0, mem } if p == d => {
+                match (mem, size, fr.place(*value)) {
+                    (Mem::X64, 8, Place::Fpr(x)) => {
+                        let b = self.use_x(fr, *base, X9);
+                        let i = self.use_x(fr, *idx, X10);
+                        self.e(ldr_d_idx(x, b, i));
+                    }
+                    (Mem::X64, 8, _) => {
+                        let b = self.use_x(fr, *base, X9);
+                        let i = self.use_x(fr, *idx, X10);
+                        let r = self.def_x(fr, *value, X11);
+                        self.e(ldr_idx(r, b, i));
+                        self.done_x(fr, r, *value);
+                    }
+                    (Mem::U8, 1, _) => {
+                        let b = self.use_x(fr, *base, X9);
+                        let i = self.use_x(fr, *idx, X10);
+                        let r = self.def_x(fr, *value, X11);
+                        self.e(ldrb_idx(r, b, i));
+                        self.done_x(fr, r, *value);
+                    }
+                    _ => return false,
+                }
+                true
+            }
+            Inst::Store { p, off: 0, s, mem } if p == d => {
+                let b_needed = matches!((mem, size), (Mem::X64, 8) | (Mem::U8 | Mem::I8, 1));
+                if !b_needed {
+                    return false;
+                }
+                let b = self.use_x(fr, *base, X9);
+                let i = self.use_x(fr, *idx, X10);
+                match (mem, fr.place(*s)) {
+                    (Mem::X64, Place::Fpr(x)) => self.e(str_d_idx(x, b, i)),
+                    (Mem::X64, _) => {
+                        let r = self.use_x(fr, *s, X11);
+                        self.e(str_idx(r, b, i));
+                    }
+                    _ => {
+                        let r = self.use_x(fr, *s, X11);
+                        self.e(strb_idx(r, b, i));
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Writes the callee-saved registers this function uses, or reads them back.
+    fn save_regs(&mut self, fr: &Frame, restore: bool) {
+        let mut off = fr.save_base;
+        for r in fr.alloc.saved_x.clone() {
+            self.e(if restore { ldr(r, SP, off) } else { str(r, SP, off) });
+            off += 8;
+        }
+        for r in fr.alloc.saved_d.clone() {
+            self.e(if restore { ldr_d(r, SP, off) } else { str_d(r, SP, off) });
+            off += 8;
+        }
+    }
+
     fn patch_cond(&mut self, at: usize, disp: i64, name: &str) {
         if !(-(1 << 18)..(1 << 18)).contains(&disp) {
             self.too_large = Some(name.to_string());
@@ -623,22 +913,48 @@ impl Gen {
     fn inst(&mut self, fr: &Frame, i: &Inst, traps: &mut Traps, fmts: (usize, usize)) {
         match i {
             Inst::Const { d, v } => {
-                self.mov_imm(X9, *v);
-                self.store(fr, X9, *d);
+                if !matches!(fr.place(*d), Place::Const(_) | Place::None) {
+                    self.mov_imm(X9, *v);
+                    self.store(fr, X9, *d);
+                }
             }
             Inst::Mov { d, s } => {
-                self.load(fr, X9, *s);
-                self.store(fr, X9, *d);
+                if let Place::Fpr(x) = fr.place(*d) {
+                    self.fload(fr, x, *s, 64);
+                } else {
+                    let r = self.def_x(fr, *d, X9);
+                    self.load(fr, r, *s);
+                    self.done_x(fr, r, *d);
+                }
             }
             Inst::Bin { op, d, a, b, num, loc } => {
-                self.load(fr, X9, *a);
-                self.load(fr, X10, *b);
-                self.bin(*op, *num, *loc, traps);
-                self.store(fr, X11, *d);
+                let ra = self.use_x(fr, *a, X9);
+                let rd = self.def_x(fr, *d, X11);
+                let wide = num.bits == 64 && (num.checked || !num.signed);
+                let no_mask = num.bits == 64 || (num.signed && !num.checked);
+                match (op, Self::small_const(fr, *b)) {
+                    (Arith::Add, Some(k)) if no_mask && !(num.signed && num.checked) => self.e(add_imm(rd, ra, k)),
+                    (Arith::Sub, Some(k)) if no_mask && !(num.signed && num.checked) => self.e(sub_imm(rd, ra, k)),
+                    (Arith::Add, Some(k)) if wide && num.signed => {
+                        self.e(adds_imm(rd, ra, k));
+                        self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                    }
+                    (Arith::Sub, Some(k)) if wide && num.signed => {
+                        self.e(subs_imm(rd, ra, k));
+                        self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                    }
+                    _ => {
+                        let rb = self.use_x(fr, *b, X10);
+                        self.bin(*op, *num, *loc, traps, rd, ra, rb);
+                    }
+                }
+                self.done_x(fr, rd, *d);
             }
             Inst::Neg { d, s, num, loc } => {
                 self.load(fr, X9, *s);
-                if num.bits == 64 {
+                if !num.checked {
+                    self.e(neg(X11, X9));
+                } else if num.bits == 64 {
                     self.e(negs(X11, X9));
                     self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
                 } else {
@@ -658,61 +974,36 @@ impl Gen {
                 self.e(eor_1(X11, X9));
                 self.store(fr, X11, *d);
             }
-            Inst::Inc { d } => {
-                self.load(fr, X9, *d);
-                self.e(add_imm(X9, X9, 1));
-                self.store(fr, X9, *d);
-            }
+            Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("gone before code generation"),
             Inst::Cmp { cc, d, a, b, unsigned } => {
-                self.load(fr, X9, *a);
-                self.load(fr, X10, *b);
-                self.e(cmp(X9, X10));
-                let c = match (cc, unsigned) {
-                    (Cc::Eq, _) => Cond::Eq,
-                    (Cc::Ne, _) => Cond::Ne,
-                    (Cc::Lt, false) => Cond::Lt,
-                    (Cc::Le, false) => Cond::Le,
-                    (Cc::Gt, false) => Cond::Gt,
-                    (Cc::Ge, false) => Cond::Ge,
-                    (Cc::Lt, true) => Cond::Lo,
-                    (Cc::Le, true) => Cond::Ls,
-                    (Cc::Gt, true) => Cond::Hi,
-                    (Cc::Ge, true) => Cond::Hs,
-                };
-                self.e(cset(X11, c as u32));
-                self.store(fr, X11, *d);
+                self.compare(fr, *a, *b);
+                let rd = self.def_x(fr, *d, X11);
+                self.e(cset(rd, int_cond(*cc, *unsigned) as u32));
+                self.done_x(fr, rd, *d);
             }
             Inst::FBin { op, d, a, b, bits } => {
-                self.fload(fr, D0, *a, *bits);
-                self.fload(fr, D1, *b, *bits);
+                let x = self.use_d(fr, *a, D0, *bits);
+                let y = self.use_d(fr, *b, D1, *bits);
+                let r = self.def_d(fr, *d, D0);
                 self.e(match op {
-                    FArith::Add => fadd(D0, D0, D1, *bits),
-                    FArith::Sub => fsub(D0, D0, D1, *bits),
-                    FArith::Mul => fmul(D0, D0, D1, *bits),
-                    FArith::Div => fdiv(D0, D0, D1, *bits),
+                    FArith::Add => fadd(r, x, y, *bits),
+                    FArith::Sub => fsub(r, x, y, *bits),
+                    FArith::Mul => fmul(r, x, y, *bits),
+                    FArith::Div => fdiv(r, x, y, *bits),
                 });
-                self.fstore(fr, D0, *d, *bits);
+                self.fstore(fr, r, *d, *bits);
             }
             Inst::FNeg { d, s, bits } => {
-                self.fload(fr, D0, *s, *bits);
-                self.e(fneg(D0, D0, *bits));
-                self.fstore(fr, D0, *d, *bits);
+                let x = self.use_d(fr, *s, D0, *bits);
+                let r = self.def_d(fr, *d, D0);
+                self.e(fneg(r, x, *bits));
+                self.fstore(fr, r, *d, *bits);
             }
             Inst::FCmp { cc, d, a, b, bits } => {
-                self.fload(fr, D0, *a, *bits);
-                self.fload(fr, D1, *b, *bits);
-                self.e(fcmp(D0, D1, *bits));
-                // These conditions are all false for NaN, except `!=`.
-                let c = match cc {
-                    Cc::Eq => Cond::Eq,
-                    Cc::Ne => Cond::Ne,
-                    Cc::Lt => Cond::Mi,
-                    Cc::Le => Cond::Ls,
-                    Cc::Gt => Cond::Gt,
-                    Cc::Ge => Cond::Ge,
-                };
-                self.e(cset(X11, c as u32));
-                self.store(fr, X11, *d);
+                self.fcompare(fr, *a, *b, *bits);
+                let rd = self.def_x(fr, *d, X11);
+                self.e(cset(rd, float_cond(*cc) as u32));
+                self.done_x(fr, rd, *d);
             }
             Inst::IntCast { d, s, from, to, loc } => {
                 self.load(fr, X9, *s);
@@ -729,7 +1020,9 @@ impl Gen {
                 if *bits == 32 {
                     self.e(fcvt_s_to_d(D0, D0));
                 }
-                self.float_range_check(*to, *loc, traps);
+                if to.checked {
+                    self.float_range_check(*to, *loc, traps);
+                }
                 self.e(if to.signed { fcvtzs(X11, D0) } else { fcvtzu(X11, D0) });
                 self.store(fr, X11, *d);
             }
@@ -753,40 +1046,71 @@ impl Gen {
                 }
             }
             Inst::ObjAddr { d, obj } => {
-                let off = fr.objects[*obj];
-                if off < 4096 {
-                    self.e(add_imm(X9, SP, off as u32));
-                } else {
-                    self.mov_imm(X16, off as i64);
-                    self.e(add_ext(X9, SP, X16));
+                if !matches!(fr.place(*d), Place::Obj(_) | Place::None) {
+                    self.obj_addr(fr, X9, *obj);
+                    self.store(fr, X9, *d);
                 }
-                self.store(fr, X9, *d);
             }
             Inst::AddImm { d, s, imm } => {
-                self.addr_x9(fr, *s, *imm);
-                self.store(fr, X9, *d);
+                let rd = self.def_x(fr, *d, X9);
+                if *imm < 4096 {
+                    let x = self.use_x(fr, *s, X9);
+                    self.e(add_imm(rd, x, *imm as u32));
+                } else {
+                    self.addr_x9(fr, *s, *imm);
+                    if rd != X9 {
+                        self.e(mov(rd, X9));
+                    }
+                }
+                self.done_x(fr, rd, *d);
             }
             Inst::Load { d, p, off, mem } => {
+                if *mem == Mem::X64 && *off <= 32760 && off % 8 == 0 {
+                    let base = self.use_x(fr, *p, X9);
+                    if let Place::Fpr(x) = fr.place(*d) {
+                        if *off <= 16380 {
+                            self.e(ldr_d(x, base, *off as u32));
+                            return;
+                        }
+                    }
+                    let r = self.def_x(fr, *d, X10);
+                    self.e(ldr(r, base, *off as u32));
+                    self.done_x(fr, r, *d);
+                    return;
+                }
                 self.addr_x9(fr, *p, *off);
+                let r = self.def_x(fr, *d, X10);
                 self.e(match mem {
-                    Mem::I8 => ldrsb(X10, X9),
-                    Mem::I16 => ldrsh(X10, X9),
-                    Mem::I32 => ldrsw(X10, X9),
-                    Mem::U8 => ldrb(X10, X9, 0),
-                    Mem::U16 => ldrh(X10, X9),
-                    Mem::U32 => ldr_w(X10, X9),
-                    Mem::X64 => ldr(X10, X9, 0),
+                    Mem::I8 => ldrsb(r, X9),
+                    Mem::I16 => ldrsh(r, X9),
+                    Mem::I32 => ldrsw(r, X9),
+                    Mem::U8 => ldrb(r, X9, 0),
+                    Mem::U16 => ldrh(r, X9),
+                    Mem::U32 => ldr_w(r, X9),
+                    Mem::X64 => ldr(r, X9, 0),
                 });
-                self.store(fr, X10, *d);
+                self.done_x(fr, r, *d);
             }
             Inst::Store { p, off, s, mem } => {
+                if *mem == Mem::X64 && *off <= 32760 && off % 8 == 0 {
+                    let base = self.use_x(fr, *p, X9);
+                    if let Place::Fpr(x) = fr.place(*s) {
+                        if *off <= 16380 {
+                            self.e(str_d(x, base, *off as u32));
+                            return;
+                        }
+                    }
+                    let r = self.use_x(fr, *s, X10);
+                    self.e(str(r, base, *off as u32));
+                    return;
+                }
                 self.addr_x9(fr, *p, *off);
-                self.load(fr, X10, *s);
+                let r = self.use_x(fr, *s, X10);
                 self.e(match mem {
-                    Mem::I8 | Mem::U8 => strb(X10, X9, 0),
-                    Mem::I16 | Mem::U16 => strh(X10, X9),
-                    Mem::I32 | Mem::U32 => str_w(X10, X9),
-                    Mem::X64 => str(X10, X9, 0),
+                    Mem::I8 | Mem::U8 => strb(r, X9, 0),
+                    Mem::I16 | Mem::U16 => strh(r, X9),
+                    Mem::I32 | Mem::U32 => str_w(r, X9),
+                    Mem::X64 => str(r, X9, 0),
                 });
             }
             Inst::MemCopy { dst, src, size } => self.mem_copy(fr, *dst, *src, *size),
@@ -797,9 +1121,7 @@ impl Gen {
                 self.call(BL, Target::Import(IMP_MEMCPY));
             }
             Inst::BoundsDyn { idx, len, loc } => {
-                self.load(fr, X9, *idx);
-                self.load(fr, X10, *len);
-                self.e(cmp(X9, X10));
+                self.compare(fr, *idx, *len);
                 self.trap_if(Cond::Hs, Trap::Bounds, *loc, traps);
             }
             Inst::BufPtr { p, n } => {
@@ -820,17 +1142,26 @@ impl Gen {
                 self.store(fr, X1, *len);
             }
             Inst::IndexAddr { d, base, idx, size } => {
-                self.load(fr, X9, *base);
-                self.load(fr, X10, *idx);
-                self.mov_imm(X11, *size as i64);
-                self.e(mul(X10, X10, X11));
-                self.e(add(X9, X9, X10));
-                self.store(fr, X9, *d);
+                let b = self.use_x(fr, *base, X9);
+                let i = self.use_x(fr, *idx, X10);
+                let rd = self.def_x(fr, *d, X11);
+                if size.is_power_of_two() && *size <= 16 {
+                    self.e(add_lsl(rd, b, i, size.trailing_zeros()));
+                } else {
+                    self.mov_imm(X12, *size as i64);
+                    self.e(mul(X12, i, X12));
+                    self.e(add(rd, b, X12));
+                }
+                self.done_x(fr, rd, *d);
             }
             Inst::Bounds { idx, len, loc } => {
-                self.load(fr, X9, *idx);
-                self.mov_imm(X10, *len as i64);
-                self.e(cmp(X9, X10));
+                let x = self.use_x(fr, *idx, X9);
+                if *len < 4096 {
+                    self.e(cmp_imm(x, *len as u32));
+                } else {
+                    self.mov_imm(X10, *len as i64);
+                    self.e(cmp(x, X10));
+                }
                 // Unsigned compare: a negative index looks huge.
                 self.trap_if(Cond::Hs, Trap::Bounds, *loc, traps);
             }
@@ -1048,10 +1379,21 @@ impl Gen {
         }
     }
 
+    /// `normalize`, for a result that is not in x11.
+    fn normalize_in(&mut self, num: Num, loc: Loc, traps: &mut Traps, r: Reg) {
+        if r != X11 {
+            self.e(mov(X11, r));
+        }
+        self.normalize(num, loc, traps);
+        if r != X11 {
+            self.e(mov(r, X11));
+        }
+    }
+
     /// After an operation on 64-bit registers: narrow signed types trap, unsigned wrap.
     fn normalize(&mut self, num: Num, loc: Loc, traps: &mut Traps) {
         if num.signed {
-            if num.bits < 64 {
+            if num.bits < 64 && num.checked {
                 self.fit_check(num, loc, traps);
             }
         } else {
@@ -1060,7 +1402,9 @@ impl Gen {
     }
 
     fn int_cast(&mut self, from: Num, to: Num, loc: Loc, traps: &mut Traps) {
-        if to.signed {
+        if to.signed && !to.checked {
+            self.e(mov(X11, X9));
+        } else if to.signed {
             if !from.signed && from.bits == 64 {
                 // A u64 with the top bit set is negative when read as signed.
                 self.e(cmp_imm(X9, 0));
@@ -1104,81 +1448,92 @@ impl Gen {
         self.trap_if(if lo_inclusive { Cond::Lt } else { Cond::Le }, Trap::Convert, loc, traps);
     }
 
-    /// Operands in x9 and x10, result in x11.
-    fn bin(&mut self, op: Arith, num: Num, loc: Loc, traps: &mut Traps) {
-        let wide_signed = num.signed && num.bits == 64;
+    /// The registers may coincide; x11 and x12 are free to use.
+    fn bin(&mut self, op: Arith, num: Num, loc: Loc, traps: &mut Traps, rd: Reg, ra: Reg, rb: Reg) {
+        let wide_signed = num.signed && num.bits == 64 && num.checked;
         match op {
             Arith::Add => {
                 if wide_signed {
-                    self.e(adds(X11, X9, X10));
+                    self.e(adds(rd, ra, rb));
                     self.trap_if(Cond::Vs, Trap::Overflow, loc, traps);
                 } else {
-                    self.e(add(X11, X9, X10));
-                    self.normalize(num, loc, traps);
+                    self.e(add(rd, ra, rb));
+                    self.normalize_in(num, loc, traps, rd);
                 }
             }
             Arith::Sub => {
                 if wide_signed {
-                    self.e(subs(X11, X9, X10));
+                    self.e(subs(rd, ra, rb));
                     self.trap_if(Cond::Vs, Trap::Overflow, loc, traps);
                 } else {
-                    self.e(sub(X11, X9, X10));
-                    self.normalize(num, loc, traps);
+                    self.e(sub(rd, ra, rb));
+                    self.normalize_in(num, loc, traps, rd);
                 }
             }
             Arith::Mul => {
-                self.e(mul(X11, X9, X10));
                 if wide_signed {
-                    self.e(smulh(X12, X9, X10));
-                    self.e(cmp_asr(X12, X11, 63));
+                    self.e(smulh(X12, ra, rb));
+                    self.e(mul(rd, ra, rb));
+                    self.e(cmp_asr(X12, rd, 63));
                     self.trap_if(Cond::Ne, Trap::Overflow, loc, traps);
                 } else {
-                    self.normalize(num, loc, traps);
+                    self.e(mul(rd, ra, rb));
+                    self.normalize_in(num, loc, traps, rd);
                 }
             }
             Arith::Div => {
-                self.e(cmp_imm(X10, 0));
-                self.trap_if(Cond::Eq, Trap::DivZero, loc, traps);
+                if num.checked {
+                    self.e(cmp_imm(rb, 0));
+                    self.trap_if(Cond::Eq, Trap::DivZero, loc, traps);
+                }
                 if num.signed {
-                    if num.bits == 64 {
+                    if num.bits == 64 && num.checked {
                         // MIN / -1 is the only quotient that does not fit in 64 bits.
                         // Negating the dividend overflows exactly when it is MIN.
-                        self.e(cmn_imm(X10, 1));
+                        self.e(cmn_imm(rb, 1));
                         self.e(b_cond(Cond::Ne, 3));
-                        self.e(negs(X12, X9));
+                        self.e(negs(X12, ra));
                         self.trap_if(Cond::Vs, Trap::Overflow, loc, traps);
                     }
-                    self.e(sdiv(X11, X9, X10));
-                    self.normalize(num, loc, traps);
+                    self.e(sdiv(rd, ra, rb));
+                    self.normalize_in(num, loc, traps, rd);
                 } else {
-                    self.e(udiv(X11, X9, X10));
+                    self.e(udiv(rd, ra, rb));
                 }
             }
             Arith::Rem => {
-                self.e(cmp_imm(X10, 0));
-                self.trap_if(Cond::Eq, Trap::DivZero, loc, traps);
-                self.e(if num.signed { sdiv(X12, X9, X10) } else { udiv(X12, X9, X10) });
-                self.e(msub(X11, X12, X10, X9));
+                if num.checked {
+                    self.e(cmp_imm(rb, 0));
+                    self.trap_if(Cond::Eq, Trap::DivZero, loc, traps);
+                }
+                self.e(if num.signed { sdiv(X12, ra, rb) } else { udiv(X12, ra, rb) });
+                self.e(msub(rd, X12, rb, ra));
             }
-            Arith::And => self.e(and(X11, X9, X10)),
-            Arith::Or => self.e(orr(X11, X9, X10)),
-            Arith::Xor => self.e(eor(X11, X9, X10)),
+            Arith::And => self.e(and(rd, ra, rb)),
+            Arith::Or => self.e(orr(rd, ra, rb)),
+            Arith::Xor => self.e(eor(rd, ra, rb)),
             Arith::Shl => {
-                self.e(cmp_imm(X10, num.bits as u32));
-                self.trap_if(Cond::Hs, Trap::Shift, loc, traps);
-                self.e(lsl(X11, X9, X10));
+                if num.checked {
+                    self.e(cmp_imm(rb, num.bits as u32));
+                    self.trap_if(Cond::Hs, Trap::Shift, loc, traps);
+                }
                 if wide_signed {
-                    self.e(asr(X12, X11, X10));
-                    self.e(cmp(X12, X9));
+                    self.e(lsl(X11, ra, rb));
+                    self.e(asr(X12, X11, rb));
+                    self.e(cmp(X12, ra));
                     self.trap_if(Cond::Ne, Trap::Overflow, loc, traps);
+                    self.e(mov(rd, X11));
                 } else {
-                    self.normalize(num, loc, traps);
+                    self.e(lsl(rd, ra, rb));
+                    self.normalize_in(num, loc, traps, rd);
                 }
             }
             Arith::Shr => {
-                self.e(cmp_imm(X10, num.bits as u32));
-                self.trap_if(Cond::Hs, Trap::Shift, loc, traps);
-                self.e(if num.signed { asr(X11, X9, X10) } else { lsr(X11, X9, X10) });
+                if num.checked {
+                    self.e(cmp_imm(rb, num.bits as u32));
+                    self.trap_if(Cond::Hs, Trap::Shift, loc, traps);
+                }
+                self.e(if num.signed { asr(rd, ra, rb) } else { lsr(rd, ra, rb) });
             }
         }
     }
@@ -1186,7 +1541,7 @@ impl Gen {
 
 pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Object, String> {
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
-    for f in &m.funcs {
+    for f in m.funcs.iter().filter(|f| !f.dead) {
         for b in &f.blocks {
             for i in &b.insts {
                 if let Inst::CallC { sym, .. } = i {
@@ -1267,6 +1622,9 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     let mut func_pos = Vec::with_capacity(m.funcs.len());
     for f in &m.funcs {
         func_pos.push(g.here());
+        if f.dead {
+            continue;
+        }
         symbols.push((format!("_{}", f.name), g.here()));
         g.func(f, (fmt64, fmt32));
     }

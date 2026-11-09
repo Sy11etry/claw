@@ -1,0 +1,10 @@
+// expect: 1
+fn main() {
+    x := one()
+    sure x == 2
+    print(x)
+}
+
+fn one() int {
+    ret 1
+}

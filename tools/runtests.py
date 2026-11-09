@@ -11,6 +11,8 @@ tests/own/*.claw  like run, built with --alloc-stats: allocations must equal fre
 tests/check/*.claw  like run, but through `claw run`: every contract and the memory checker.
 tests/unit/*.claw  through `claw test`: the headers describe its report.
 tests/run again, in check mode: the checker must not complain about correct programs.
+tests/fast/*.claw  built with --fast; tests/stats/*.claw  the optimizer proves what it should.
+tools/fuzz_opt.py  random programs: optimized and unoptimized builds must agree.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
@@ -93,6 +95,47 @@ def unit_test(path):
     if p.stdout.splitlines() != headers(text, "expect"):
         return f"report differs\n  got:  {p.stdout.splitlines()}\n  want: {headers(text, 'expect')}"
     return None
+
+
+def fast_test(path, tmp):
+    """`claw build --fast`: still correct, but nothing is checked."""
+    text = path.read_text()
+    exe = tmp / ("fast_" + path.stem)
+    p = subprocess.run([CLAW, "build", path, "-o", exe, "--fast"], capture_output=True, text=True, env={"PATH": ""})
+    if p.returncode != 0:
+        return f"compile failed:\n{p.stderr}"
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return f"exit code {r.returncode}\nstderr: {r.stderr}"
+    if r.stdout.splitlines() != headers(text, "expect"):
+        return f"stdout mismatch\n  got:  {r.stdout.splitlines()}\n  want: {headers(text, 'expect')}"
+    return None
+
+
+def stats_test(path, tmp):
+    """The optimizer must really remove the checks it claims to be able to prove."""
+    text = path.read_text()
+    exe = tmp / ("stats_" + path.stem)
+    p = subprocess.run([CLAW, "build", path, "-o", exe, "--stats"], capture_output=True, text=True, env={"PATH": ""})
+    if p.returncode != 0:
+        return f"compile failed:\n{p.stderr}"
+    m = re.search(r"checks: (\d+) of (\d+) removed", p.stdout)
+    if not m:
+        return f"no statistics: {p.stdout!r}"
+    least = headers(text, "removes-at-least")
+    if least and int(m[1]) < int(least[0]):
+        return f"removed only {m[1]} of {m[2]}"
+    if re.search(r"^// removes-all-bounds", text, re.M):
+        dump = subprocess.run([CLAW, "build", path, "-o", exe, "--emit-cir"], capture_output=True, text=True, env={"PATH": ""})
+        if "BoundsDyn" in dump.stdout or "Bounds {" in dump.stdout:
+            return "a bounds check survived"
+    return None
+
+
+def fuzz(count):
+    """Random programs: the optimized build must behave exactly like the unoptimized one."""
+    p = subprocess.run([sys.executable, ROOT / "tools/fuzz_opt.py", str(count), "1"], capture_output=True, text=True)
+    return None if p.returncode == 0 else p.stdout[-800:]
 
 
 def own_test(path, tmp):
@@ -200,13 +243,30 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL own/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/fast").glob("*.claw")):
+            total += 1
+            msg = fast_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL fast/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/stats").glob("*.claw")):
+            total += 1
+            msg = stats_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL stats/{path.name}: {msg}")
+        total += 1
+        msg = fuzz(100)
+        if msg:
+            failures += 1
+            print(f"FAIL fuzz: {msg}")
         for path in sorted((ROOT / "tests/fmt").glob("*.claw")):
             total += 1
             msg = fmt_test(path, tmp)
             if msg:
                 failures += 1
                 print(f"FAIL fmt/{path.name}: {msg}")
-        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "tests/check").glob("*.claw")) + list((ROOT / "tests/unit").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
+        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "tests/check").glob("*.claw")) + list((ROOT / "tests/unit").glob("*.claw")) + list((ROOT / "tests/fast").glob("*.claw")) + list((ROOT / "tests/stats").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
             total += 1
             msg = fmt_stable(path, tmp)
             if msg:

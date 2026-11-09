@@ -1,0 +1,22 @@
+// expect: -3
+// expect: -1
+// expect: 3
+// expect: 1
+// expect: -4
+// expect: 0
+fn f(x int, k int) {
+    print(x / k)
+}
+
+fn g(x int, k int) {
+    print(x % k)
+}
+
+fn main() {
+    f(-7, 2)
+    g(-7, 2)
+    f(7, 2)
+    g(7, 2)
+    f(-8, 2)
+    g(-8, 2)
+}

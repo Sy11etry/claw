@@ -1,0 +1,9 @@
+// expect: 0
+fn main() {
+    a []int = []
+    mut t := 0
+    for i in 0..len(a) {
+        t += a[i]
+    }
+    print(t)
+}

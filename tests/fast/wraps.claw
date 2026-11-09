@@ -1,0 +1,10 @@
+// expect: -9223372036854775808
+fn main() {
+    mut x := 9223372036854775807
+    x += one()
+    print(x)
+}
+
+fn one() int {
+    ret 1
+}

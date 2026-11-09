@@ -1,0 +1,9 @@
+// expect: 210
+fn walk(n int, a int, b int, c int, d int, e int, f int, g int, h int, i int) int {
+    if n == 0 { ret a + b + c + d + e + f + g + h + i }
+    ret walk(n - 1, a + 1, b + 2, c + 3, d + 4, e + 5, f + 6, g + 7, h, i) + 0
+}
+
+fn main() {
+    print(walk(5, 0, 0, 0, 0, 0, 0, 0, 25, 45))
+}

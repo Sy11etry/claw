@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: division by zero
+fn z() int {
+    ret 0
+}
+
+fn main() {
+    print(10 / z())
+}

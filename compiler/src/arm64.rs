@@ -82,6 +82,40 @@ pub fn cmn_imm(rn: Reg, imm: u32) -> u32 {
 pub fn adds(rd: Reg, rn: Reg, rm: Reg) -> u32 {
     rrr(0xAB00_0000, rd, rn, rm)
 }
+pub fn adds_imm(rd: Reg, rn: Reg, imm: u32) -> u32 {
+    0xB100_0000 | (imm << 10) | (rn << 5) | rd
+}
+pub fn subs_imm(rd: Reg, rn: Reg, imm: u32) -> u32 {
+    0xF100_0000 | (imm << 10) | (rn << 5) | rd
+}
+/// `add rd, rn, rm, lsl #shift`
+pub fn add_lsl(rd: Reg, rn: Reg, rm: Reg, shift: u32) -> u32 {
+    0x8B00_0000 | (rm << 16) | (shift << 10) | (rn << 5) | rd
+}
+/// `ldr rt, [rn, rm, lsl #3]`
+pub fn ldr_idx(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    0xF860_7800 | (rm << 16) | (rn << 5) | rt
+}
+/// `str rt, [rn, rm, lsl #3]`
+pub fn str_idx(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    0xF820_7800 | (rm << 16) | (rn << 5) | rt
+}
+/// `ldrb wt, [rn, rm]`
+pub fn ldrb_idx(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    0x3860_6800 | (rm << 16) | (rn << 5) | rt
+}
+/// `strb wt, [rn, rm]`
+pub fn strb_idx(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    0x3820_6800 | (rm << 16) | (rn << 5) | rt
+}
+/// `ldr dt, [rn, rm, lsl #3]`
+pub fn ldr_d_idx(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    0xFC60_7800 | (rm << 16) | (rn << 5) | rt
+}
+/// `str dt, [rn, rm, lsl #3]`
+pub fn str_d_idx(rt: Reg, rn: Reg, rm: Reg) -> u32 {
+    0xFC20_7800 | (rm << 16) | (rn << 5) | rt
+}
 pub fn adcs(rd: Reg, rn: Reg, rm: Reg) -> u32 {
     rrr(0xBA00_0000, rd, rn, rm)
 }
@@ -295,6 +329,14 @@ pub fn fcvtzs(rd: Reg, rn: Reg) -> u32 {
 pub fn fcvtzu(rd: Reg, rn: Reg) -> u32 {
     0x9E79_0000 | (rn << 5) | rd
 }
+/// `fmov xd, dn`
+pub fn fmov_x_d(rd: Reg, rn: Reg) -> u32 {
+    0x9E66_0000 | (rn << 5) | rd
+}
+/// `fmov dd, dn`
+pub fn fmov_d_d(rd: Reg, rn: Reg) -> u32 {
+    0x1E60_4000 | (rn << 5) | rd
+}
 pub fn fmov_d_x(rd: Reg, rn: Reg) -> u32 {
     0x9E67_0000 | (rn << 5) | rd
 }
@@ -346,6 +388,17 @@ pub fn golden() -> Vec<(u32, String)> {
         s(cmp_imm(X0, 0), "cmp x0, #0"),
         s(cmp_imm(X10, 64), "cmp x10, #64"),
         s(cmn_imm(X10, 1), "cmn x10, #1"),
+        s(fmov_x_d(X9, 3), "fmov x9, d3"),
+        s(fmov_d_d(3, 17), "fmov d3, d17"),
+        s(adds_imm(X11, X9, 17), "adds x11, x9, #17"),
+        s(subs_imm(X11, X9, 4095), "subs x11, x9, #4095"),
+        s(add_lsl(X11, X9, X10, 3), "add x11, x9, x10, lsl #3"),
+        s(ldr_idx(X11, X9, X10), "ldr x11, [x9, x10, lsl #3]"),
+        s(str_idx(X11, X9, X10), "str x11, [x9, x10, lsl #3]"),
+        s(ldrb_idx(X11, X9, X10), "ldrb w11, [x9, x10]"),
+        s(strb_idx(X11, X9, X10), "strb w11, [x9, x10]"),
+        s(ldr_d_idx(3, X9, X10), "ldr d3, [x9, x10, lsl #3]"),
+        s(str_d_idx(3, X9, X10), "str d3, [x9, x10, lsl #3]"),
         s(adds(X11, X9, X10), "adds x11, x9, x10"),
         s(adcs(X14, X10, X12), "adcs x14, x10, x12"),
         s(sbcs(X14, X10, X12), "sbcs x14, x10, x12"),

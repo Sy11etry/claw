@@ -1,0 +1,14 @@
+// expect: 55
+// expect: 5.5
+fn sum(a int, b int, c int, d int, e int, f int, g int, h int, i int, j int) int {
+    ret a + b + c + d + e + f + g + h + i + j
+}
+
+fn fsum(a f64, b f64, c f64, d f64, e f64, f f64, g f64, h f64, i f64, j f64) f64 {
+    ret a + b + c + d + e + f + g + h + i + j
+}
+
+fn main() {
+    print(sum(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+    print(fsum(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0))
+}

@@ -11,9 +11,13 @@ mod lexer;
 mod lower;
 mod macho;
 mod modules;
+mod opt;
 mod parser;
+mod ranges;
+mod regalloc;
 mod sema;
 mod sha256;
+mod ssa;
 mod types;
 
 use diag::Diag;
@@ -24,7 +28,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "claw run <file.claw>            compile with all checks and run
 claw test <file.claw>           run the file's `test` blocks with all checks
-claw build <file.claw> [-o out] compile to an executable; contracts with calls are left out
+claw build <file.claw> [-o out] optimized executable; contracts with calls are left out
+    --fast                      remove every run-time check: speed like C, risk like C
+    --stats                     say how many checks were proved unnecessary
 claw check <file.claw>          report errors only
 claw fmt <file.claw> [--check]  put a file into the one standard format
 claw --version
@@ -38,10 +44,13 @@ struct Options {
     emit_cir: bool,
     check_only: bool,
     alloc_stats: bool,
+    /// `--fast`: no run-time checks at all.
+    fast: bool,
+    stats: bool,
 }
 
 fn parse_options(args: &[String]) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -49,6 +58,8 @@ fn parse_options(args: &[String]) -> Options {
             "--emit-cir" => o.emit_cir = true,
             "--check" => o.check_only = true,
             "--alloc-stats" => o.alloc_stats = true,
+            "--fast" => o.fast = true,
+            "--stats" => o.stats = true,
             "-o" => {
                 i += 1;
                 match args.get(i) {
@@ -92,7 +103,7 @@ enum Mode {
 
 /// Runs the front end; never returns on a source error.
 fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
-    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test };
+    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test, fast: o.fast && mode == Mode::Build };
     let loaded = match modules::load(&o.file, opts.check) {
         Ok(l) => l,
         Err((diags, files)) => report(o, diags, &files),
@@ -106,7 +117,14 @@ fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
     if mode == Mode::Build && slow > 0 {
         eprintln!("claw: note: {slow} checks that call functions are left out of this build; `claw run` and `claw test` do them");
     }
-    let module = lower::lower(&loaded.units, &checked, &loaded.base_names, opts);
+    let mut module = lower::lower(&loaded.units, &checked, &loaded.base_names, opts);
+    if mode == Mode::Build {
+        let stats = opt::optimize(&mut module, o.fast);
+        if o.stats {
+            let gone = stats.checks_before.saturating_sub(stats.checks_after);
+            println!("checks: {} of {} removed, {} calls inlined", gone, stats.checks_before, stats.inlined);
+        }
+    }
     (module, loaded.base_names.clone())
 }
 

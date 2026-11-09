@@ -1,0 +1,12 @@
+// expect: 6
+type A { v [3]int }
+
+fn main() {
+    mut a := A{[1, 2, 3]}
+    mut t := 0
+    for i in 0..3 {
+        t += a.v[i]
+        a.v[i] = 0
+    }
+    print(t)
+}

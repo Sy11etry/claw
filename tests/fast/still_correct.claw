@@ -1,0 +1,12 @@
+// expect: 5050
+// expect: [1, 2, 3]
+// expect: a-b
+fn main() {
+    mut t := 0
+    for i in 0..101 { t += i }
+    print(t)
+    mut a []int = [3, 1, 2]
+    sort(&a)
+    print(a)
+    print(join(["a", "b"], "-"))
+}

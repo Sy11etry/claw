@@ -1,4 +1,4 @@
-# Claw 0.5 card
+# Claw 0.6 card
 
 One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -178,6 +178,6 @@ test "div" {                             // run by `claw test`
 A contract only looks: no `&`, moves or effects. Inside one, integer `+ - *` in a comparison is exact.
 
 `claw run` and `claw test` check everything, including heap misuse and leaks in `claw fn`.
-`claw build` leaves out contracts that call functions.
+`claw build` leaves out contracts that call functions. `--fast` removes every check.
 
 Not yet (`E0900`): generic variants.

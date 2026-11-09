@@ -1,0 +1,13 @@
+// expect: 2
+// expect: 1
+fn main() {
+    mut a := 1
+    mut b := 2
+    for _ in 0..3 {
+        t := a
+        a = b
+        b = t
+    }
+    print(a)
+    print(b)
+}

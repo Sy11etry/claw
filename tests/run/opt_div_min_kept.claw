@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: integer overflow
+fn f(a int, b int) int {
+    ret a / b
+}
+
+fn main() {
+    print(f(-9223372036854775807 - 1, -1))
+}

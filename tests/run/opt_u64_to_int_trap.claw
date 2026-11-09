@@ -1,0 +1,9 @@
+// exit: 101
+// stderr: does not fit
+fn big() u64 {
+    ret 18446744073709551615
+}
+
+fn main() {
+    print(int(big()))
+}

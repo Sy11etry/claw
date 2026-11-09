@@ -1,0 +1,10 @@
+// removes-at-least: 1
+fn half(x int) int
+    need x != 0
+{
+    ret x / 2
+}
+
+fn main() {
+    print(half(8))
+}

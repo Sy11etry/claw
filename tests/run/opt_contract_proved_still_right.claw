@@ -1,0 +1,13 @@
+// expect: 2
+// exit: 101
+// stderr: need failed
+fn f(i int, n int) int
+    need i < n
+{
+    ret i
+}
+
+fn main() {
+    print(f(2, 3))
+    print(f(3, 3))
+}

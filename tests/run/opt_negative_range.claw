@@ -1,0 +1,12 @@
+// expect: 0
+fn f(n int) int {
+    mut t := 0
+    for i in 5..n {
+        t += i
+    }
+    ret t
+}
+
+fn main() {
+    print(f(-2))
+}

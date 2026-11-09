@@ -1,0 +1,12 @@
+// expect: P{2, 1}
+type P { x int, y int }
+
+fn flip(p P) P {
+    ret P{p.y, p.x}
+}
+
+fn main() {
+    mut p := P{1, 2}
+    p = flip(p)
+    print(p)
+}

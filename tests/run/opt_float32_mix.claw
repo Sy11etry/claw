@@ -1,0 +1,12 @@
+// expect: 3.5
+// expect: 7
+fn add(a f32, b f32) f32 {
+    ret a + b
+}
+
+fn main() {
+    x f32 = 1.5
+    y := add(x, 2.0)
+    print(y)
+    print(f64(y) * 2.0)
+}

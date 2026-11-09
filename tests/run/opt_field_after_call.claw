@@ -1,0 +1,15 @@
+// expect: 5
+// expect: 7
+type P { x int, y int }
+
+fn set(p &P, v int) {
+    p.x = v
+}
+
+fn main() {
+    mut p := P{1, 2}
+    set(&p, 5)
+    print(p.x)
+    set(&p, 7)
+    print(p.x)
+}

@@ -1,0 +1,9 @@
+// expect: 2
+fn main() {
+    s := "banana"
+    mut n := 0
+    for c, i in s {
+        if c == 'n' and i > 1 { n += 1 }
+    }
+    print(n)
+}

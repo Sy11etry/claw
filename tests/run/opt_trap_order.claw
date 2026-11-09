@@ -1,0 +1,14 @@
+// expect: 1
+// exit: 101
+// stderr: division by zero
+fn z() int {
+    ret 0
+}
+
+fn main() {
+    k := z()
+    print(1)
+    x := 5 / k
+    print(2)
+    print(x)
+}

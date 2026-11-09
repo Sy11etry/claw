@@ -50,6 +50,8 @@ pub struct Opts {
     pub check: bool,
     /// Build the `test` blocks of the root file.
     pub test: bool,
+    /// `--fast`: contracts are not compiled at all.
+    pub fast: bool,
 }
 
 /// What every function being lowered shares.
@@ -60,6 +62,7 @@ struct Env<'a, 'i> {
     funcs: &'i HashMap<String, &'a ast::Func>,
     synth: &'i RefCell<Synth>,
     check: bool,
+    fast: bool,
 }
 
 /// Word 0 of the runtime's state: set while a contract with calls is running.
@@ -73,6 +76,8 @@ struct FnLower<'a, 'i> {
     synth: &'i RefCell<Synth>,
     /// Every contract runs, not only the cheap ones.
     check: bool,
+    /// No contract runs.
+    fast: bool,
     /// Raw memory goes through the checker.
     instrument: bool,
     is_claw: bool,
@@ -124,7 +129,7 @@ pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: O
     let ids: HashMap<String, FuncId> = list.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
     let synth = RefCell::new(Synth { base: list.len(), jobs: Vec::new(), known: HashMap::new() });
     let by_name: HashMap<String, &'a ast::Func> = list.iter().map(|(n, f)| (n.clone(), *f)).collect();
-    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check };
+    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check, fast: opts.fast };
     let mut funcs: Vec<Func> = list.iter().map(|(n, f)| lower_func(n, f, &env)).collect();
     // Each generated function may ask for more, so the queue can grow as it runs.
     let mut next = 0;
@@ -147,6 +152,7 @@ fn new_lower<'a, 'i>(env: &Env<'a, 'i>, ret: Ty, is_main: bool) -> FnLower<'a, '
         funcs: env.funcs,
         synth: env.synth,
         check: env.check,
+        fast: env.fast,
         instrument: env.check,
         is_claw: false,
         in_contract: false,
@@ -197,7 +203,7 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
         }
     }
     let nparams = f.params.len() + l.sret.is_some() as usize;
-    l.sures = f.contracts.iter().filter(|x| x.sure && (env.check || !has_call(&x.e))).collect();
+    l.sures = f.contracts.iter().filter(|x| x.sure && !env.fast && (env.check || !has_call(&x.e))).collect();
     l.save_olds();
     l.block(&f.body);
     l.run_defers(0);
@@ -356,6 +362,9 @@ impl<'a, 'i> FnLower<'a, 'i> {
     /// Evaluates the callee's `need` clauses here, so a failure names this call.
     fn check_needs(&mut self, full: &str, args: &[VReg], at: Span) {
         let Some(&f) = self.funcs.get(full) else { return };
+        if self.fast {
+            return;
+        }
         let check = self.check;
         let needs: Vec<&'a ast::Contract> = f.contracts.iter().filter(|c| !c.sure && (check || !has_call(&c.e))).collect();
         if needs.is_empty() {
@@ -525,7 +534,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let hi = if self.num_of(e.ty.get()).signed {
             let k = self.constant(63);
             let d = self.vreg();
-            self.emit(Inst::Bin { op: Arith::Shr, d, a: v, b: k, num: Num { bits: 64, signed: true }, loc: loc(e.span) });
+            self.emit(Inst::Bin { op: Arith::Shr, d, a: v, b: k, num: Num { bits: 64, signed: true, checked: true }, loc: loc(e.span) });
             d
         } else {
             self.constant(0)
@@ -542,7 +551,8 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let mut blocks = self.blocks;
         let zeros: Vec<Inst> = self.all_flags.iter().map(|d| Inst::Const { d: *d, v: 0 }).collect();
         blocks[0].insts.splice(0..0, zeros);
-        Func { name, nparams, nvregs: self.nvregs, objects: self.objects, blocks }
+        let params = (0..nparams as VReg).collect();
+        Func { name, nparams, params, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
     }
 
     /// A new liveness flag, set right away.
@@ -749,7 +759,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             } else {
                 let k = self.constant(size as i64);
                 let bytes = self.vreg();
-                self.emit(Inst::Bin { op: Arith::Mul, d: bytes, a: n, b: k, num: Num { bits: 64, signed: false }, loc: at });
+                self.emit(Inst::Bin { op: Arith::Mul, d: bytes, a: n, b: k, num: Num { bits: 64, signed: false, checked: true }, loc: at });
                 self.emit(Inst::MemCopyDyn { dst: fresh, src: p, n: bytes });
             }
             self.store_seq(dst, fresh, n, n);
@@ -860,9 +870,9 @@ impl<'a, 'i> FnLower<'a, 'i> {
 
     fn num_of(&self, ty: Ty) -> Num {
         match self.t().kind(ty) {
-            Kind::Int { bits, signed } => Num { bits, signed },
-            Kind::Pointer(_) => Num { bits: 64, signed: false },
-            _ => Num { bits: 64, signed: true },
+            Kind::Int { bits, signed } => Num { bits, signed, checked: true },
+            Kind::Pointer(_) => Num { bits: 64, signed: false, checked: true },
+            _ => Num { bits: 64, signed: true, checked: true },
         }
     }
 
@@ -1127,7 +1137,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             }
             StmtKind::Match { subject, arms } => self.match_stmt(subject, arms),
             StmtKind::Sure(e, text) => {
-                if self.check || !has_call(e) {
+                if !self.fast && (self.check || !has_call(e)) {
                     let at = self.place_text(s.span);
                     self.check_cond(e, format!("trap: sure failed: `{text}` at {at}\n"));
                 }
@@ -1179,7 +1189,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         self.finish(Term::Jmp(latch));
 
         self.switch(latch);
-        self.emit(Inst::Inc { d: counter });
+        self.emit(Inst::AddImm { d: counter, s: counter, imm: 1 });
         self.finish(Term::Jmp(head));
         self.switch(exit);
     }
@@ -1477,7 +1487,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             let zero = self.constant(0);
             let n = self.vreg();
             let at = Loc { line: 0, col: 0, file: 0 };
-            self.emit(Inst::Bin { op: Arith::Sub, d: n, a: zero, b, num: Num { bits: 64, signed: false }, loc: at });
+            self.emit(Inst::Bin { op: Arith::Sub, d: n, a: zero, b, num: Num { bits: 64, signed: false, checked: true }, loc: at });
             n
         } else {
             b
@@ -1490,10 +1500,10 @@ impl<'a, 'i> FnLower<'a, 'i> {
     fn pointer_diff(&mut self, a: VReg, b: VReg, ty: Ty, span: Span) -> VReg {
         let Kind::Pointer(elem) = self.t().kind(ty) else { unreachable!("pointer difference") };
         let bytes = self.vreg();
-        self.emit(Inst::Bin { op: Arith::Sub, d: bytes, a, b, num: Num { bits: 64, signed: false }, loc: loc(span) });
+        self.emit(Inst::Bin { op: Arith::Sub, d: bytes, a, b, num: Num { bits: 64, signed: false, checked: true }, loc: loc(span) });
         let size = self.constant(self.t().size(elem).max(1) as i64);
         let d = self.vreg();
-        self.emit(Inst::Bin { op: Arith::Div, d, a: bytes, b: size, num: Num { bits: 64, signed: true }, loc: loc(span) });
+        self.emit(Inst::Bin { op: Arith::Div, d, a: bytes, b: size, num: Num { bits: 64, signed: true, checked: true }, loc: loc(span) });
         d
     }
 
@@ -1721,19 +1731,17 @@ impl<'a, 'i> FnLower<'a, 'i> {
         };
         // 0 <= start <= end <= len, checked as two unsigned comparisons.
         let n_plus = self.vreg();
-        self.emit(Inst::Mov { d: n_plus, s: n });
-        self.emit(Inst::Inc { d: n_plus });
+        self.emit(Inst::AddImm { d: n_plus, s: n, imm: 1 });
         self.emit(Inst::BoundsDyn { idx: end, len: n_plus, loc: loc(span) });
         let end_plus = self.vreg();
-        self.emit(Inst::Mov { d: end_plus, s: end });
-        self.emit(Inst::Inc { d: end_plus });
+        self.emit(Inst::AddImm { d: end_plus, s: end, imm: 1 });
         self.emit(Inst::BoundsDyn { idx: start, len: end_plus, loc: loc(span) });
 
         let size = self.t().size(self.elem_of(base_ty));
         let first = self.vreg();
         self.emit(Inst::IndexAddr { d: first, base: p, idx: start, size });
         let count = self.vreg();
-        self.emit(Inst::Bin { op: Arith::Sub, d: count, a: end, b: start, num: Num { bits: 64, signed: false }, loc: loc(span) });
+        self.emit(Inst::Bin { op: Arith::Sub, d: count, a: end, b: start, num: Num { bits: 64, signed: false, checked: true }, loc: loc(span) });
         let view = self.temp_obj(ty);
         let zero = self.constant(0);
         self.store_seq(view, first, count, zero);

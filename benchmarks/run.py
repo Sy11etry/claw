@@ -32,7 +32,9 @@ def measure_compile_speed():
             f"    for j in 0..b {{\n        if j % 2 == 0 {{\n            s += j\n        }}\n    }}\n"
             f"    ret s + {i}\n}}\n"
         )
-    parts.append("fn main() {\n    print(work0(1, 2))\n}\n")
+    # Every function is called: code nobody calls is no longer compiled at all.
+    calls = "".join(f"    t += work{i}(1, 2)\n" for i in range(n))
+    parts.append("fn main() {\n    mut t := 0\n" + calls + "    print(t)\n}\n")
     src = "\n".join(parts)
     path = OUT / "big.claw"
     path.write_text(src)
@@ -48,13 +50,15 @@ def main():
     rows = []
     for b in BENCHES:
         subprocess.run([CLAW, "build", HERE / f"{b}.claw", "-o", OUT / f"{b}_claw"], check=True)
+        subprocess.run([CLAW, "build", HERE / f"{b}.claw", "-o", OUT / f"{b}_fast", "--fast"], check=True)
         for opt in ["O0", "O2"]:
             subprocess.run(["clang", f"-{opt}", HERE / f"{b}.c", "-o", OUT / f"{b}_{opt}"], check=True)
         claw = median_run(OUT / f"{b}_claw")
+        fast = median_run(OUT / f"{b}_fast")
         o0 = median_run(OUT / f"{b}_O0")
         o2 = median_run(OUT / f"{b}_O2")
-        rows.append((b, o2, o0, claw))
-        print(f"{b:10} clang -O2 {o2:7.3f}s  clang -O0 {o0:7.3f}s  claw {claw:7.3f}s")
+        rows.append((b, o2, o0, claw, fast))
+        print(f"{b:10} clang -O2 {o2:7.3f}s  clang -O0 {o0:7.3f}s  claw {claw:7.3f}s  --fast {fast:7.3f}s")
     lines, elapsed = measure_compile_speed()
     speed = lines / elapsed
     print(f"compile: {lines} lines in {elapsed * 1000:.1f} ms = {speed:,.0f} lines/s")
@@ -63,13 +67,13 @@ def main():
     out = [
         f"# Benchmarks: {version}",
         "",
-        "Real measurements on this machine, median of 5 runs. Claw keeps overflow checks on; the C versions have none.",
+        "Real measurements on this machine, median of 5 runs. `claw build` keeps every check it cannot prove unnecessary; the C versions have none. `--fast` removes them all.",
         "",
-        "| Benchmark | clang -O2 | clang -O0 | Claw | Claw vs -O2 | Claw vs -O0 |",
-        "|---|---|---|---|---|---|",
+        "| Benchmark | clang -O2 | clang -O0 | Claw | Claw `--fast` | Claw vs -O2 | `--fast` vs -O2 |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for b, o2, o0, claw in rows:
-        out.append(f"| {b} | {o2:.3f} s | {o0:.3f} s | {claw:.3f} s | {claw / o2:.1f}x | {claw / o0:.1f}x |")
+    for b, o2, o0, claw, fast in rows:
+        out.append(f"| {b} | {o2:.3f} s | {o0:.3f} s | {claw:.3f} s | {fast:.3f} s | {claw / o2:.1f}x | {fast / o2:.1f}x |")
     out += ["", f"Compiler speed: {lines} lines in {elapsed * 1000:.1f} ms, about {speed:,.0f} lines/s (full build to a signed binary).", ""]
     (HERE / "RESULTS.md").write_text("\n".join(out))
 

@@ -1,0 +1,12 @@
+// expect: -4
+// expect: 1
+fn main() {
+    mut t := 0
+    mut r := 0
+    for i in -3..0 {
+        t += i / 2 - 1
+        r = (i + 2) % 4
+    }
+    print(t + 1)
+    print(r + 0)
+}
