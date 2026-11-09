@@ -231,8 +231,22 @@ fn count_stmt(s: &Stmt, n: &mut usize) {
     }
 }
 
-/// Reports every broken promise; returns how many checks only run in check mode.
-pub fn check(units: &[Unit], c: &Checked, diags: &mut Vec<Diag>) -> usize {
+/// What the effect check learned about the program.
+pub struct Report {
+    /// How many checks only run in check mode.
+    pub slow: usize,
+    known: HashMap<String, u8>,
+}
+
+impl Report {
+    /// Does this function, or anything it calls, touch the world?
+    pub fn has_io(&self, full: &str) -> bool {
+        self.known.get(full).is_none_or(|e| e & IO != 0)
+    }
+}
+
+/// Reports every broken promise.
+pub fn check(units: &[Unit], c: &Checked, diags: &mut Vec<Diag>) -> Report {
     let root = units.len() - 1;
     let mut nodes: Vec<Node> = Vec::new();
     let mut slow = 0;
@@ -299,5 +313,10 @@ pub fn check(units: &[Unit], c: &Checked, diags: &mut Vec<Diag>) -> usize {
             }
         }
     }
-    slow
+    for x in &c.computed {
+        if known.get(&x.full).is_some_and(|e| e & IO != 0) {
+            diags.push(Diag::new("E0171", x.span, format!("`{}` is computed while compiling, so it cannot use `+io`", x.name)));
+        }
+    }
+    Report { slow, known }
 }

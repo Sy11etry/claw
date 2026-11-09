@@ -1,0 +1,12 @@
+// error: E0174
+fn pos(a int) int
+    need a > 0
+{
+    ret a
+}
+
+const x int = pos(0)
+
+fn main() {
+    print(x)
+}

@@ -1,4 +1,4 @@
-# Claw 0.6 card
+# Claw 0.7 card
 
 One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -8,6 +8,7 @@ type Shape = Circle{r f64} | Dot         // variants
 type ParseErr = Empty | Bad{at int}
 
 const limit = 100
+const big int = twice(limit)             // typed: may call functions without `+io`; runs while compiling
 
 fn add(a Point, b Point) Point {         // parameters are read-only
     ret Point{a.x + b.x, a.y + b.y}      // struct fields are positional
@@ -40,7 +41,7 @@ fn main() {                              // required
     for s > 40 { s -= 1 }                // while
     for { break }                        // forever
     if s == 40 {
-        print("s = {s}, x = {x}, sum = {s + x}")
+        print("s = {s}, sum = {s + x}")
     } else {
         print(y)
     }
@@ -91,8 +92,8 @@ fn keep(own s str) Box { ... }           // `own`: takes it over; call with keep
 
 fn demo() {
     a := names()
-    b := a                               // `a` has moved: using it now is an error
-    c := copy(b)                         // copies are always written out
+    b := a                               // `a` moved; using it is an error
+    c := copy(b)                         // copies are explicit
     s := "n = {len(c)}"                  // `{expr}` builds a str
     v := b[1..]                          // read-only view; also `[..2]`, works on str
     print(v)
@@ -114,7 +115,7 @@ use lib.geo                              // lib/geo.claw, known as `geo`
 
 type Pair[A, B] { a A, b B }
 
-pub fn max[T](a T, b T) T {              // visible to other modules
+pub fn max[T](a T, b T) T {              // exported
     if a > b { ret a }
     ret b
 }
@@ -128,12 +129,12 @@ fn demo() {
 }
 ```
 
-There are no methods: write `area(q)`, not `q.area()`.
+No methods: `area(q)`.
 
 ## Claw mode: `claw fn` is C
 
 ```claw
-extern fn strlen(s *u8) u64              // any libSystem function; callable from `claw fn`
+extern fn strlen(s *u8) u64              // any libSystem function
 
 type Node { next *Node, v int }
 
@@ -157,7 +158,7 @@ a pointer. `sizeof[T]()` is the size in bytes. `cast` converts between pointers,
 where `*u8` is expected is its NUL-terminated bytes. Arithmetic and array bounds stay checked in `claw fn`;
 raw pointers do not.
 
-In `claw fn`, `a.ptr`, `a.len`, `a.cap` of `[]T` and `str` are open to change.
+`claw fn` may change `a.ptr a.len a.cap` of `[]T` and `str`.
 
 ## Contracts, effects, tests
 
@@ -169,7 +170,7 @@ pub fn div(a int, b int) int +io
     ret a / b
 }
 
-test "div" {                             // run by `claw test`
+test "div" {
     sure div(6, 2) == 3                  // works in any body
 }
 ```
@@ -179,5 +180,6 @@ A contract only looks: no `&`, moves or effects. Inside one, integer `+ - *` in 
 
 `claw run` and `claw test` check everything, including heap misuse and leaks in `claw fn`.
 `claw build` leaves out contracts that call functions. `--fast` removes every check.
+`claw test` also fuzzes functions without `+io`. `claw why f.claw` explains a failure. `claw fix f.claw` applies patches.
 
 Not yet (`E0900`): generic variants.

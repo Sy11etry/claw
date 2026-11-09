@@ -1,0 +1,31 @@
+fn half(x int) int
+    sure ret * 2 == x
+{
+    ret x / 2
+}
+
+test "half of four" {
+    sure half(4) == 2
+}
+
+test "half of six is wrong" {
+    y := half(6)
+    z := y + 1
+    sure z == 3
+}
+// expect: FAIL half of six is wrong
+// expect:   trap: sure failed: `z == 3` at blocks_and_auto.claw:14:5
+// expect:     z = 4
+// expect:   why    blocks_and_auto.claw:1  fn half(x int) int    x = 6
+// expect:          blocks_and_auto.claw:4  ret x / 2
+// expect:          blocks_and_auto.claw:12  y := half(6)    y = 3
+// expect:          blocks_and_auto.claw:13  z := y + 1    z = 4
+// expect:          blocks_and_auto.claw:14  sure z == 3    z = 4
+// expect: FAIL half: sure failed: `ret * 2 == x` in half at blocks_and_auto.claw:2:10
+// expect:   input  half(1)
+// expect:   why    blocks_and_auto.claw:1  fn half(x int) int    x = 1
+// expect:          blocks_and_auto.claw:4  ret x / 2
+// expect:          blocks_and_auto.claw:2  sure ret * 2 == x    ret = 0, x = 1
+// expect: 1 passed, 1 failed
+// expect: auto: 1 functions, 3 inputs, 1 failed
+// exit: 1

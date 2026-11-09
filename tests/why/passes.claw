@@ -1,0 +1,5 @@
+// expect: no failure: the program ran to the end
+// exit: 0
+fn main() {
+    print(1)
+}

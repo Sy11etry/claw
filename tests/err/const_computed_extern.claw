@@ -1,0 +1,12 @@
+// error: E0174
+extern fn getpid() i32
+
+claw fn pid() int {
+    ret int(getpid())
+}
+
+const x int = pid()
+
+fn main() {
+    print(x)
+}

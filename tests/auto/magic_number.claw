@@ -1,0 +1,14 @@
+fn hidden(x int) int {
+    if x == 1337 {
+        ret 1 / (x - 1337)
+    }
+    ret x
+}
+// expect: FAIL hidden: division by zero at magic_number.claw:3:13
+// expect:   input  hidden(1337)
+// expect:   why    magic_number.claw:1  fn hidden(x int) int {    x = 1337
+// expect:          magic_number.claw:2  if x == 1337 {
+// expect:          magic_number.claw:3  ret 1 / (x - 1337)    right = 0
+// expect:   fix    add `need x - 1337 != 0` to hidden
+// expect: auto: 1 functions, 229 inputs, 1 failed
+// exit: 1

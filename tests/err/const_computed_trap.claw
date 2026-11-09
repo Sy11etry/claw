@@ -1,0 +1,10 @@
+// error: E0174
+fn div(a int, b int) int {
+    ret a / b
+}
+
+const x int = div(1, 0)
+
+fn main() {
+    print(x)
+}

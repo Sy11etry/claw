@@ -1,9 +1,9 @@
 //! Finds and parses every file a program needs. One file is one module.
 
-use crate::ast::Program;
+use crate::ast::{Block, Expr, ExprKind, Func, Program, Stmt, StmtKind};
 use crate::diag::{Diag, Span};
 use crate::{lexer, parser};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct Unit {
@@ -101,10 +101,11 @@ impl Loader {
         if self.diags.len() > before {
             return None;
         }
-        let program = parser::Parser::new(toks, &mut self.diags).with_source(&src).parse_program();
+        let mut program = parser::Parser::new(toks, &mut self.diags).with_source(&src).parse_program();
         if self.diags.len() > before {
             return None;
         }
+        computed_consts(&mut program);
 
         self.in_progress.push(key.clone());
         if from.is_none() {
@@ -137,6 +138,51 @@ impl Loader {
         let idx = self.units.len() - 1;
         self.done.insert(key, idx);
         Some(idx)
+    }
+}
+
+/// Literals and arithmetic on earlier simple constants: sema can do these by itself.
+fn is_simple(e: &Expr, computed: &HashSet<String>) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) | ExprKind::Bool(_) => true,
+        ExprKind::Var(n) => !computed.contains(n),
+        ExprKind::Unary { e, .. } => is_simple(e, computed),
+        ExprKind::Binary { l, r, .. } => is_simple(l, computed) && is_simple(r, computed),
+        _ => false,
+    }
+}
+
+/// `const x int = f(3)` becomes a hidden `fn const x() int { ret f(3) }`, run while compiling.
+fn computed_consts(p: &mut Program) {
+    // Constants can refer to later ones, so repeat until the set stops growing.
+    let mut computed = HashSet::new();
+    loop {
+        let before = computed.len();
+        let more: Vec<String> = p.consts.iter().filter(|c| c.ty.is_some() && !is_simple(&c.value, &computed)).map(|c| c.name.clone()).collect();
+        computed.extend(more);
+        if computed.len() == before {
+            break;
+        }
+    }
+    for c in p.consts.iter_mut().filter(|c| computed.contains(&c.name)) {
+        let Some(ty) = c.ty.clone() else { continue };
+        c.computed = true;
+        let value = std::mem::replace(&mut c.value, Expr::new(ExprKind::Int(0), c.span));
+        p.funcs.push(Func {
+            name: format!("const {}", c.name),
+            name_span: c.span,
+            public: false,
+            claw: false,
+            tparams: Vec::new(),
+            addressed: Default::default(),
+            params: Vec::new(),
+            ret: Some(ty),
+            contracts: Vec::new(),
+            effects: Vec::new(),
+            sig_end: c.span,
+            test: None,
+            body: Block { stmts: vec![Stmt { span: value.span, kind: StmtKind::Ret(Some(value)) }], end: c.span },
+        });
     }
 }
 

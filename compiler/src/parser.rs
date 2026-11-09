@@ -281,7 +281,7 @@ impl<'a> Parser<'a> {
         let ty = if self.at_op("=") { None } else { Some(self.parse_type()?) };
         self.expect_op("=")?;
         let value = self.parse_expr(0)?;
-        Ok(ConstDecl { name, span, public, ty, value })
+        Ok(ConstDecl { name, span, public, ty, value, computed: false })
     }
 
     fn parse_fields(&mut self) -> PResult<Vec<FieldDecl>> {

@@ -1,0 +1,13 @@
+fn avg(xs []int) int {
+    mut total := 0
+    for x in xs { total += x }
+    n := len(xs)
+    ret total / n
+}
+// expect: FAIL avg: division by zero at div_zero.claw:5:9
+// expect:   input  avg([])
+// expect:   why    div_zero.claw:4  n := len(xs)    n = 0
+// expect:          div_zero.claw:5  ret total / n    right = 0
+// expect:   fix    add `need len(xs) != 0` to avg
+// expect: auto: 1 functions, 1 inputs, 1 failed
+// exit: 1

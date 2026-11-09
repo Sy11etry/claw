@@ -1,0 +1,16 @@
+fn get(xs []int, i int) int
+    need i >= 0 and i < len(xs)
+{
+    ret xs[i]
+}
+
+fn first(xs []int) int {
+    ret get(xs, 0)
+}
+// expect: FAIL first: need failed: `i >= 0 and i < len(xs)` in get at callee_need.claw:8:9
+// expect:   input  first([])
+// expect:   why    callee_need.claw:2  need i >= 0 and i < len(xs)
+// expect:          callee_need.claw:8  ret get(xs, 0)    i = 0, xs = []
+// expect:   fix    add `need 0 < len(xs)` to first
+// expect: auto: 2 functions, 4001 inputs, 1 failed
+// exit: 1

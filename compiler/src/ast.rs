@@ -94,6 +94,8 @@ pub struct ConstDecl {
     pub public: bool,
     pub ty: Option<TypeExpr>,
     pub value: Expr,
+    /// The value needs running code; it became the function `const <name>`.
+    pub computed: bool,
 }
 
 #[derive(Debug, Clone)]

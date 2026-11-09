@@ -33,6 +33,7 @@ python3 tools/install.py                                    # установка
 
 `compiler/src`: `lexer → parser → ast → sema → effects → lower → cir → codegen (arm64) → macho + sha256`, ошибки в `diag`.
 Режимы: `claw build` без контрактов с вызовами; `claw run` и `claw test` со всеми проверками и `std/check_rt.claw`.
+Интерпретатор `interp` исполняет CIR (режим lowering `Opts.interp`): на нём стоят `ctfe` (вычисление `const`), `fuzz` (автотесты) и `why` (причина падения). Он обязан совпадать с машинным кодом: это проверяют `tools/runtests.py` и `tools/fuzz_opt.py`.
 Stage 0 на Rust без внешних crates. Цель только macOS ARM64 до итерации 10.
 
 Формат Mach-O и подписи сверяй с реальным выводом `clang` (`otool -l`, `codesign -dvvv`, `dyld_info`), а не по памяти.

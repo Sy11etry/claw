@@ -1,0 +1,10 @@
+claw fn keep(n int) int {
+    p := alloc[int](2)
+    p[0] = n
+    ret p[0]
+}
+// expect: FAIL keep: memory leak: 1 blocks, 16 bytes never released
+// expect:   input  keep(0)
+// expect:   why    leak.claw:2  p := alloc[int](2)
+// expect: auto: 1 functions, 1 inputs, 1 failed
+// exit: 1

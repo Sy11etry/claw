@@ -1,0 +1,16 @@
+type Point { x int, y i32 }
+type Tag = Small | Big{n u8}
+
+fn sum(p Point, q ?int, a [3]u8, t Tag, s str, xs []Point, f f64, b bool) int {
+    mut total := int(a[0]) + len(s) + len(xs)
+    if b and f > 0.5 { total += 1 }
+    match t {
+        Small: total += 1
+        Big{n}: total += int(n)
+    }
+    n := q else 0
+    if n > 100 or n < -100 { ret 0 }
+    if p.x > 100 or p.x < -100 { ret 0 }
+    ret total + n + p.x
+}
+// expect: auto: 1 functions, 4000 inputs, 0 failed

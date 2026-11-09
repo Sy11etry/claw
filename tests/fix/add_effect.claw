@@ -1,0 +1,9 @@
+pub fn make() []int {
+    mut a []int = []
+    push(&a, 1)
+    ret a
+}
+
+fn main() {
+    print(make())
+}

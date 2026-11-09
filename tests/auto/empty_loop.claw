@@ -1,0 +1,7 @@
+fn spin(x int) int {
+    if x == 0 {
+        for { }
+    }
+    ret x
+}
+// expect: auto: 1 functions, 559 inputs, 0 failed

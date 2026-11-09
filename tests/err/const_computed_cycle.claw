@@ -1,0 +1,11 @@
+// error: E0175
+fn f() int {
+    ret b
+}
+
+const a int = f()
+const b int = a + 1
+
+fn main() {
+    print(a)
+}

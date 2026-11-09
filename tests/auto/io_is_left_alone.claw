@@ -1,0 +1,12 @@
+fn show(x int) +io {
+    print(1 / x)
+}
+
+fn fine(x int) int {
+    ret x & 1
+}
+
+claw fn raw(p *int) int {
+    ret *p
+}
+// expect: auto: 1 functions, 4000 inputs, 0 failed, 1 skipped

@@ -1,0 +1,11 @@
+// error: E0126
+fn f() int {
+    ret 3
+}
+
+const n int = f()
+
+fn main() {
+    a [n]int = [0...]
+    print(a)
+}

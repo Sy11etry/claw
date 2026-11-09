@@ -1,0 +1,15 @@
+fn abs(x int) int
+    need x > -1000000
+    sure ret >= 0
+{
+    if x < -5 { ret -x }
+    if x < 0 { ret x }
+    ret x
+}
+// expect: FAIL abs: sure failed: `ret >= 0` in abs at sure_broken.claw:3:10
+// expect:   input  abs(-1)
+// expect:   why    sure_broken.claw:1  fn abs(x int) int    x = -1
+// expect:          sure_broken.claw:6  if x < 0 { ret x }
+// expect:          sure_broken.claw:3  sure ret >= 0    ret = -1
+// expect: auto: 1 functions, 6 inputs, 1 failed
+// exit: 1

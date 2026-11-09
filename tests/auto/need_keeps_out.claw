@@ -1,0 +1,16 @@
+fn avg(xs []int) int
+    need len(xs) > 0
+{
+    mut best := xs[0]
+    for x in xs {
+        if x > best { best = x }
+    }
+    ret best
+}
+
+fn pos(a int) int
+    need a > 0 and a < 1000
+{
+    ret 100 / a
+}
+// expect: auto: 2 functions, 8000 inputs, 0 failed

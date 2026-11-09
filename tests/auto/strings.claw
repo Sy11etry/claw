@@ -1,0 +1,19 @@
+fn second_char(s str) u8
+    need starts_with(s, "ab")
+{
+    ret s[1]
+}
+
+fn digit(s str) int ! NumErr {
+    ret to_int(s)?
+}
+
+fn risky(s str) u8 {
+    ret s[4]
+}
+// expect: FAIL risky: index out of bounds at strings.claw:12:9
+// expect:   input  risky("")
+// expect:   why    strings.claw:12  ret s[4]    index = 4, len = 0
+// expect:   fix    add `need 4 < len(s)` to risky
+// expect: auto: 3 functions, 8001 inputs, 1 failed
+// exit: 1

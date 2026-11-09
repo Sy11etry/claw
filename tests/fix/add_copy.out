@@ -1,0 +1,6 @@
+fn main() {
+    a []int = [1, 2]
+    b := copy(a)
+    print(a)
+    print(b)
+}

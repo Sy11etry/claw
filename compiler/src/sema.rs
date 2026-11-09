@@ -22,6 +22,17 @@ pub enum ConstVal {
     Int(i128),
     Float(f64),
     Bool(bool),
+    /// Worked out by running code after checking: an index into `Checked::computed`.
+    Computed(usize),
+}
+
+/// A `const` whose value needs a function call.
+pub struct ComputedConst {
+    pub name: String,
+    /// The hidden function that returns it.
+    pub full: String,
+    pub ty: Ty,
+    pub span: Span,
 }
 
 #[derive(Clone, Copy)]
@@ -35,6 +46,7 @@ pub struct Checked {
     pub sigs: HashMap<String, FnSig>,
     /// One checked copy of a template per set of type arguments.
     pub instances: Vec<Func>,
+    pub computed: Vec<ComputedConst>,
 }
 
 struct Var {
@@ -83,6 +95,7 @@ struct Mod<'a> {
 }
 
 struct Global<'a> {
+    computed: Vec<ComputedConst>,
     types: Types,
     mods: Vec<Mod<'a>>,
     cur: usize,
@@ -155,6 +168,10 @@ impl<'a> Global<'a> {
                     Size::Lit(v) => *v,
                     Size::Name(name) => match self.mods[self.cur].consts.get(name) {
                         Some((ConstVal::Int(v), ty, _)) if *ty != ERR => *v,
+                        Some((ConstVal::Computed(_), _, _)) => {
+                            diags.push(Diag::new("E0126", t.span, format!("array size `{name}` comes from a function call, so it is not known while types are checked")));
+                            return ERR;
+                        }
                         _ => {
                             diags.push(Diag::new("E0126", t.span, format!("array size `{name}` must be a number or an integer `const`")));
                             return ERR;
@@ -493,7 +510,7 @@ fn check_case(name: &str, upper: bool, what: &str, span: Span, diags: &mut Vec<D
 
 fn eval_const(g: &Global, e: &Expr, diags: &mut Vec<Diag>) -> Option<ConstVal> {
     let bad = |diags: &mut Vec<Diag>, span: Span| {
-        diags.push(Diag::new("E0139", span, "a `const` must be computable from literals and earlier constants"));
+        diags.push(Diag::new("E0139", span, "a `const` must be computable from literals and earlier constants; with a stated type it may call functions: `const x int = f()`"));
         None
     };
     match &e.kind {
@@ -502,8 +519,8 @@ fn eval_const(g: &Global, e: &Expr, diags: &mut Vec<Diag>) -> Option<ConstVal> {
         ExprKind::Char(c) => Some(ConstVal::Int(*c as i128)),
         ExprKind::Bool(b) => Some(ConstVal::Bool(*b)),
         ExprKind::Var(n) => match g.mods[g.cur].consts.get(n) {
+            Some((ConstVal::Computed(_), _, _)) | None => bad(diags, e.span),
             Some((v, _, _)) => Some(*v),
-            None => bad(diags, e.span),
         },
         ExprKind::Unary { op, e: inner } => match (op, eval_const(g, inner, diags)?) {
             (UnOp::Neg, ConstVal::Int(v)) => Some(ConstVal::Int(-v)),
@@ -555,6 +572,13 @@ fn collect_consts(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
             diags.push(Diag::new("E0102", c.span, format!("`{}` is already defined", c.name)));
             continue;
         }
+        if c.computed {
+            // Its type may be declared further down; `resolve_computed` fills it in.
+            let id = g.computed.len();
+            g.computed.push(ComputedConst { name: c.name.clone(), full: format!("{}const {}", g.mods[g.cur].prefix, c.name), ty: ERR, span: c.span });
+            g.mods[g.cur].consts.insert(c.name.clone(), (ConstVal::Computed(id), ERR, c.public));
+            continue;
+        }
         let want = c.ty.as_ref().map(|t| g.resolve(t, diags));
         let v = match eval_const(g, &c.value, diags) {
             Some(v) => v,
@@ -568,6 +592,7 @@ fn collect_consts(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
             (ConstVal::Int(n), None) => (ConstVal::Int(n), INT),
             (ConstVal::Float(n), None) => (ConstVal::Float(n), F64),
             (ConstVal::Bool(b), None) => (ConstVal::Bool(b), BOOL),
+            (ConstVal::Computed(_), None) => unreachable!("eval_const never returns this"),
             (ConstVal::Int(n), Some(t)) if g.types.is_float(t) => (ConstVal::Float(n as f64), t),
             (ConstVal::Float(n), Some(t)) if g.types.is_float(t) => (ConstVal::Float(n), t),
             (ConstVal::Bool(b), Some(BOOL)) => (ConstVal::Bool(b), BOOL),
@@ -587,6 +612,32 @@ fn collect_consts(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
         }
         g.mods[g.cur].consts.insert(c.name.clone(), (v, ty, c.public));
     }
+}
+
+/// Now that every type is known, gives the computed constants theirs.
+fn resolve_computed(g: &mut Global, p: &Program, diags: &mut Vec<Diag>) {
+    for c in p.consts.iter().filter(|c| c.computed) {
+        let Some((ConstVal::Computed(id), _, public)) = g.mods[g.cur].consts.get(&c.name).copied() else { continue };
+        let ty = g.resolve(c.ty.as_ref().expect("only typed constants are computed"), diags);
+        if ty != ERR && !const_data(&g.types, ty) {
+            diags.push(Diag::new("E0173", c.span, format!("a computed `const` cannot be {}: it must be plain data or `str`", g.types.name(ty))));
+        }
+        g.computed[id].ty = ty;
+        g.mods[g.cur].consts.insert(c.name.clone(), (ConstVal::Computed(id), ty, public));
+    }
+}
+
+/// Can the value be written into the program as bytes?
+fn const_data(t: &Types, ty: Ty) -> bool {
+    fn plain(t: &Types, ty: Ty) -> bool {
+        match t.kind(ty) {
+            Kind::Int { .. } | Kind::Float { .. } | Kind::Bool => true,
+            Kind::Array(e, _) => plain(t, e),
+            Kind::Struct(id) => t.structs[id].fields.iter().all(|f| plain(t, f.ty)) && !t.user_drop.contains_key(&ty),
+            _ => false,
+        }
+    }
+    ty == STR || plain(t, ty)
 }
 
 fn define_name(g: &mut Global, name: &str, def: NameDef, public: bool, span: Span, diags: &mut Vec<Diag>) -> bool {
@@ -610,7 +661,7 @@ fn declare_types<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
                 check_case(n, true, "type parameter", *sp, diags);
             }
             if matches!(d.body, TypeBody::Variants(_)) {
-                diags.push(Diag::new("E0900", d.span, "generic variants are not available in claw 0.5; use a generic struct or `?T`"));
+                diags.push(Diag::new("E0900", d.span, "generic variants are not available yet; use a generic struct or `?T`"));
             } else {
                 let m = &mut g.mods[g.cur];
                 if m.names.contains_key(&d.name) || m.gtypes.contains_key(&d.name) {
@@ -722,7 +773,7 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
         if !f.claw {
             let bad = f.params.iter().zip(&params).find(|(_, t)| g.types.is_ptr(**t)).map(|(x, _)| x.span);
             if let Some(span) = bad.or(if g.types.is_ptr(ret) { Some(f.name_span) } else { None }) {
-                diags.push(Diag::new("E0140", span, "pointers only exist inside `claw fn`").fix(f.name_span, "claw ", "make it a `claw fn`"));
+                diags.push(Diag::new("E0140", span, "pointers only exist inside `claw fn`").suggest(Span { start: f.name_span.start.saturating_sub(3), end: f.name_span.start.saturating_sub(3), ..f.name_span }, "claw ", "make it a `claw fn`"));
             }
         }
         g.mods[g.cur].funcs.insert(f.name.clone(), (None, f.public));
@@ -830,6 +881,7 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
         too_many: false,
         depth: 0,
         work: Vec::new(),
+        computed: Vec::new(),
     };
 
     for (i, u) in units.iter().enumerate() {
@@ -851,6 +903,10 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
     }
     g.layout_ready = true;
 
+    for (i, u) in units.iter().enumerate() {
+        g.cur = i;
+        resolve_computed(&mut g, &u.program, diags);
+    }
     for (i, u) in units.iter().enumerate() {
         g.cur = i;
         collect_funcs(&mut g, &u.program, diags);
@@ -911,7 +967,7 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
         }
     }
 
-    Checked { types: g.types, sigs: g.sigs, instances }
+    Checked { types: g.types, sigs: g.sigs, instances, computed: g.computed }
 }
 
 struct Ctx<'a, 'b> {
@@ -1120,7 +1176,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         for (name, v) in scope {
             self.moved.remove(&name);
             if !v.read && !(v.by_ref && v.written) {
-                let d = Diag::new("E0105", v.span, format!("`{name}` is never read")).fix(v.span, "_", format!("rename `{name}` to `_`"));
+                let d = Diag::new("E0105", v.span, format!("`{name}` is never read")).suggest(v.span, "_", format!("rename `{name}` to `_`"));
                 self.diags.push(d);
             } else if v.mutable && !v.written && !v.by_ref {
                 let d = Diag::new("E0116", v.span, format!("`{name}` is `mut` but never changes")).fix(v.decl, "", "remove `mut`");
@@ -1164,7 +1220,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 return;
             }
             if got == inner {
-                let d = Diag::new("E0157", e.span, "this parameter changes the value, so write `&` here").fix(e.span, "&", "add `&`");
+                let d = Diag::new("E0157", e.span, "this parameter changes the value, so write `&` here").fix(e.span.before(), "&", "add `&`");
                 self.diags.push(d);
                 if let ExprKind::Var(n) = &e.kind {
                     if let Some(v) = self.lookup(n) {
@@ -1424,7 +1480,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 match &e.kind {
                     ExprKind::Call { .. } | ExprKind::Try(_) | ExprKind::Else { .. } => {
                         if got != VOID && got != ERR {
-                            let d = Diag::new("E0111", e.span, "result is not used").fix(e.span, "_ = ", "assign it to `_` if it really does not matter");
+                            let d = Diag::new("E0111", e.span, "result is not used").suggest(e.span.before(), "_ = ", "assign it to `_` if it really does not matter");
                             self.diags.push(d);
                         }
                     }

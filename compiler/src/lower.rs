@@ -45,13 +45,25 @@ impl Synth {
 
 /// What a build is for.
 #[derive(Clone, Copy)]
-pub struct Opts {
+pub struct Opts<'c> {
     /// Every contract, and the memory checker.
     pub check: bool,
     /// Build the `test` blocks of the root file.
     pub test: bool,
     /// `--fast`: contracts are not compiled at all.
     pub fast: bool,
+    /// For the interpreter: it watches memory itself and wants to know the source lines.
+    pub interp: bool,
+    /// Values of the `const`s that need a call; empty while they are being worked out.
+    pub consts: &'c [ConstData],
+}
+
+/// The result of running a `const` at compile time.
+#[derive(Clone, Debug)]
+pub enum ConstData {
+    Scalar(u64),
+    Bytes(Vec<u8>),
+    Str(Vec<u8>),
 }
 
 /// What every function being lowered shares.
@@ -63,6 +75,8 @@ struct Env<'a, 'i> {
     synth: &'i RefCell<Synth>,
     check: bool,
     fast: bool,
+    interp: bool,
+    consts: &'i [ConstData],
 }
 
 /// Word 0 of the runtime's state: set while a contract with calls is running.
@@ -78,6 +92,10 @@ struct FnLower<'a, 'i> {
     check: bool,
     /// No contract runs.
     fast: bool,
+    interp: bool,
+    consts: &'i [ConstData],
+    /// The last source position announced to the interpreter.
+    mark_at: Option<Span>,
     /// Raw memory goes through the checker.
     instrument: bool,
     is_claw: bool,
@@ -115,7 +133,7 @@ fn loc(s: Span) -> Loc {
     Loc { line: s.line, col: s.col, file: s.file }
 }
 
-pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: Opts) -> Module {
+pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: Opts<'a>) -> Module {
     let mut list: Vec<(String, &'a ast::Func)> = Vec::new();
     let root = units.len() - 1;
     for (i, u) in units.iter().enumerate() {
@@ -127,10 +145,21 @@ pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: O
         list.push((f.name.clone(), f));
     }
     let ids: HashMap<String, FuncId> = list.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
-    let synth = RefCell::new(Synth { base: list.len(), jobs: Vec::new(), known: HashMap::new() });
+    // Argument checks for the fuzzer take the ids right after the ordinary functions.
+    let root_prefix = &units[root].prefix;
+    let wanted: Vec<(&String, &'a ast::Func)> = if opts.interp {
+        units[root].program.funcs.iter().filter(|f| is_auto(f)).map(|f| (list.iter().find(|(n, g)| std::ptr::eq(*g, f) && n.starts_with(root_prefix.as_str())).map(|(n, _)| n).expect("listed above"), f)).collect()
+    } else {
+        Vec::new()
+    };
+    let filtered: Vec<(&String, &'a ast::Func)> = wanted.iter().filter(|(_, f)| f.contracts.iter().any(|x| !x.sure)).cloned().collect();
+    let synth = RefCell::new(Synth { base: list.len() + filtered.len(), jobs: Vec::new(), known: HashMap::new() });
     let by_name: HashMap<String, &'a ast::Func> = list.iter().map(|(n, f)| (n.clone(), *f)).collect();
-    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check, fast: opts.fast };
+    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check, fast: opts.fast, interp: opts.interp, consts: opts.consts };
     let mut funcs: Vec<Func> = list.iter().map(|(n, f)| lower_func(n, f, &env)).collect();
+    for (n, f) in &filtered {
+        funcs.push(build_filter(n, f, &env));
+    }
     // Each generated function may ask for more, so the queue can grow as it runs.
     let mut next = 0;
     loop {
@@ -139,9 +168,59 @@ pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: O
         funcs.push(build_synth(kind, ty, &env));
         next += 1;
     }
-    let check = opts.check.then(|| CheckRt { alloc: ids["__check.on_alloc"], free: ids["__check.on_free"], finish: ids["__check.finish"] });
+    let check = (opts.check && !opts.interp).then(|| CheckRt { alloc: ids["__check.on_alloc"], free: ids["__check.on_free"], finish: ids["__check.finish"] });
     let tests = list.iter().filter_map(|(n, f)| f.test.clone().map(|t| (t, ids[n]))).collect();
-    Module { funcs, main: ids.get("main").copied().unwrap_or(0), check, tests }
+    let autos = wanted
+        .iter()
+        .map(|(n, f)| {
+            let sig = &c.sigs[*n];
+            let filter = filtered.iter().position(|(m, _)| m == n).map(|i| list.len() + i);
+            let params = f.params.iter().zip(&sig.params).zip(&sig.own).map(|((p, t), o)| (p.name.clone(), *t, *o)).collect();
+            Auto { full: (*n).clone(), name: f.name.clone(), func: ids[*n], filter, params, ret: sig.ret }
+        })
+        .collect();
+    let const_funcs = c.computed.iter().map(|x| ids[&x.full]).collect();
+    Module { funcs, main: ids.get("main").copied().unwrap_or(0), check, tests, autos, const_funcs }
+}
+
+/// Could the fuzzer be pointed at this function at all?
+fn is_auto(f: &ast::Func) -> bool {
+    f.test.is_none() && f.tparams.is_empty() && f.name != "main" && f.name != "drop" && !f.name.starts_with("const ")
+}
+
+/// A function saying whether its arguments satisfy `f`'s `need` clauses.
+fn build_filter<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
+    let c = env.c;
+    let sig = &c.sigs[full];
+    let mut l = new_lower(env, BOOL, false);
+    l.is_claw = f.claw;
+    l.cur_name = full.to_string();
+    l.in_contract = true;
+    l.defers.push(Vec::new());
+    for (p, ty) in f.params.iter().zip(&sig.params) {
+        let v = l.vreg();
+        l.vars.insert(p.name.clone(), v);
+        if c.types.is_ref(*ty) {
+            l.addressed.insert(p.name.clone());
+        }
+    }
+    for x in f.contracts.iter().filter(|x| !x.sure) {
+        l.defers.push(Vec::new());
+        let (v, _) = l.eval_cond(&x.e);
+        let (ok, bad) = (l.new_block(), l.new_block());
+        l.finish(Term::Br { c: v, t: ok, f: bad });
+        l.switch(bad);
+        let no = l.constant(0);
+        l.finish(Term::Ret(Some(no)));
+        l.switch(ok);
+        let depth = l.defers.len() - 1;
+        l.run_defers(depth);
+        l.defers.pop();
+    }
+    l.defers.pop();
+    let yes = l.constant(1);
+    l.finish(Term::Ret(Some(yes)));
+    l.into_func(format!("need of {full}"), f.params.len())
 }
 
 fn new_lower<'a, 'i>(env: &Env<'a, 'i>, ret: Ty, is_main: bool) -> FnLower<'a, 'i> {
@@ -153,7 +232,10 @@ fn new_lower<'a, 'i>(env: &Env<'a, 'i>, ret: Ty, is_main: bool) -> FnLower<'a, '
         synth: env.synth,
         check: env.check,
         fast: env.fast,
-        instrument: env.check,
+        interp: env.interp,
+        consts: env.consts,
+        mark_at: None,
+        instrument: env.check && !env.interp,
         is_claw: false,
         in_contract: false,
         ret_val: None,
@@ -182,7 +264,7 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
     let c = env.c;
     let sig = &c.sigs[full];
     let mut l = new_lower(env, sig.ret, full == "main" || f.test.is_some());
-    l.instrument = env.check && !full.starts_with("__check.");
+    l.instrument = env.check && !env.interp && !full.starts_with("__check.");
     l.is_claw = f.claw;
     l.cur_name = full.to_string();
     l.addressed = f.addressed.borrow().clone();
@@ -192,8 +274,10 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
     l.defers.push(Vec::new());
     // Parameters must take the first registers, in order, before anything else does.
     let regs: Vec<VReg> = f.params.iter().map(|_| l.vreg()).collect();
+    l.mark(f.name_span);
     for ((p, ty), v) in f.params.iter().zip(&sig.params).zip(regs) {
         l.vars.insert(p.name.clone(), v);
+        l.note(&p.name, v, *ty);
         if c.types.is_ref(*ty) {
             l.addressed.insert(p.name.clone());
         } else if p.own && c.types.needs_drop(*ty) {
@@ -244,6 +328,37 @@ fn build_synth<'a>(kind: JobKind, ty: Ty, env: &Env<'a, '_>) -> Func {
 impl<'a, 'i> FnLower<'a, 'i> {
     fn t(&self) -> &'a Types {
         &self.c.types
+    }
+
+    /// Tells the interpreter which source line runs next.
+    fn mark(&mut self, s: Span) {
+        if self.interp {
+            self.mark_at = Some(s);
+            self.emit(Inst::Line { loc: loc(s) });
+        }
+    }
+
+    /// Back to the line of the current statement, after code from somewhere else.
+    fn remark(&mut self) {
+        if let Some(s) = self.mark_at {
+            self.emit(Inst::Line { loc: loc(s) });
+        }
+    }
+
+    /// Tells the interpreter a variable took a value, if the value can be shown.
+    fn note(&mut self, name: &str, v: VReg, ty: Ty) {
+        if !self.interp || name == "_" {
+            return;
+        }
+        let show = match self.t().kind(ty) {
+            Kind::Int { signed: true, .. } => Show::Int,
+            Kind::Int { signed: false, .. } => Show::Uint,
+            Kind::Bool => Show::Bool,
+            Kind::Float { bits: 32 } => Show::F32,
+            Kind::Float { .. } => Show::F64,
+            _ => return,
+        };
+        self.emit(Inst::Note { name: name.to_string(), v, show });
     }
 
     fn place_text(&self, s: Span) -> String {
@@ -355,6 +470,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         for c in self.sures.clone() {
             let at = self.place_text(c.e.span);
             let name = short_name(&self.cur_name).to_string();
+            self.mark(c.e.span);
             self.check_cond(&c.e, format!("trap: sure failed: `{}` in {name} at {at}\n", c.text));
         }
     }
@@ -380,7 +496,11 @@ impl<'a, 'i> FnLower<'a, 'i> {
         }
         let place = self.place_text(at);
         for c in needs {
+            let was = self.mark_at;
+            self.mark(c.e.span);
             self.check_cond(&c.e, format!("trap: need failed: `{}` in {} at {place}\n", c.text, short_name(full)));
+            self.mark_at = was;
+            self.remark();
         }
         (self.vars, self.addressed, self.flags) = saved;
     }
@@ -1049,6 +1169,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
     }
 
     fn stmt_inner(&mut self, s: &'a Stmt) {
+        self.mark(s.span);
         match &s.kind {
             StmtKind::Let { name, init, .. } => {
                 let ty = init.ty.get();
@@ -1057,6 +1178,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                     Coerce::No => ty,
                 };
                 let v = self.owned_value(init);
+                self.note(name, v, ty);
                 // A value just built in its own temporary needs no second copy.
                 let fresh = init.coerce.get() != Coerce::No
                     || matches!(init.kind, ExprKind::ArrayLit(_) | ExprKind::ArrayFill(_) | ExprKind::StructLit { .. } | ExprKind::Call { .. } | ExprKind::None | ExprKind::Str(_) | ExprKind::Interp(_));
@@ -1095,6 +1217,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                         let v = l.vreg();
                         l.emit(Inst::Mov { d: v, s: counter });
                         l.vars.insert(var.clone(), v);
+                        l.note(var, v, INT);
                     }
                     l.block(body);
                 });
@@ -1106,6 +1229,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 let exit = self.new_block();
                 self.finish(Term::Jmp(head));
                 self.switch(head);
+                self.mark(s.span);
                 if makes_temporaries(cond, self.t()) {
                     // The temporaries must go on every pass, not once at the end.
                     self.defers.push(Vec::new());
@@ -1178,6 +1302,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         self.finish(Term::Jmp(head));
 
         self.switch(head);
+        self.remark();
         let c = self.vreg();
         self.emit(Inst::Cmp { cc: Cc::Lt, d: c, a: counter, b: lim, unsigned: false });
         self.finish(Term::Br { c, t: body_b, f: exit });
@@ -1189,6 +1314,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         self.finish(Term::Jmp(latch));
 
         self.switch(latch);
+        self.remark();
         self.emit(Inst::AddImm { d: counter, s: counter, imm: 1 });
         self.finish(Term::Jmp(head));
         self.switch(exit);
@@ -1211,12 +1337,14 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 let x = l.load(a, 0, elem_ty);
                 let d = if l.t().is_aggregate(elem_ty) { x } else { l.new_local(x, elem_ty) };
                 l.vars.insert(elem.to_string(), d);
+                l.note(elem, d, elem_ty);
             }
             if let Some((name, _)) = index {
                 if name != "_" {
                     let x = l.vreg();
                     l.emit(Inst::Mov { d: x, s: counter });
                     l.vars.insert(name.clone(), x);
+                    l.note(name, x, INT);
                 }
             }
             l.block(body);
@@ -1261,6 +1389,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             None => {
                 let v = self.owned_value(value);
                 self.guard_target(&p, target, ty);
+                self.note_target(target, v, ty);
                 if self.needs(ty) && !through_pointer(target, self.t()) {
                     let old = match p {
                         Place::Mem(a, o) => self.offset_addr(a, o),
@@ -1299,7 +1428,16 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 };
                 let v = self.expr_value(value);
                 let d = self.arith(op, old, v, ty, target.span);
+                self.note_target(target, d, ty);
                 self.write_place(p, d, ty);
+            }
+        }
+    }
+
+    fn note_target(&mut self, target: &Expr, v: VReg, ty: Ty) {
+        if self.interp {
+            if let Some(name) = target_name(target) {
+                self.note(&name, v, ty);
             }
         }
     }
@@ -1690,6 +1828,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             Res::Const(ConstVal::Int(n), _) => self.constant(n as i64),
             Res::Const(ConstVal::Bool(b), _) => self.constant(b as i64),
             Res::Const(ConstVal::Float(x), t) => self.float_const(x, t),
+            Res::Const(ConstVal::Computed(id), _) => self.computed(id),
             Res::Variant(_, idx) => {
                 let a = self.temp_obj(ty);
                 self.set_tag(a, idx as i64);
@@ -1697,6 +1836,27 @@ impl<'a, 'i> FnLower<'a, 'i> {
             }
             _ => unreachable!("sema resolved this name"),
         }
+    }
+
+    /// A `const` that needed a function call: now plain data.
+    fn computed(&mut self, id: usize) -> VReg {
+        let d = self.vreg();
+        match self.consts.get(id) {
+            None => self.emit(Inst::ConstRef { d, id }),
+            Some(ConstData::Scalar(v)) => self.emit(Inst::Const { d, v: *v as i64 }),
+            Some(ConstData::Bytes(b)) => self.emit(Inst::DataAddr { d, bytes: b.clone() }),
+            Some(ConstData::Str(b)) => {
+                let mut bytes = b.clone();
+                bytes.push(0);
+                self.emit(Inst::DataAddr { d, bytes });
+                let a = self.temp_obj(STR);
+                let n = self.constant(b.len() as i64);
+                let zero = self.constant(0);
+                self.store_seq(a, d, n, zero);
+                return a;
+            }
+        }
+        d
     }
 
     fn compare_str(&mut self, op: BinOp, a: VReg, b: VReg) -> VReg {
@@ -2222,6 +2382,15 @@ enum Piece<'a> {
 
 fn is_comparison(op: BinOp) -> bool {
     matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge)
+}
+
+/// `x` or `p.x`: what an assignment to this should be called in a report.
+fn target_name(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Var(n) => Some(n.clone()),
+        ExprKind::Field { e: b, name, .. } => Some(format!("{}.{name}", target_name(b)?)),
+        _ => None,
+    }
 }
 
 /// Its value is already on the page or shown under its own name.

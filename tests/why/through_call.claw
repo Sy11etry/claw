@@ -1,0 +1,24 @@
+fn pick(xs []int) int {
+    ret xs[len(xs) - 1]
+}
+
+fn shift(v int) int {
+    ret v - 4
+}
+
+fn main() {
+    mut xs []int = []
+    push(&xs, 4)
+    y := pick(xs)
+    z := shift(y)
+    print(100 / z)
+}
+// expect: FAIL division by zero at through_call.claw:14:11
+// expect: why    through_call.claw:10  mut xs []int = []
+// expect:        through_call.claw:11  push(&xs, 4)
+// expect:        through_call.claw:2  ret xs[len(xs) - 1]
+// expect:        through_call.claw:12  y := pick(xs)    y = 4
+// expect:        through_call.claw:5  fn shift(v int) int {    v = 4
+// expect:        through_call.claw:6  ret v - 4
+// expect:        through_call.claw:13  z := shift(y)    z = 0
+// expect:        through_call.claw:14  print(100 / z)    right = 0

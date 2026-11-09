@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Writes random Claw programs and compares the optimized build with the unoptimized one.
 
-Both must print the same, stop with the same exit code and report the same trap.
+All three (optimized, unoptimized, interpreted) must print the same, stop with the same exit code and report the same trap.
 usage: fuzz_opt.py [count] [first seed]
 """
 import os
@@ -238,15 +238,20 @@ def check(seed, tmp):
     path = tmp / f"p{seed}.claw"
     path.write_text(Gen(seed).program())
     exe = tmp / f"p{seed}"
-    built = subprocess.run([CLAW, "build", path, "-o", exe], capture_output=True, text=True)
-    if built.returncode != 0:
-        return "compile", built.stderr[:600], path
+    built = run([CLAW, "build", path, "-o", exe])
+    if built is None:
+        return "compile", "the compiler did not finish in 30 s", path
+    if built[0] != 0:
+        return "compile", built[2][:600], path
     slow = run([CLAW, "run", path])
     fast = run([exe])
     if slow is None or fast is None:
         return None
     if slow != fast:
         return "differs", f"unoptimized {slow[0]}: {slow[2][-200:]}\noptimized   {fast[0]}: {fast[2][-200:]}\nstdout same: {slow[1] == fast[1]}", path
+    interpreted = run([CLAW, "__interp", path])
+    if interpreted is not None and interpreted != slow:
+        return "interpreter differs", f"machine code {slow[0]}: {slow[2][-200:]}\ninterpreter  {interpreted[0]}: {interpreted[2][-200:]}\nstdout same: {slow[1] == interpreted[1]}", path
     return None
 
 

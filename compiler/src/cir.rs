@@ -3,6 +3,8 @@
 //! A vreg holds a scalar (integers kept sign- or zero-extended to 64 bits, floats
 //! as raw bits) or the address of an aggregate.
 
+use crate::types::Ty;
+
 pub type VReg = u32;
 pub type BlockId = usize;
 pub type FuncId = usize;
@@ -141,6 +143,24 @@ pub enum Inst {
     RtState { d: VReg },
     /// Remembers where the next allocation or release comes from.
     SetSite { text: String },
+    /// Read-only bytes worked out at compile time.
+    DataAddr { d: VReg, bytes: Vec<u8> },
+    /// Only in code for the interpreter: the value of a `const` that needs a function call.
+    ConstRef { d: VReg, id: usize },
+    /// Only in code for the interpreter: execution reached this source line.
+    Line { loc: Loc },
+    /// Only in code for the interpreter: variable `name` now holds `v`.
+    Note { name: String, v: VReg, show: Show },
+}
+
+/// How a variable's value reads in a report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    Int,
+    Uint,
+    Bool,
+    F32,
+    F64,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +204,23 @@ pub struct Module {
     pub check: Option<CheckRt>,
     /// (name, function) of each `test` block, in `claw test`.
     pub tests: Vec<(String, FuncId)>,
+    /// Functions the fuzzer may call, when built for the interpreter.
+    pub autos: Vec<Auto>,
+    /// The function computing each `const` that needs a call, in id order.
+    pub const_funcs: Vec<FuncId>,
+}
+
+/// A function of the root file, and what the fuzzer needs to call it.
+#[derive(Debug, Clone)]
+pub struct Auto {
+    /// As `effects` knows it.
+    pub full: String,
+    pub name: String,
+    pub func: FuncId,
+    /// Says whether arguments satisfy the `need` clauses.
+    pub filter: Option<FuncId>,
+    pub params: Vec<(String, Ty, bool)>,
+    pub ret: Ty,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -196,7 +233,7 @@ pub struct CheckRt {
 macro_rules! walk_inst {
     ($i:expr, $f:ident, $($m:tt)?) => {
         match $i {
-            Inst::Const { d, .. } | Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } => $f(d, true),
+            Inst::Const { d, .. } | Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } | Inst::DataAddr { d, .. } | Inst::ConstRef { d, .. } => $f(d, true),
             Inst::Mov { d, s } | Inst::BitNot { d, s, .. } | Inst::BoolNot { d, s } | Inst::Neg { d, s, .. } | Inst::FNeg { d, s, .. }
             | Inst::IntCast { d, s, .. } | Inst::IntToFloat { d, s, .. } | Inst::FloatToInt { d, s, .. } | Inst::FloatCast { d, s, .. }
             | Inst::AddImm { d, s, .. } => {
@@ -291,7 +328,8 @@ macro_rules! walk_inst {
                 $f(bhi, false);
                 $f(d, true);
             }
-            Inst::BufStr { .. } | Inst::CaptureStart | Inst::Flush { .. } | Inst::Exit { .. } | Inst::SetSite { .. } => {}
+            Inst::Note { v, .. } => $f(v, false),
+            Inst::BufStr { .. } | Inst::CaptureStart | Inst::Flush { .. } | Inst::Exit { .. } | Inst::SetSite { .. } | Inst::Line { .. } => {}
         }
     };
 }
@@ -337,7 +375,7 @@ impl Inst {
     /// If the result is unused, may this instruction simply disappear?
     pub fn removable(&self) -> bool {
         match self {
-            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } => true,
+            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } | Inst::DataAddr { .. } => true,
             Inst::Bin { op, num, .. } => match op {
                 Arith::And | Arith::Or | Arith::Xor => true,
                 Arith::Add | Arith::Sub | Arith::Mul => !num.signed || !num.checked,

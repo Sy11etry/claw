@@ -1,0 +1,18 @@
+// test: broken
+fn twice(x int) int {
+    ret x + x
+}
+
+test "fine" {
+    sure twice(2) == 4
+}
+
+test "broken" {
+    n := twice(3)
+    sure n == 7
+}
+// expect: FAIL sure failed: `n == 7` at test_block.claw:12:5
+// expect: why    test_block.claw:2  fn twice(x int) int {    x = 3
+// expect:        test_block.claw:3  ret x + x
+// expect:        test_block.claw:11  n := twice(3)    n = 6
+// expect:        test_block.claw:12  sure n == 7    n = 6

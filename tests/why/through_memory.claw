@@ -1,0 +1,15 @@
+type Box { v int, other int }
+
+fn main() {
+    mut b := Box{1, 2}
+    b.v = 0
+    b.other = 7
+    mut a [3]int = [5...]
+    a[1] = b.v
+    print(b.other)
+    print(10 / a[1])
+}
+// expect: FAIL division by zero at through_memory.claw:10:11
+// expect: why    through_memory.claw:5  b.v = 0    b.v = 0
+// expect:        through_memory.claw:8  a[1] = b.v
+// expect:        through_memory.claw:10  print(10 / a[1])    right = 0

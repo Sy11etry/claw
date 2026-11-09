@@ -1,0 +1,14 @@
+fn count(n int) int
+    need n >= 0
+{
+    mut s := 0
+    for i in 0..n { s += i & 1 }
+    ret s
+}
+
+fn down(n int) int {
+    if n == 0 { ret 0 }
+    ret down(n - 1)
+}
+// expect: note: down overflows for down(-9223372036854773809); add a `need` if that input is not meant to work
+// expect: auto: 2 functions, 2351 inputs, 0 failed

@@ -1,0 +1,11 @@
+// error: E0171
+fn noisy() int {
+    print(1)
+    ret 1
+}
+
+const x int = noisy()
+
+fn main() {
+    print(x)
+}

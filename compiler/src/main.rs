@@ -4,9 +4,12 @@ mod arm64;
 mod ast;
 mod cir;
 mod codegen;
+mod ctfe;
 mod diag;
 mod effects;
 mod fmt;
+mod fuzz;
+mod interp;
 mod lexer;
 mod lower;
 mod macho;
@@ -19,6 +22,7 @@ mod sema;
 mod sha256;
 mod ssa;
 mod types;
+mod why;
 
 use diag::Diag;
 use std::path::{Path, PathBuf};
@@ -27,7 +31,11 @@ use std::process::{exit, Command};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "claw run <file.claw>            compile with all checks and run
-claw test <file.claw>           run the file's `test` blocks with all checks
+claw test <file.claw>           run the `test` blocks, then try every function without `+io` on generated inputs
+    --blocks                    only the `test` blocks
+claw why <file.claw>            run again and say which lines led to the failure
+    --test <name>               of that `test` block instead of `main`
+claw fix <file.claw>            apply the compiler's safe patches
 claw build <file.claw> [-o out] optimized executable; contracts with calls are left out
     --fast                      remove every run-time check: speed like C, risk like C
     --stats                     say how many checks were proved unnecessary
@@ -47,10 +55,14 @@ struct Options {
     /// `--fast`: no run-time checks at all.
     fast: bool,
     stats: bool,
+    /// `claw test --blocks`: no generated inputs, no explanations.
+    blocks: bool,
+    /// `claw why --test name`.
+    test_name: Option<String>,
 }
 
 fn parse_options(args: &[String]) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, test_name: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -60,6 +72,14 @@ fn parse_options(args: &[String]) -> Options {
             "--alloc-stats" => o.alloc_stats = true,
             "--fast" => o.fast = true,
             "--stats" => o.stats = true,
+            "--blocks" => o.blocks = true,
+            "--test" => {
+                i += 1;
+                match args.get(i) {
+                    Some(p) => o.test_name = Some(p.clone()),
+                    None => die("`--test` needs a name"),
+                }
+            }
             "-o" => {
                 i += 1;
                 match args.get(i) {
@@ -101,23 +121,46 @@ enum Mode {
     Test,
 }
 
+/// A program that has passed every check, and what those checks found out.
+struct Front {
+    loaded: modules::Loaded,
+    checked: sema::Checked,
+    effects: effects::Report,
+    consts: Vec<lower::ConstData>,
+}
+
 /// Runs the front end; never returns on a source error.
-fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
-    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test, fast: o.fast && mode == Mode::Build };
-    let loaded = match modules::load(&o.file, opts.check) {
+fn front(o: &Options, memory_checker: bool, tests_only: bool) -> Front {
+    let loaded = match modules::load(&o.file, memory_checker) {
         Ok(l) => l,
         Err((diags, files)) => report(o, diags, &files),
     };
     let mut diags = Vec::new();
-    let checked = sema::check(&loaded.units, loaded.core, mode == Mode::Test, &mut diags);
-    let slow = effects::check(&loaded.units, &checked, &mut diags);
+    let checked = sema::check(&loaded.units, loaded.core, tests_only, &mut diags);
+    let effects = effects::check(&loaded.units, &checked, &mut diags);
     if !diags.is_empty() {
         report(o, diags, &loaded.files);
     }
-    if mode == Mode::Build && slow > 0 {
-        eprintln!("claw: note: {slow} checks that call functions are left out of this build; `claw run` and `claw test` do them");
+    let consts = ctfe::evaluate(&loaded.units, &checked, &loaded.base_names, &mut diags);
+    if !diags.is_empty() {
+        report(o, diags, &loaded.files);
     }
-    let mut module = lower::lower(&loaded.units, &checked, &loaded.base_names, opts);
+    Front { loaded, checked, effects, consts }
+}
+
+/// The program as the interpreter runs it: every contract, and the source lines.
+fn for_interp(f: &Front, test: bool) -> cir::Module {
+    let opts = lower::Opts { check: true, test, fast: false, interp: true, consts: &f.consts };
+    lower::lower(&f.loaded.units, &f.checked, &f.loaded.base_names, opts)
+}
+
+fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
+    let f = front(o, mode != Mode::Build, mode == Mode::Test);
+    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test, fast: o.fast && mode == Mode::Build, interp: false, consts: &f.consts };
+    if mode == Mode::Build && f.effects.slow > 0 {
+        eprintln!("claw: note: {} checks that call functions are left out of this build; `claw run` and `claw test` do them", f.effects.slow);
+    }
+    let mut module = lower::lower(&f.loaded.units, &f.checked, &f.loaded.base_names, opts);
     if mode == Mode::Build {
         let stats = opt::optimize(&mut module, o.fast);
         if o.stats {
@@ -125,7 +168,8 @@ fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
             println!("checks: {} of {} removed, {} calls inlined", gone, stats.checks_before, stats.inlined);
         }
     }
-    (module, loaded.base_names.clone())
+    let names = f.loaded.base_names.clone();
+    (module, names)
 }
 
 fn format_file(o: &Options) -> ! {
@@ -208,7 +252,11 @@ fn run(o: &Options) -> ! {
     let _ = std::fs::remove_dir_all(&dir);
     match status {
         Ok(s) => {
+            use std::io::IsTerminal;
             use std::os::unix::process::ExitStatusExt;
+            if s.code() == Some(101) && std::io::stderr().is_terminal() {
+                eprintln!("claw: `claw why {}` finds the cause", o.file);
+            }
             exit(s.code().unwrap_or_else(|| 128 + s.signal().unwrap_or(0)));
         }
         Err(e) => {
@@ -259,12 +307,28 @@ fn run_one_test(exe: &Path, dir: &Path) -> Result<(), String> {
     Err(text)
 }
 
-fn test_all(o: &Options) -> ! {
-    let (mut module, files) = compile_to_cir(o, Mode::Test);
-    if module.tests.is_empty() {
-        eprintln!("claw: no `test` blocks in {}", o.file);
-        exit(1);
+/// Limits for replaying a whole program in the interpreter.
+fn replay_config(trace: bool, stdout: bool) -> interp::Config {
+    interp::Config { steps: 3_000_000_000, memory: 1 << 34, depth: 1_000_000, io: true, stdout, trace, cover: false }
+}
+
+/// Explains a `test` block that failed, by running it again in the interpreter.
+fn explain_block(f: &Front, m: &cir::Module, src: &why::Sources, id: cir::FuncId) -> Vec<String> {
+    let files = &f.loaded.base_names;
+    let mut mc = interp::Machine::new(m, files, replay_config(true, false));
+    match mc.call(id, &[]) {
+        interp::Stop::Fail(x) => why::report(src, &mc, &x, None),
+        _ => Vec::new(),
     }
+}
+
+fn test_all(o: &Options) -> ! {
+    let f = front(o, true, true);
+    let files = f.loaded.base_names.clone();
+    let opts = lower::Opts { check: true, test: true, fast: false, interp: false, consts: &f.consts };
+    let mut module = lower::lower(&f.loaded.units, &f.checked, &files, opts);
+    let interpreted = for_interp(&f, true);
+    let src = why::Sources::new(&f.loaded.units, &f.loaded.files, &files, &f.checked.types);
     let dir = std::env::temp_dir().join(format!("claw-test-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("claw: cannot create {}: {e}", dir.display());
@@ -282,11 +346,171 @@ fn test_all(o: &Options) -> ! {
             for line in why.lines() {
                 println!("  {line}");
             }
+            if !o.blocks {
+                for line in explain_block(&f, &interpreted, &src, interpreted.tests[i].1) {
+                    println!("  {line}");
+                }
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
-    println!("{} passed, {failed} failed", tests.len() - failed);
+    let auto = if o.blocks { None } else { Some(fuzz::run(&interpreted, &files, &src, &f.checked.types, &f.effects)) };
+    let ran_auto = auto.as_ref().is_some_and(|a| a.functions > 0 || a.skipped > 0);
+    if tests.is_empty() && !ran_auto {
+        eprintln!("claw: nothing to test in {}: no `test` blocks and no functions without `+io`", o.file);
+        exit(1);
+    }
+    if let Some(a) = &auto {
+        for line in &a.lines {
+            println!("{line}");
+        }
+    }
+    if !tests.is_empty() {
+        println!("{} passed, {failed} failed", tests.len() - failed);
+    }
+    if let Some(a) = auto.filter(|_| ran_auto) {
+        let skipped = if a.skipped > 0 { format!(", {} skipped", a.skipped) } else { String::new() };
+        println!("auto: {} functions, {} inputs, {} failed{skipped}", a.functions, a.inputs, a.failed);
+        failed += a.failed;
+    }
     exit((failed > 0) as i32);
+}
+
+/// `claw why`: the program runs again, this time remembering where every value came from.
+fn why_file(o: &Options) -> ! {
+    let f = front(o, false, o.test_name.is_some());
+    let m = for_interp(&f, o.test_name.is_some());
+    let files = &f.loaded.base_names;
+    let start = match &o.test_name {
+        Some(name) => match m.tests.iter().find(|(n, _)| n == name) {
+            Some((_, id)) => *id,
+            None => {
+                eprintln!("claw: no `test` named \"{name}\" in {}", o.file);
+                exit(2);
+            }
+        },
+        None => m.main,
+    };
+    let mut mc = interp::Machine::new(&m, files, replay_config(true, false));
+    let failure = match mc.call(start, &[]) {
+        interp::Stop::Done(_) => mc.check_leaks(),
+        interp::Stop::Exit(0) => None,
+        interp::Stop::Exit(code) => {
+            println!("the program stopped itself with exit code {code}");
+            exit(1);
+        }
+        interp::Stop::Fail(x) => Some(*x),
+        interp::Stop::Limit(what) => {
+            eprintln!("claw: cannot replay: the program uses too much {what} for the interpreter");
+            exit(2);
+        }
+        interp::Stop::Unsupported(sym) => {
+            eprintln!("claw: cannot replay: the interpreter does not have the C function `{sym}`");
+            exit(2);
+        }
+        interp::Stop::NeedConst(_) => unreachable!("constants were computed in the front end"),
+    };
+    let Some(x) = failure else {
+        println!("no failure: the program ran to the end");
+        exit(0);
+    };
+    let src = why::Sources::new(&f.loaded.units, &f.loaded.files, files, &f.checked.types);
+    println!("FAIL {}", x.msg.lines().next().unwrap_or("").trim_start_matches("trap: "));
+    for line in why::report(&src, &mc, &x, None) {
+        println!("{line}");
+    }
+    exit(1);
+}
+
+/// `claw __interp`: runs `main` in the interpreter; the test suite compares it with real code.
+fn interpret(o: &Options) -> ! {
+    use std::io::Write;
+    let f = front(o, false, false);
+    let m = for_interp(&f, false);
+    let mut mc = interp::Machine::new(&m, &f.loaded.base_names, replay_config(false, true));
+    let stop = mc.call(m.main, &[]);
+    let _ = std::io::stderr().write_all(&mc.err);
+    match stop {
+        interp::Stop::Done(_) => match mc.check_leaks() {
+            Some(x) => {
+                eprint!("{}", x.msg);
+                exit(x.exit);
+            }
+            None => exit(0),
+        },
+        interp::Stop::Exit(c) => exit(c),
+        interp::Stop::Fail(x) => exit(x.exit),
+        interp::Stop::Limit(what) => {
+            eprintln!("claw: interpreter limit: {what}");
+            exit(90);
+        }
+        interp::Stop::Unsupported(sym) => {
+            eprintln!("claw: interpreter lacks `{sym}`");
+            exit(91);
+        }
+        interp::Stop::NeedConst(_) => unreachable!("constants were computed in the front end"),
+    }
+}
+
+/// Every error of the file, without stopping at the first bad phase.
+fn diagnose(o: &Options) -> (Vec<Diag>, Vec<String>) {
+    let loaded = match modules::load(&o.file, false) {
+        Ok(l) => l,
+        Err(x) => return x,
+    };
+    let mut diags = Vec::new();
+    let checked = sema::check(&loaded.units, loaded.core, true, &mut diags);
+    effects::check(&loaded.units, &checked, &mut diags);
+    (diags, loaded.files)
+}
+
+/// `claw fix`: applies safe patches until none are left, then reports what still needs a person.
+fn fix_file(o: &Options) -> ! {
+    use std::collections::BTreeMap;
+    let mut applied = 0;
+    for _ in 0..50 {
+        let (mut diags, files) = diagnose(o);
+        diag::sort(&mut diags);
+        let mut by_file: BTreeMap<u32, Vec<diag::Fix>> = BTreeMap::new();
+        for fix in diags.iter().filter_map(|d| d.fix.clone()).filter(|f| f.safe) {
+            by_file.entry(fix.span.file).or_default().push(fix);
+        }
+        by_file.retain(|file, _| !files[*file as usize].contains("/std/"));
+        if by_file.is_empty() {
+            break;
+        }
+        for (file, mut fixes) in by_file {
+            let path = &files[file as usize];
+            let mut text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("claw: cannot read {path}: {e}");
+                    exit(2);
+                }
+            };
+            fixes.sort_by_key(|f| std::cmp::Reverse(f.span.start));
+            let mut floor = usize::MAX;
+            for f in fixes {
+                let (a, b) = (f.span.start as usize, f.span.end as usize);
+                if b > floor || b > text.len() {
+                    continue;
+                }
+                text.replace_range(a..b, &f.text);
+                floor = a;
+                applied += 1;
+            }
+            if let Err(e) = std::fs::write(path, text) {
+                eprintln!("claw: cannot write {path}: {e}");
+                exit(2);
+            }
+        }
+    }
+    let (diags, files) = diagnose(o);
+    println!("fixed {applied}");
+    if diags.is_empty() {
+        exit(0);
+    }
+    report(o, diags, &files);
 }
 
 fn main() {
@@ -309,6 +533,9 @@ fn real_main() {
             compile(&o, &out, Mode::Build);
         }
         Some("test") => test_all(&parse_options(&args[1..])),
+        Some("why") => why_file(&parse_options(&args[1..])),
+        Some("fix") => fix_file(&parse_options(&args[1..])),
+        Some("__interp") => interpret(&parse_options(&args[1..])),
         Some("fmt") => format_file(&parse_options(&args[1..])),
         Some("check") => {
             let o = parse_options(&args[1..]);

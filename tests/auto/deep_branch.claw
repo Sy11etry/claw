@@ -1,0 +1,20 @@
+fn gate(a int, b int, c int) int {
+    if a == 11 {
+        if b == 22 {
+            if c == 33 {
+                d := a - 11
+                ret 5 / d
+            }
+        }
+    }
+    ret 0
+}
+// expect: FAIL gate: division by zero at deep_branch.claw:6:21
+// expect:   input  gate(11, 22, 33)
+// expect:   why    deep_branch.claw:1  fn gate(a int, b int, c int) int {    a = 11, c = 33
+// expect:          deep_branch.claw:4  if c == 33 {
+// expect:          deep_branch.claw:5  d := a - 11    d = 0
+// expect:          deep_branch.claw:6  ret 5 / d    right = 0
+// expect:   fix    add `need (a - 11) != 0` to gate
+// expect: auto: 1 functions, 3194 inputs, 1 failed
+// exit: 1

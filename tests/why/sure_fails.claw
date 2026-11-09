@@ -1,0 +1,14 @@
+fn dec(x int) int
+    sure ret > x
+{
+    ret x - 1
+}
+
+fn main() {
+    print(dec(1))
+}
+// expect: FAIL sure failed: `ret > x` in dec at sure_fails.claw:2:10
+// expect: why    sure_fails.claw:8  print(dec(1))
+// expect:        sure_fails.claw:1  fn dec(x int) int    x = 1
+// expect:        sure_fails.claw:4  ret x - 1
+// expect:        sure_fails.claw:2  sure ret > x    ret = 0, x = 1

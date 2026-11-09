@@ -975,6 +975,12 @@ impl Gen {
                 self.store(fr, X11, *d);
             }
             Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("gone before code generation"),
+            Inst::ConstRef { .. } | Inst::Line { .. } | Inst::Note { .. } => unreachable!("only the interpreter sees these"),
+            Inst::DataAddr { d, bytes } => {
+                let off = self.add_str(bytes);
+                self.data_addr(X9, off);
+                self.store(fr, X9, *d);
+            }
             Inst::Cmp { cc, d, a, b, unsigned } => {
                 self.compare(fr, *a, *b);
                 let rd = self.def_x(fr, *d, X11);

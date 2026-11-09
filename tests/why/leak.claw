@@ -1,0 +1,9 @@
+claw fn make() {
+    _ = alloc[int](4)
+}
+
+fn main() {
+    make()
+}
+// expect: FAIL memory leak: 1 blocks, 32 bytes never released; first made at leak.claw:2
+// expect: why    leak.claw:2  _ = alloc[int](4)

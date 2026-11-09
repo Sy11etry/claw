@@ -1,0 +1,26 @@
+// expect: 30
+// expect: 2
+// expect: 6
+// expect: 5
+fn squares() [3]int {
+    ret [1, 4, 25]
+}
+
+const s [3]int = squares()
+const name str = "ab" 
+fn total(a [3]int) int {
+    mut t := 0
+    for v in a { t += v }
+    ret t
+}
+
+fn main() {
+    print(total(s))
+    print(len(name))
+    mut local := s
+    local[0] = 0
+    mut more := 0
+    for v in local { more += v }
+    print(more - 23)
+    print(s[1] + 1)
+}

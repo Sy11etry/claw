@@ -1,0 +1,64 @@
+// expect: 120
+// expect: 720
+// expect: 24
+// expect: hello
+// expect: 4
+// expect: 1
+// expect: 2
+// expect: 2.5
+// expect: true
+// expect: 3
+type P { x int, y i32 }
+
+fn fact(n int) int
+    need n >= 0
+{
+    if n <= 1 { ret 1 }
+    ret n * fact(n - 1)
+}
+
+fn table() [4]int {
+    mut a [4]int = [0...]
+    for i in 0..4 { a[i] = fact(i + 1) }
+    ret a
+}
+
+fn hello() str +mem {
+    mut parts []str = []
+    push(&parts, "hel")
+    push(&parts, "lo")
+    ret join(parts, "")
+}
+
+fn point() P {
+    ret P{1, 2}
+}
+
+const f5 int = fact(5)
+const f6 int = f5 * 6
+const t [4]int = table()
+const msg str = hello()
+const p P = point()
+const half f64 = sqrt_ish(6.25)
+const flag bool = fact(3) == 6
+const later int = before + 1
+const before int = fact(1) + 1
+
+fn sqrt_ish(x f64) f64 {
+    mut g := x
+    for _ in 0..40 { g = (g + x / g) / 2.0 }
+    ret g
+}
+
+fn main() {
+    print(f5)
+    print(f6)
+    print(t[3])
+    print(msg)
+    print(len(t))
+    print(p.x)
+    print(p.y)
+    print(half)
+    print(flag)
+    print(later)
+}

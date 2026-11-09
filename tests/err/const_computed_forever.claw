@@ -1,0 +1,10 @@
+// error: E0174
+fn spin() int {
+    for { }
+}
+
+const x int = spin()
+
+fn main() {
+    print(x)
+}

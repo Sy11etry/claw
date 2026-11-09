@@ -1,0 +1,18 @@
+fn grow(xs &[]int, own s str) int +mem {
+    push(&xs, len(s))
+    push(&xs, 2)
+    ret len(xs)
+}
+
+fn make(n int) []int +mem
+    need n >= 0 and n < 50
+{
+    mut a []int = []
+    for i in 0..n { push(&a, i) }
+    ret a
+}
+
+fn upper_copy(s str) str +mem {
+    ret upper(s)
+}
+// expect: auto: 3 functions, 12000 inputs, 0 failed

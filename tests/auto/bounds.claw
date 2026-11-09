@@ -1,0 +1,18 @@
+fn third(xs []int) int {
+    ret xs[2]
+}
+
+fn at(xs []int, i int) int {
+    ret xs[i]
+}
+// expect: FAIL third: index out of bounds at bounds.claw:2:9
+// expect:   input  third([])
+// expect:   why    bounds.claw:2  ret xs[2]    index = 2, len = 0
+// expect:   fix    add `need 2 < len(xs)` to third
+// expect: FAIL at: index out of bounds at bounds.claw:6:9
+// expect:   input  at([], 0)
+// expect:   why    bounds.claw:5  fn at(xs []int, i int) int {    i = 0
+// expect:          bounds.claw:6  ret xs[i]    index = 0, len = 0
+// expect:   fix    add `need i >= 0 and i < len(xs)` to at
+// expect: auto: 2 functions, 2 inputs, 2 failed
+// exit: 1

@@ -1,0 +1,12 @@
+claw fn bad(n int) int {
+    p := alloc[int](2)
+    p[0] = n
+    free(p)
+    ret p[0]
+}
+// expect: FAIL bad: use after free (block made at use_after_free.claw:2, released at use_after_free.claw:4) at use_after_free.claw:5
+// expect:   input  bad(0)
+// expect:   why    use_after_free.claw:2  p := alloc[int](2)
+// expect:          use_after_free.claw:5  ret p[0]
+// expect: auto: 1 functions, 1 inputs, 1 failed
+// exit: 1

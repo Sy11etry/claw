@@ -1,0 +1,8 @@
+fn main() {
+    a := to_int("12")?
+    print(a)
+    b := to_int("x")?
+    print(b)
+}
+// expect: FAIL error: BadChar{0} at try_in_main.claw:4:10
+// expect: why    try_in_main.claw:4  b := to_int("x")?

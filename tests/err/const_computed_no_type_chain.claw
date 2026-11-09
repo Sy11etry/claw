@@ -1,0 +1,11 @@
+// error: E0139
+fn f() int {
+    ret 3
+}
+
+const a int = f()
+const b = a + 1
+
+fn main() {
+    print(b)
+}

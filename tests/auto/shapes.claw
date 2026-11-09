@@ -1,0 +1,18 @@
+type Point { x int, y int }
+type Shape = Circle{r int} | Rect{w int, h int} | Dot
+
+fn area(s Shape) int
+    need true
+{
+    match s {
+        Circle{r}: ret 3 * r / r
+        Rect{w, h}: ret w * h
+        Dot: ret 0
+    }
+}
+// expect: FAIL area: division by zero at shapes.claw:8:24
+// expect:   input  area(Circle{0})
+// expect:   why    shapes.claw:7  match s {
+// expect:          shapes.claw:8  Circle{r}: ret 3 * r / r    right = 0
+// expect: auto: 1 functions, 2 inputs, 1 failed
+// exit: 1

@@ -1,0 +1,10 @@
+// error: E0173
+fn make() []int {
+    ret []
+}
+
+const x []int = make()
+
+fn main() {
+    print(x)
+}

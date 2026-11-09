@@ -1,0 +1,13 @@
+claw fn main2() int {
+    p := alloc[int](1)
+    p[0] = 3
+    free(p)
+    ret p[0]
+}
+
+fn main() {
+    print(main2())
+}
+// expect: FAIL use after free (block made at use_after_free.claw:2, released at use_after_free.claw:4) at use_after_free.claw:5
+// expect: why    use_after_free.claw:2  p := alloc[int](1)
+// expect:        use_after_free.claw:5  ret p[0]

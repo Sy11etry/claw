@@ -1,0 +1,13 @@
+fn main() {
+    x := 4
+    mut y := 1
+    if x > 3 {
+        y = 0
+    }
+    print(1 / y)
+}
+// expect: FAIL division by zero at branch_decided.claw:7:11
+// expect: why    branch_decided.claw:2  x := 4    x = 4
+// expect:        branch_decided.claw:4  if x > 3 {
+// expect:        branch_decided.claw:5  y = 0    y = 0
+// expect:        branch_decided.claw:7  print(1 / y)    right = 0

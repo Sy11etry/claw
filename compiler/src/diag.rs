@@ -10,11 +10,20 @@ pub struct Span {
     pub file: u32,
 }
 
+impl Span {
+    /// The empty span right before this one, for inserting text.
+    pub fn before(self) -> Span {
+        Span { end: self.start, ..self }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Fix {
     pub span: Span,
     pub text: String,
     pub label: String,
+    /// `claw fix` may apply it: the program still means what its author wrote.
+    pub safe: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -31,7 +40,13 @@ impl Diag {
     }
 
     pub fn fix(mut self, span: Span, text: impl Into<String>, label: impl Into<String>) -> Diag {
-        self.fix = Some(Fix { span, text: text.into(), label: label.into() });
+        self.fix = Some(Fix { span, text: text.into(), label: label.into(), safe: true });
+        self
+    }
+
+    /// A patch that only a person can judge; shown, never applied by `claw fix`.
+    pub fn suggest(mut self, span: Span, text: impl Into<String>, label: impl Into<String>) -> Diag {
+        self.fix = Some(Fix { span, text: text.into(), label: label.into(), safe: false });
         self
     }
 }
