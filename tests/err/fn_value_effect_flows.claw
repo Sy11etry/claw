@@ -1,0 +1,7 @@
+// error: E0160
+pub fn run(f fn(int) int +io) int {
+    ret f(1)
+}
+
+fn main() {
+}

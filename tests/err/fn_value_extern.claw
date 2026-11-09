@@ -1,0 +1,7 @@
+// error: E0176
+extern fn abs(x i32) i32
+
+claw fn main() {
+    f fn(i32) i32 = abs
+    print(f(1))
+}

@@ -1,0 +1,7 @@
+fn f(s str) int {
+    ret len(s)
+}
+
+fn main() {
+    print(f(5))
+}

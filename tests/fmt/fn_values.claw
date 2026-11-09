@@ -1,0 +1,101 @@
+type Op { name str, run fn(int, int) int }
+
+fn add(a int, b int) int {
+    ret a + b
+}
+
+fn mul(a int, b int) int {
+    ret a * b
+}
+
+fn apply(f fn(int, int) int, x int, y int) int {
+    ret f(x, y)
+}
+
+fn pick(big bool) fn(int, int) int {
+    if big {
+        ret mul
+    }
+    ret add
+}
+
+fn map[A, B](xs []A, f fn(A) B +mem) []B +mem {
+    mut out []B = []
+    for x in xs {
+        push(&out, f(x))
+    }
+    ret out
+}
+
+fn twice(x int) int {
+    ret x * 2
+}
+
+fn label(x int) str +mem {
+    ret "n{x}"
+}
+
+fn head(p Op) str +mem {
+    ret copy(p.name)
+}
+
+fn bump(a &[]int, n int) +mem {
+    push(&a, n)
+}
+
+fn change(g fn(&[]int, int) +mem, a &[]int) +mem {
+    g(&a, 99)
+}
+
+fn take(own s str) int {
+    ret len(s)
+}
+
+fn main() {
+    print(apply(add, 2, 3))
+    print(apply(mul, 2, 3))
+    f fn(int, int) int = add
+    print(f(10, 20))
+    mut g fn(int, int) int = mul
+    print(g(10, 20))
+    g = add
+    print(g(10, 20))
+    print(pick(true)(4, 5))
+    print(pick(false)(4, 5))
+    ops [2]Op = [Op{"add", add}, Op{"mul", mul}]
+    for o in ops {
+        print("{o.name} {o.run(6, 7)}")
+        print(head(o))
+    }
+    print(ops[1].run(3, 3))
+    table [2]fn(int, int) int = [add, mul]
+    print(table[1](8, 8))
+    print(map([1, 2, 3], twice))
+    print(map([1, 2, 3], label))
+    mut a []int = []
+    change(bump, &a)
+    print(a)
+    t fn(own str) int = take
+    print(t("abcd"))
+    m ?fn(int, int) int = add
+    h := m else mul
+    print(h(1, 1))
+}
+// expect: 5
+// expect: 6
+// expect: 30
+// expect: 200
+// expect: 30
+// expect: 20
+// expect: 9
+// expect: add 13
+// expect: add
+// expect: mul 42
+// expect: mul
+// expect: 9
+// expect: 64
+// expect: [2, 4, 6]
+// expect: [n1, n2, n3]
+// expect: [99]
+// expect: 4
+// expect: 2

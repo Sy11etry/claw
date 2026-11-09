@@ -1,0 +1,10 @@
+// error: E0104
+fn grow(a &[]int) {
+    a = []
+}
+
+fn main() {
+    mut b := [1, 2]
+    grow(&b)
+    b[0] = 3
+}

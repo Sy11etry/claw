@@ -1,0 +1,13 @@
+fn is_pal(s str) bool {
+    n := len(s)
+    for i in 0..n / 2 {
+        if s[i] != s[n - 1 - i] { ret false }
+    }
+    ret true
+}
+
+fn main() {
+    print(is_pal("level"))
+    print(is_pal("claw"))
+    print(is_pal(""))
+}

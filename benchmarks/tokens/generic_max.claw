@@ -1,0 +1,13 @@
+type Pair[A, B] { a A, b B }
+
+fn max[T](x T, y T) T {
+    if x > y { ret x }
+    ret y
+}
+
+fn main() {
+    print(max(3, 9))
+    print(max(2.5, 1.5))
+    p := Pair[int, str]{1, "one"}
+    print("{p.a} {p.b}")
+}

@@ -1,0 +1,20 @@
+// cmd: ctx first
+type Box[T] { v T }
+
+fn pick[T](b Box[T]) T {
+    ret b.v
+}
+
+fn first[T](a []Box[T]) T {
+    ret pick(a[0])
+}
+
+fn main() {
+    print(first([Box{1}]))
+}
+// expect: // first ctx_template.claw:8; called by main
+// expect: type Box[T] { v T }
+// expect: fn pick[T](b Box[T]) T
+// expect: fn first[T](a []Box[T]) T {
+// expect:     ret pick(a[0])
+// expect: }

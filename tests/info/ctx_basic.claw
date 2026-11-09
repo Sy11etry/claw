@@ -1,0 +1,51 @@
+// cmd: ctx total
+type Inner { v int }
+type Item { name str, inner Inner }
+type Unrelated { a int }
+
+const factor = 3
+const other = 4
+
+fn weight(it Item) int
+    need it.inner.v >= 0
+{
+    ret it.inner.v * factor
+}
+
+fn noise() int {
+    print(other)
+    ret 0
+}
+
+// Adds them all up.
+fn total(items []Item) int {
+    mut s := 0
+    for it in items {
+        s += weight(it) * factor
+    }
+    ret s
+}
+
+fn report(items []Item) {
+    print(total(items))
+}
+
+fn main() {
+    a := [Item{"x", Inner{1}}]
+    report(a)
+    print(total(a) + noise())
+    print(Unrelated{1})
+}
+// expect: // total ctx_basic.claw:21; called by report, main
+// expect: type Inner { v int }
+// expect: type Item { name str, inner Inner }
+// expect: const factor = 3
+// expect: fn weight(it Item) int
+// expect:     need it.inner.v >= 0
+// expect: fn total(items []Item) int {
+// expect:     mut s := 0
+// expect:     for it in items {
+// expect:         s += weight(it) * factor
+// expect:     }
+// expect:     ret s
+// expect: }

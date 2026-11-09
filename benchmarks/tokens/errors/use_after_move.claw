@@ -1,0 +1,8 @@
+fn main() {
+    a := [1, 2]
+    mut v []int = []
+    push(&v, a[0])
+    b := v
+    print(len(v))
+    print(len(b))
+}

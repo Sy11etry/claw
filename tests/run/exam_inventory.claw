@@ -1,0 +1,15 @@
+type Item { name str, price int, qty int }
+
+fn main() {
+    items := [Item{"pen", 3, 10}, Item{"ink", 7, 2}, Item{"pad", 5, 4}]
+    mut total := 0
+    mut best := copy(items[0])
+    for item in items {
+        total += item.price * item.qty
+        if item.price * item.qty > best.price * best.qty { best = copy(item) }
+    }
+    print(total)
+    print(best.name)
+}
+// expect: 64
+// expect: pen

@@ -1,0 +1,18 @@
+fn twice(x int) int {
+    ret x * 2
+}
+
+fn apply_n(f fn(int) int, start int, count int) int {
+    mut v := start
+    mut n := count
+    for n > 0 {
+        v = f(v)
+        n -= 1
+    }
+    ret v
+}
+
+fn main() {
+    print(apply_n(twice, 3, 4))
+}
+// expect: 48

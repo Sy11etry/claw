@@ -1,0 +1,37 @@
+// cmd: audit
+extern fn strlen(s *u8) u64
+
+fn pos(x int) bool {
+    ret x > 0
+}
+
+fn checked(x int) int
+    need pos(x)
+{
+    sure pos(x)
+    ret x
+}
+
+claw fn plain() int {
+    ret 1
+}
+
+claw fn raw() int {
+    p := alloc[int](2)
+    defer free(p)
+    p[0] = 1
+    q := p + 1
+    *q = 2
+    print(strlen("hi"))
+    ret p[0] + cast[int](q) * 0
+}
+
+fn main() {
+    print(checked(1) + plain() + raw())
+}
+// expect: extern   audit_basic.claw:2  strlen  effects taken on trust
+// expect: claw fn  audit_basic.claw:15  plain  no raw operations
+// expect: claw fn  audit_basic.claw:19  raw  alloc free index arith deref cast extern
+// expect: no build audit_basic.claw:9  need pos(x)  only in `claw run` and `claw test`
+// expect: no build audit_basic.claw:11  sure pos(x)  only in `claw run` and `claw test`
+// expect: audit: 2 claw fn, 1 extern, 2 checks not in `claw build`; std has 17 claw fn, not listed

@@ -1,0 +1,7 @@
+// error: E0179
+type Tree { v int, kids []Tree }
+
+fn main() {
+    t := Tree{1, []}
+    print(t)
+}

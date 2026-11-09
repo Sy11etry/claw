@@ -1,0 +1,11 @@
+fn vowels(s str) int {
+    mut n := 0
+    for c in s {
+        if has(['a', 'e', 'i', 'o', 'u'], c) { n += 1 }
+    }
+    ret n
+}
+
+fn main() {
+    print(vowels("the quick brown fox"))
+}

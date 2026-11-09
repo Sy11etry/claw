@@ -8,22 +8,12 @@ use crate::sema::{walk, Checked};
 use crate::types::*;
 use std::collections::HashMap;
 
-const MEM: u8 = 1;
-const IO: u8 = 2;
-
 fn mask_of(names: &[String]) -> u8 {
     names.iter().fold(0, |m, n| m | if n == "mem" { MEM } else { IO })
 }
 
 fn spell(mask: u8) -> String {
-    let mut parts = Vec::new();
-    if mask & MEM != 0 {
-        parts.push("+mem");
-    }
-    if mask & IO != 0 {
-        parts.push("+io");
-    }
-    parts.join(" ")
+    spell_effects(mask)
 }
 
 /// `core.push[int]` is `push` to the person reading the message.
@@ -46,6 +36,8 @@ struct Scan<'t> {
     types: &'t Types,
     uses: Vec<Use>,
     statements: Vec<Vec<Use>>,
+    /// Functions used as values: (function, what the value's type allows, where).
+    values: Vec<(String, u8, Span)>,
 }
 
 impl Scan<'_> {
@@ -59,9 +51,27 @@ impl Scan<'_> {
         }
     }
 
+    fn through_value(&mut self, callee: Ty, result: Ty, span: Span) {
+        if let Kind::Fn(id) = self.types.kind(callee) {
+            self.direct(self.types.fns[id].effects, span, "this call through a value");
+        }
+        self.drops(result, span);
+    }
+
     fn node(&mut self, x: &Expr) {
         let ty = x.ty.get();
         match &x.kind {
+            ExprKind::Var(_) | ExprKind::Field { .. } => {
+                if let (Res::Func(full), Kind::Fn(id)) = (&*x.res.borrow(), self.types.kind(ty)) {
+                    self.values.push((full.clone(), self.types.fns[id].effects, x.span));
+                }
+            }
+            ExprKind::CallValue { f, .. } => self.through_value(f.ty.get(), ty, x.span),
+            ExprKind::Call { .. } if matches!(*x.res.borrow(), Res::Value(_)) => {
+                if let Res::Value(t) = *x.res.borrow() {
+                    self.through_value(t, ty, x.span);
+                }
+            }
             ExprKind::Call { name, .. } => match &*x.res.borrow() {
                 Res::Func(full) => {
                     self.uses.push(Use { effect: 0, callee: Some(full.clone()), span: x.span, what: format!("`{}`", short_name(full)), from_drop: false });
@@ -171,10 +181,11 @@ struct Node<'a> {
     uses: Vec<Use>,
     /// What each contract and `sure` statement does; contracts must do nothing.
     pure: Vec<Vec<Use>>,
+    values: Vec<(String, u8, Span)>,
 }
 
 fn node<'a>(full: String, f: &'a Func, is_entry: bool, c: &Checked) -> Node<'a> {
-    let mut scan = Scan { types: &c.types, uses: Vec::new(), statements: Vec::new() };
+    let mut scan = Scan { types: &c.types, uses: Vec::new(), statements: Vec::new(), values: Vec::new() };
     scan.block(&f.body);
     if let Some(sig) = c.sigs.get(&full) {
         for (p, t) in f.params.iter().zip(&sig.params) {
@@ -194,13 +205,13 @@ fn node<'a>(full: String, f: &'a Func, is_entry: bool, c: &Checked) -> Node<'a> 
     } else {
         None
     };
-    Node { full, f, declared, uses: scan.uses, pure }
+    Node { full, f, declared, uses: scan.uses, pure, values: scan.values }
 }
 
 /// Is there a call to an ordinary function in this expression?
 pub fn has_call(e: &Expr) -> bool {
     let mut found = false;
-    walk(e, &mut |x| found |= matches!(x.kind, ExprKind::Call { .. }) && matches!(*x.res.borrow(), Res::Func(_)));
+    walk(e, &mut |x| found |= matches!(x.kind, ExprKind::CallValue { .. }) || (matches!(x.kind, ExprKind::Call { .. }) && matches!(*x.res.borrow(), Res::Func(_) | Res::Value(_))));
     found
 }
 
@@ -239,6 +250,11 @@ pub struct Report {
 }
 
 impl Report {
+    /// What this function does, for a signature that does not say.
+    pub fn effects(&self, full: &str) -> u8 {
+        self.known.get(full).copied().unwrap_or(0)
+    }
+
     /// Does this function, or anything it calls, touch the world?
     pub fn has_io(&self, full: &str) -> bool {
         self.known.get(full).is_none_or(|e| e & IO != 0)
@@ -302,6 +318,13 @@ pub fn check(units: &[Unit], c: &Checked, diags: &mut Vec<Diag>) -> Report {
                     let msg = format!("`{display}` does not declare `{word}`, but {} has it", u.what);
                     diags.push(Diag::new("E0160", u.span, msg).fix(n.f.sig_end, format!(" {word}"), format!("add `{word}` to the signature")));
                 }
+            }
+        }
+        for (full, allowed, span) in &n.values {
+            let extra = known.get(full).copied().unwrap_or(0) & !allowed;
+            if extra != 0 {
+                let word = spell(extra);
+                diags.push(Diag::new("E0178", *span, format!("`{}` is `{word}`, which this function type does not allow; add `{word}` to the type", short_name(full))));
             }
         }
         for uses in &n.pure {

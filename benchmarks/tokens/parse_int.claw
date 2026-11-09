@@ -1,0 +1,28 @@
+type ParseErr = Empty | Bad{at int}
+
+fn parse(s str) int ! ParseErr {
+    if len(s) == 0 { fail Empty }
+    mut n := 0
+    for c, i in s {
+        if c < '0' or c > '9' { fail Bad{i} }
+        n = n * 10 + int(c - '0')
+    }
+    ret n
+}
+
+fn show(s str) {
+    v := parse(s) else e {
+        match e {
+            Empty: print("empty")
+            Bad{at}: print("bad at {at}")
+        }
+        ret
+    }
+    print(v)
+}
+
+fn main() {
+    show("123")
+    show("")
+    show("12x")
+}

@@ -1,15 +1,15 @@
-# Benchmarks: claw 0.7.0
+# Benchmarks: claw 0.8.0
 
 Real measurements on this machine, median of 5 runs. `claw build` keeps every check it cannot prove unnecessary; the C versions have none. `--fast` removes them all.
 
 | Benchmark | clang -O2 | clang -O0 | Claw | Claw `--fast` | Claw vs -O2 | `--fast` vs -O2 |
 |---|---|---|---|---|---|---|
-| fib | 0.152 s | 0.274 s | 0.313 s | 0.318 s | 2.1x | 2.1x |
-| primes | 0.191 s | 0.195 s | 0.202 s | 0.197 s | 1.1x | 1.0x |
-| collatz | 0.201 s | 1.094 s | 0.330 s | 0.336 s | 1.6x | 1.7x |
-| sieve | 0.092 s | 0.145 s | 0.115 s | 0.116 s | 1.2x | 1.3x |
-| mandel | 0.100 s | 0.321 s | 0.159 s | 0.158 s | 1.6x | 1.6x |
-| list | 0.064 s | 0.059 s | 0.058 s | 0.059 s | 0.9x | 0.9x |
-| vec | 0.027 s | 0.082 s | 0.038 s | 0.046 s | 1.4x | 1.7x |
+| fib | 0.141 s | 0.264 s | 0.295 s | 0.301 s | 2.1x | 2.1x |
+| primes | 0.179 s | 0.186 s | 0.189 s | 0.185 s | 1.1x | 1.0x |
+| collatz | 0.191 s | 1.019 s | 0.320 s | 0.309 s | 1.7x | 1.6x |
+| sieve | 0.085 s | 0.139 s | 0.109 s | 0.108 s | 1.3x | 1.3x |
+| mandel | 0.095 s | 0.305 s | 0.151 s | 0.150 s | 1.6x | 1.6x |
+| list | 0.059 s | 0.064 s | 0.056 s | 0.057 s | 0.9x | 1.0x |
+| vec | 0.018 s | 0.082 s | 0.029 s | 0.037 s | 1.6x | 2.1x |
 
-Compiler speed: 44004 lines in 130.1 ms, about 338,355 lines/s (full build to a signed binary).
+Compiler speed: 44004 lines in 142.0 ms, about 309,805 lines/s (full build to a signed binary).

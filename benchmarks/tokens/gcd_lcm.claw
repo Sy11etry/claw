@@ -1,0 +1,13 @@
+fn gcd(a int, b int) int {
+    if b == 0 { ret a }
+    ret gcd(b, a % b)
+}
+
+fn lcm(a int, b int) int {
+    ret a / gcd(a, b) * b
+}
+
+fn main() {
+    print(gcd(84, 36))
+    print(lcm(21, 6))
+}

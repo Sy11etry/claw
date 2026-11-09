@@ -1,0 +1,16 @@
+fn locate(a []int, x int) ?int {
+    for v, i in a {
+        if v == x { ret i }
+    }
+    ret none
+}
+
+fn main() {
+    nums := [10, 20, 30]
+    first := locate(nums, 30) else -1
+    print(first)
+    second := locate(nums, 99) else -1
+    print(second)
+}
+// expect: 2
+// expect: -1

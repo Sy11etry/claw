@@ -74,6 +74,9 @@ fn needs_space(prev: &Tok, cur: &Tok, prev2: Option<&Tok>, adjacent: bool, gap_b
         // `[4]int`: nothing between the bracket and the element type.
         (Op("]"), Ident(_)) | (Op("]"), Op("[")) => false,
         (Ident(_), Op("(")) => false,
+        // `fn(int) int`, `[2]fn(int) int`, `pick(true)(4, 5)`.
+        (Kw("fn"), Op("(")) | (Op("]"), Kw("fn")) => false,
+        (Op(")"), Op("(")) => !adjacent,
         (Ident(_), Op("[")) | (Op(")"), Op("[")) | (Op("]"), Op("(")) => !adjacent,
         (Ident(n), Op("{")) if is_type_name(n) => !adjacent,
         (Op("]"), Op("{")) => !adjacent,

@@ -1,0 +1,15 @@
+fn clamp(x int, lo int, hi int) int
+    need lo <= hi
+    sure ret >= lo and ret <= hi
+{
+    if x < lo { ret lo }
+    if x > hi { ret hi }
+    ret x
+}
+
+fn main() {
+    print(clamp(15, 0, 10))
+    print(clamp(-5, 0, 10))
+}
+// expect: 10
+// expect: 0

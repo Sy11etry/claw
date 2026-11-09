@@ -1,0 +1,25 @@
+type BankErr = NoFunds{short int} | NoAccount
+
+fn withdraw(a &[]int, i int, n int) ! BankErr {
+    if i < 0 or i >= len(a) { fail NoAccount }
+    if a[i] < n { fail NoFunds{n - a[i]} }
+    a[i] -= n
+}
+
+fn try(a &[]int, i int, n int) {
+    withdraw(&a, i, n) else e {
+        match e {
+            NoFunds{short}: print("short by {short}")
+            NoAccount: print("no account")
+        }
+        ret
+    }
+    print("ok {a[i]}")
+}
+
+fn main() {
+    mut a []int = [100, 5]
+    try(&a, 0, 30)
+    try(&a, 1, 30)
+    try(&a, 7, 1)
+}

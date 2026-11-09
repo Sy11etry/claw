@@ -1,0 +1,47 @@
+type Tree[T] = Leaf | Node{v T, kids []Tree[T]}
+type Either[A, B] = Left{a A} | Right{b B}
+
+fn size[T](t Tree[T]) int {
+    match t {
+        Leaf: ret 0
+        Node{_, kids}: {
+            mut n := 1
+            for k in kids {
+                n += size(k)
+            }
+            ret n
+        }
+    }
+}
+
+fn empty() Tree[int] {
+    ret Leaf
+}
+
+fn show(e Either[int, str]) str +mem {
+    match e {
+        Left{a}: ret "left {a}"
+        Right{b}: ret "right {b}"
+    }
+}
+
+fn main() {
+    t := Node[int]{1, [Node[int]{2, []}, Leaf, Node{3, []}]}
+    print(size(t))
+    print(size(empty()))
+    l Either[int, str] = Left{5}
+    r Either[int, str] = Right{"x"}
+    print(show(l))
+    print(show(r))
+    mut all []Tree[str] = []
+    push(&all, Leaf)
+    push(&all, Node{"a", []})
+    print(len(all))
+    print(size(all[1]))
+}
+// expect: 3
+// expect: 0
+// expect: left 5
+// expect: right x
+// expect: 2
+// expect: 1

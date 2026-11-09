@@ -1,0 +1,6 @@
+fn main() {
+    parts := split("a,b,c", ",")
+    print(len(parts))
+    print(join(parts, "-"))
+    print(upper(trim("  claw ")))
+}

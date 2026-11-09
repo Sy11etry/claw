@@ -1,0 +1,18 @@
+type DivErr = Zero
+
+fn safe_div(a int, b int) int ! DivErr {
+    if b == 0 { fail Zero }
+    ret a / b
+}
+
+fn main() {
+    a := safe_div(7, 2) else 0
+    print(a)
+    b := safe_div(7, 0) else {
+        print("cannot divide")
+        ret
+    }
+    print(b)
+}
+// expect: 3
+// expect: cannot divide

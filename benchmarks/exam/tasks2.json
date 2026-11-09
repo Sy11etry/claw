@@ -1,0 +1,14 @@
+[
+ {"name": "max_subarray", "task": "Given the array -2, 1, -3, 4, -1, 2, 1, -5, 4, print the largest sum of a contiguous run of elements.", "expect": ["6"]},
+ {"name": "vowel_words", "task": "From the words of the string \"apple tree orange kite\", print one per line those that start with a vowel.", "expect": ["apple", "orange"]},
+ {"name": "student_best", "task": "Define a struct for a student with a name and an array of marks. Make the students (\"ann\", marks 3, 5) and (\"bob\", marks 4, 5, 5). Print the name of the student with the highest total, then that total on the next line.", "expect": ["bob", "14"]},
+ {"name": "stack_machine", "task": "Define a variant type of instructions: push a number, add, multiply. Run the program push 2, push 3, add, push 4, multiply on a stack and print the value left on top.", "expect": ["20"]},
+ {"name": "anagram", "task": "Write a function saying whether two strings are anagrams, by counting letters with a hash map or an array. Print the result for \"listen\" and \"silent\", then for \"abc\" and \"abd\", one per line.", "expect": ["true", "false"]},
+ {"name": "matrix_sum", "task": "Using a growable array of growable arrays of integers, build the rows (1 2) and (3 4 5) and print the sum of all the numbers.", "expect": ["15"]},
+ {"name": "longest_word", "task": "Print the longest word in \"a quick brownish fox\". Keep the longest word found so far in a variable.", "expect": ["brownish"]},
+ {"name": "try_chain", "task": "Write a function that parses a string to an integer and doubles it, passing a parse failure up to its caller with the error-propagation operator. In main print the result for \"21\", and for \"zz\" print the text \"bad\".", "expect": ["42", "bad"]},
+ {"name": "sum_with_map_fn", "task": "Write a generic function that applies a function to every element of an array and returns a new array. Use it with a named function that adds one, on the integers 1, 2, 3, and print the sum of the result.", "expect": ["9"]},
+ {"name": "balance", "task": "Define a struct account with a name and a balance. Keep two accounts in a growable array. Write a function that takes the array so it can change it and moves 30 from the account at index 0 to the account at index 1. Start balances are 100 and 5. Print the two balances, one per line.", "expect": ["70", "35"]},
+ {"name": "pointer_swap", "task": "Using raw pointers, write a function that swaps the integers two pointers point to. In a function that may use raw pointers, swap two local integers 1 and 2 and print them, one per line.", "expect": ["2", "1"]},
+ {"name": "string_builder", "task": "Write a function that repeats a string n times and returns the new string. Print the result for \"ab\" and 3.", "expect": ["ababab"]}
+]

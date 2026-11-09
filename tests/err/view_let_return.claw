@@ -1,0 +1,9 @@
+// error: E0152
+fn f(a []str) str {
+    v := a[0]
+    ret v
+}
+
+fn main() {
+    print(f(["a"]))
+}

@@ -1,0 +1,16 @@
+fn main() {
+    text := "the cat and the dog and the bird"
+    mut m := new_map[str, int](hash_str)
+    for w in split(text, " ") {
+        n := get(m, w) else 0
+        put(&m, copy(w), n + 1)
+    }
+    mut names []str = []
+    for e in m.items {
+        push(&names, copy(e.key))
+    }
+    sort(&names)
+    for w in names {
+        print("{w} {get(m, w) else 0}")
+    }
+}

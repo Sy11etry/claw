@@ -1,0 +1,11 @@
+// error: E0177
+fn half(x int) int
+    need x % 2 == 0
+{
+    ret x / 2
+}
+
+fn main() {
+    f fn(int) int = half
+    print(f(2))
+}

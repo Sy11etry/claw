@@ -24,10 +24,6 @@ fn join(a: Span, b: Span) -> Span {
     Span { start: a.start, end: b.end, line: a.line, col: a.col, file: a.file }
 }
 
-fn not_yet(what: &str) -> String {
-    format!("{what} is not available in claw 0.5")
-}
-
 fn is_type_name(s: &str) -> bool {
     s.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
 }
@@ -280,8 +276,10 @@ impl<'a> Parser<'a> {
         let (name, span) = self.expect_ident("a constant name")?;
         let ty = if self.at_op("=") { None } else { Some(self.parse_type()?) };
         self.expect_op("=")?;
+        let start = self.span();
         let value = self.parse_expr(0)?;
-        Ok(ConstDecl { name, span, public, ty, value, computed: false })
+        let text = self.text_since(start);
+        Ok(ConstDecl { name, span, public, ty, value, computed: false, text })
     }
 
     fn parse_fields(&mut self) -> PResult<Vec<FieldDecl>> {
@@ -365,6 +363,9 @@ impl<'a> Parser<'a> {
             let inner = self.parse_type_base()?;
             return Ok(TypeExpr { kind: TypeKind::Ref(Box::new(inner)), span });
         }
+        if self.at_kw("fn") {
+            return self.parse_fn_type(span);
+        }
         let (first, _) = self.expect_ident("a type")?;
         let (module, name) = if self.at_op(".") {
             self.bump();
@@ -374,6 +375,44 @@ impl<'a> Parser<'a> {
         };
         let targs = if self.at_op("[") { self.parse_targs()? } else { Vec::new() };
         Ok(TypeExpr { kind: TypeKind::Name { module, name, targs }, span })
+    }
+
+    fn at_type_start(&self) -> bool {
+        matches!(self.peek(), Tok::Ident(_)) || self.at_op("[") || self.at_op("?") || self.at_op("*") || self.at_op("!") || self.at_op("&") || self.at_kw("fn")
+    }
+
+    fn parse_effects(&mut self) -> PResult<Vec<String>> {
+        let mut effects = Vec::new();
+        while self.at_op("+") {
+            self.bump();
+            let (e, span) = self.expect_ident("an effect name")?;
+            if e != "mem" && e != "io" {
+                return self.error("E0132", span, format!("unknown effect `{e}`; use `+mem` or `+io`"));
+            }
+            effects.push(e);
+        }
+        Ok(effects)
+    }
+
+    /// `fn(int, own str) int +mem`, at the word `fn`.
+    fn parse_fn_type(&mut self, span: Span) -> PResult<TypeExpr> {
+        self.bump();
+        self.expect_op("(")?;
+        let mut params = Vec::new();
+        while !self.at_op(")") {
+            let own = self.at_kw("own");
+            if own {
+                self.bump();
+            }
+            params.push((own, self.parse_type()?));
+            if !self.eat_op(",") {
+                break;
+            }
+        }
+        self.expect_op(")")?;
+        let ret = if self.at_type_start() { Some(Box::new(self.parse_type()?)) } else { None };
+        let effects = self.parse_effects()?;
+        Ok(TypeExpr { kind: TypeKind::Fn { params, ret, effects }, span })
     }
 
     fn parse_targs(&mut self) -> PResult<Vec<TypeExpr>> {
@@ -391,6 +430,15 @@ impl<'a> Parser<'a> {
 
     /// At `[`: does this bracket hold type arguments, as in `max[int](1, 2)`?
     fn looks_like_targs(&self, name: &str) -> bool {
+        // `table[i](x)` indexes; only a type can start `max[int](x)`.
+        let is_type = match self.peek_at(1) {
+            Tok::Ident(t) => is_type_name(t) || matches!(t.as_str(), "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "str") || matches!(self.peek_at(2), Tok::Op(".")),
+            Tok::Op("[") | Tok::Op("*") | Tok::Op("?") | Tok::Op("&") | Tok::Kw("fn") => true,
+            _ => false,
+        };
+        if !is_type {
+            return false;
+        }
         let mut i = 1;
         let mut depth = 1;
         while depth > 0 {
@@ -444,18 +492,8 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_op(")")?;
-        let starts_type = matches!(self.peek(), Tok::Ident(_)) || self.at_op("[") || self.at_op("?") || self.at_op("*") || self.at_op("!") || self.at_op("&");
-        let ret = if starts_type { Some(self.parse_type()?) } else { None };
-
-        let mut effects = Vec::new();
-        while self.at_op("+") {
-            self.bump();
-            let (e, span) = self.expect_ident("an effect name")?;
-            if e != "mem" && e != "io" {
-                return self.error("E0132", span, format!("unknown effect `{e}`; use `+mem` or `+io`"));
-            }
-            effects.push(e);
-        }
+        let ret = if self.at_type_start() { Some(self.parse_type()?) } else { None };
+        let effects = self.parse_effects()?;
         let last = self.toks[self.pos.saturating_sub(1)].span;
         let sig_end = Span { start: last.end, end: last.end, line: last.line, col: last.col, file: last.file };
 
@@ -513,8 +551,8 @@ impl<'a> Parser<'a> {
     /// `x [4]int = ...` and `x ?int = ...` declare; `x[4] = ...` assigns.
     fn is_typed_let(&self) -> bool {
         match self.peek_at(1) {
-            Tok::Ident(_) => true,
-            Tok::Op("?") => matches!(self.peek_at(2), Tok::Ident(_) | Tok::Op("[") | Tok::Op("?") | Tok::Op("*")),
+            Tok::Ident(_) | Tok::Kw("fn") => true,
+            Tok::Op("?") => matches!(self.peek_at(2), Tok::Ident(_) | Tok::Op("[") | Tok::Op("?") | Tok::Op("*") | Tok::Kw("fn")),
             // `x * y` alone does nothing, so at the start of a line this is a pointer type.
             Tok::Op("*") => true,
             Tok::Op("[") => {
@@ -533,7 +571,7 @@ impl<'a> Parser<'a> {
                         i += 1;
                     }
                 }
-                matches!(self.peek_at(i), Tok::Ident(_) | Tok::Op("?") | Tok::Op("*"))
+                matches!(self.peek_at(i), Tok::Ident(_) | Tok::Op("?") | Tok::Op("*") | Tok::Kw("fn"))
             }
             _ => false,
         }
@@ -894,13 +932,14 @@ impl<'a> Parser<'a> {
                 let targs = if self.at_op("[") && self.looks_like_targs(&name) { self.parse_targs()? } else { Vec::new() };
                 let module = if let ExprKind::Var(m) = &e.kind { Some(m.clone()) } else { None };
                 if self.at_op("(") {
-                    let Some(module) = module else {
-                        return self.error("E0900", name_span, not_yet("calling through a value"));
-                    };
                     self.bump();
                     let (args, close) = self.parse_args(")")?;
                     let span = join(e.span, close);
-                    e = Expr::new(ExprKind::Call { module: Some(module), name, name_span, targs, args }, span);
+                    let field = Expr::new(ExprKind::Field { e: Box::new(e), name: name.clone(), name_span }, span);
+                    e = match module {
+                        Some(module) => Expr::new(ExprKind::Call { module: Some(module), name, name_span, targs, args, via: Some(Box::new(field)) }, span),
+                        None => Expr::new(ExprKind::CallValue { f: Box::new(field), args }, span),
+                    };
                 } else if self.at_op("{") && module.is_some() && is_type_name(&name) && !self.in_head {
                     self.bump();
                     let (args, close) = self.parse_args("}")?;
@@ -916,6 +955,11 @@ impl<'a> Parser<'a> {
                 let result = self.parse_index_or_slice(e);
                 self.in_head = was;
                 e = result?;
+            } else if self.at_op("(") {
+                self.bump();
+                let (args, close) = self.parse_args(")")?;
+                let span = join(e.span, close);
+                e = Expr::new(ExprKind::CallValue { f: Box::new(e), args }, span);
             } else if self.at_op("?") {
                 let close = self.bump();
                 let span = join(e.span, close.span);
@@ -1088,7 +1132,7 @@ impl<'a> Parser<'a> {
                 if self.at_op("(") {
                     self.bump();
                     let (args, close) = self.parse_args(")")?;
-                    Ok(Expr::new(ExprKind::Call { module: None, name, name_span: span, targs, args }, join(span, close)))
+                    Ok(Expr::new(ExprKind::Call { module: None, name, name_span: span, targs, args, via: None }, join(span, close)))
                 } else if self.at_op("{") && is_type_name(&name) && !self.in_head {
                     self.bump();
                     let (args, close) = self.parse_args("}")?;

@@ -9,6 +9,7 @@ mod diag;
 mod effects;
 mod fmt;
 mod fuzz;
+mod info;
 mod interp;
 mod lexer;
 mod lower;
@@ -40,6 +41,11 @@ claw build <file.claw> [-o out] optimized executable; contracts with calls are l
     --fast                      remove every run-time check: speed like C, risk like C
     --stats                     say how many checks were proved unnecessary
 claw check <file.claw>          report errors only
+claw card                       the language on one page
+claw sig <file.claw> | std      only the signatures, with the effects worked out
+    --pub                       only what the module exports
+claw ctx <file.claw> <fn>       one function and what it takes to change it
+claw audit <file.claw>          every place the compiler has to trust
 claw fmt <file.claw> [--check]  put a file into the one standard format
 claw --version
 flags: --json (errors as JSON), --emit-cir (print the IR)
@@ -57,12 +63,20 @@ struct Options {
     stats: bool,
     /// `claw test --blocks`: no generated inputs, no explanations.
     blocks: bool,
+    /// `claw sig --pub`.
+    public: bool,
+    /// `claw ctx file name`: the function asked about.
+    name: Option<String>,
     /// `claw why --test name`.
     test_name: Option<String>,
 }
 
 fn parse_options(args: &[String]) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, test_name: None };
+    options(args, false)
+}
+
+fn options(args: &[String], ctx: bool) -> Options {
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, test_name: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -73,6 +87,7 @@ fn parse_options(args: &[String]) -> Options {
             "--fast" => o.fast = true,
             "--stats" => o.stats = true,
             "--blocks" => o.blocks = true,
+            "--pub" => o.public = true,
             "--test" => {
                 i += 1;
                 match args.get(i) {
@@ -89,6 +104,7 @@ fn parse_options(args: &[String]) -> Options {
             }
             a if a.starts_with('-') => die(&format!("unknown flag `{a}`")),
             a if o.file.is_empty() => o.file = a.to_string(),
+            a if ctx && o.name.is_none() => o.name = Some(a.to_string()),
             a => die(&format!("unexpected argument `{a}`")),
         }
         i += 1;
@@ -535,6 +551,30 @@ fn real_main() {
         Some("test") => test_all(&parse_options(&args[1..])),
         Some("why") => why_file(&parse_options(&args[1..])),
         Some("fix") => fix_file(&parse_options(&args[1..])),
+        Some("card") => print!("{}", info::CARD),
+        Some("sig") if args.get(1).is_some_and(|a| a == "std") || args.get(2).is_some_and(|a| a == "std") => print!("{}", info::sig_std()),
+        Some("sig") => {
+            let o = parse_options(&args[1..]);
+            let f = front(&o, false, false);
+            print!("{}", info::sig(&f.loaded.units, &f.effects, o.public));
+        }
+        Some("ctx") => {
+            let o = options(&args[1..], true);
+            let Some(name) = o.name.clone() else { die("`claw ctx` needs a function name") };
+            let f = front(&o, false, false);
+            match info::ctx(&f.loaded.units, &f.checked, &f.effects, &f.loaded.files, &f.loaded.base_names, &name) {
+                Ok(text) => print!("{text}"),
+                Err(msg) => {
+                    eprintln!("claw: {msg}");
+                    exit(2);
+                }
+            }
+        }
+        Some("audit") => {
+            let o = parse_options(&args[1..]);
+            let f = front(&o, false, false);
+            print!("{}", info::audit(&f.loaded.units, &f.checked, &f.loaded.base_names));
+        }
         Some("__interp") => interpret(&parse_options(&args[1..])),
         Some("fmt") => format_file(&parse_options(&args[1..])),
         Some("check") => {

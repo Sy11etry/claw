@@ -1,0 +1,27 @@
+fn add_one(x int) int {
+    ret x + 1
+}
+
+fn map_all[T, U](a []T, f fn(T) U) []U {
+    mut out []U = []
+    for v in a {
+        push(&out, f(v))
+    }
+    ret out
+}
+
+fn sum(a []int) int {
+    mut s := 0
+    for v in a { s += v }
+    ret s
+}
+
+fn main() {
+    mut nums []int = []
+    push(&nums, 1)
+    push(&nums, 2)
+    push(&nums, 3)
+    bumped := map_all(nums, add_one)
+    print(sum(bumped))
+}
+// expect: 9

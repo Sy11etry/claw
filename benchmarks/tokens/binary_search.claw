@@ -1,0 +1,20 @@
+fn search(a []int, x int) ?int {
+    mut lo := 0
+    mut hi := len(a)
+    for lo < hi {
+        mid := (lo + hi) / 2
+        if a[mid] == x { ret mid }
+        if a[mid] < x {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    ret none
+}
+
+fn main() {
+    a := [1, 3, 5, 7, 9, 11]
+    print(search(a, 7) else -1)
+    print(search(a, 4) else -1)
+}

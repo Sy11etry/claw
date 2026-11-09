@@ -15,6 +15,8 @@ pub struct FnSig {
     /// The C symbol, for `extern fn`.
     pub ext: Option<String>,
     pub variadic: bool,
+    /// Has a `need`, which only a direct call can check.
+    pub has_need: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -92,6 +94,8 @@ struct Mod<'a> {
     consts: HashMap<String, (ConstVal, Ty, bool)>,
     funcs: HashMap<String, (Option<&'a Func>, bool)>,
     gtypes: HashMap<String, (&'a TypeDecl, bool)>,
+    /// A variant of a template type, and its position in that type.
+    gvariants: HashMap<String, (&'a TypeDecl, usize, bool)>,
 }
 
 struct Global<'a> {
@@ -188,6 +192,16 @@ impl<'a> Global<'a> {
                 }
                 self.types.intern(Kind::Array(e, n as u64))
             }
+            TypeKind::Fn { params, ret, effects } => {
+                let own = params.iter().map(|p| p.0).collect();
+                let params: Vec<Ty> = params.iter().map(|p| self.resolve(&p.1, diags)).collect();
+                let ret = ret.as_ref().map(|r| self.resolve(r, diags)).unwrap_or(VOID);
+                if ret == ERR || params.contains(&ERR) {
+                    return ERR;
+                }
+                let effects = effects.iter().fold(0, |m, e| m | if e == "mem" { MEM } else { IO });
+                self.types.fn_type(FnType { params, own, ret, effects })
+            }
             TypeKind::Option(inner) => {
                 let p = self.resolve(inner, diags);
                 if p == ERR {
@@ -248,6 +262,21 @@ impl<'a> Global<'a> {
             }
             return self.instantiate_type(d, m, args, diags);
         }
+        // A template from the always-available module, when nothing nearer has this name.
+        if module.is_none() && !self.mods[m].names.contains_key(name) {
+            if let Some(&(d, true)) = self.mods[self.core].gtypes.get(name) {
+                let core = self.core;
+                if targs.len() != d.tparams.len() {
+                    diags.push(Diag::new("E0144", span, format!("`{name}` takes {} type arguments, found {}", d.tparams.len(), targs.len())));
+                    return ERR;
+                }
+                let args: Vec<Ty> = targs.iter().map(|a| self.resolve(a, diags)).collect();
+                if args.contains(&ERR) {
+                    return ERR;
+                }
+                return self.instantiate_type(d, core, args, diags);
+            }
+        }
         match self.mods[m].names.get(name).copied() {
             Some((NameDef::Type(ty), public)) => {
                 if !public && !local {
@@ -300,11 +329,18 @@ impl<'a> Global<'a> {
             diags.push(Diag::new("E0145", d.span, format!("`{}` keeps instantiating itself with new types", d.name)));
             return ERR;
         }
-        let TypeBody::Struct(fields) = &d.body else { return ERR };
         let name = format!("{}[{}]", d.name, type_list(&self.types, &targs));
-        self.types.structs.push(StructDef { name, fields: Vec::new(), size: 0, align: 1, module: m, state: 0 });
-        let id = self.types.structs.len() - 1;
-        let ty = self.types.intern(Kind::Struct(id));
+        let ty = match &d.body {
+            TypeBody::Struct(_) => {
+                self.types.structs.push(StructDef { name, fields: Vec::new(), size: 0, align: 1, module: m, state: 0 });
+                self.types.intern(Kind::Struct(self.types.structs.len() - 1))
+            }
+            TypeBody::Variants(vars) => {
+                let variants = vars.iter().map(|v| Variant { name: v.name.clone(), fields: Vec::new() }).collect();
+                self.types.enums.push(EnumDef { name, variants, size: TAG_SIZE, module: m, state: 0 });
+                self.types.intern(Kind::Enum(self.types.enums.len() - 1))
+            }
+        };
         self.struct_insts.insert(key, ty);
         self.instance_of.insert(ty, (m, d.name.clone(), targs.clone()));
         self.spans.insert(ty, d.span);
@@ -313,12 +349,22 @@ impl<'a> Global<'a> {
         let saved_env = std::mem::replace(&mut self.tenv, tenv);
         let saved_cur = std::mem::replace(&mut self.cur, m);
         self.depth += 1;
-        let resolved: Vec<Field> =
-            fields.iter().map(|f| Field { name: f.name.clone(), ty: self.resolve(&f.ty, diags), offset: 0 }).collect();
+        match (&d.body, self.types.kind(ty)) {
+            (TypeBody::Struct(fields), Kind::Struct(id)) => {
+                let resolved: Vec<Field> = fields.iter().map(|f| Field { name: f.name.clone(), ty: self.resolve(&f.ty, diags), offset: 0 }).collect();
+                self.types.structs[id].fields = resolved;
+            }
+            (TypeBody::Variants(vars), Kind::Enum(id)) => {
+                for (i, v) in vars.iter().enumerate() {
+                    let resolved: Vec<Field> = v.fields.iter().map(|f| Field { name: f.name.clone(), ty: self.resolve(&f.ty, diags), offset: 0 }).collect();
+                    self.types.enums[id].variants[i].fields = resolved;
+                }
+            }
+            _ => {}
+        }
         self.depth -= 1;
         self.tenv = saved_env;
         self.cur = saved_cur;
-        self.types.structs[id].fields = resolved;
         if self.layout_ready {
             self.ensure_layout(ty, diags);
         }
@@ -420,7 +466,8 @@ impl<'a> Global<'a> {
         self.tenv = saved_env;
         self.cur = saved_cur;
         let own = f.params.iter().map(|p| p.own).collect();
-        self.sigs.insert(full.clone(), FnSig { params, own, ret, ext: None, variadic: false });
+        let has_need = f.contracts.iter().any(|c| !c.sure);
+        self.sigs.insert(full.clone(), FnSig { params, own, ret, ext: None, variadic: false, has_need });
         self.work.push((f, m, targs, full.clone()));
         full
     }
@@ -451,7 +498,7 @@ impl<'a> Global<'a> {
                 }
             }
             TypeKind::Slice(x) => {
-                if let Kind::Slice(t) = self.types.kind(a) {
+                if let Kind::Slice(t) | Kind::Array(t, _) = self.types.kind(a) {
                     self.unify(x, t, bind, tparams);
                 }
             }
@@ -464,6 +511,17 @@ impl<'a> Global<'a> {
                 Kind::Option(t) => self.unify(x, t, bind, tparams),
                 _ => self.unify(x, a, bind, tparams),
             },
+            TypeKind::Fn { params, ret, .. } => {
+                if let Kind::Fn(id) = self.types.kind(a) {
+                    let f = self.types.fns[id].clone();
+                    for (x, y) in params.iter().zip(&f.params) {
+                        self.unify(&x.1, *y, bind, tparams);
+                    }
+                    if let Some(r) = ret {
+                        self.unify(r, f.ret, bind, tparams);
+                    }
+                }
+            }
             TypeKind::Result(ok, err) => match self.types.kind(a) {
                 Kind::Result(o, e) => {
                     if let Some(k) = ok {
@@ -660,14 +718,21 @@ fn declare_types<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
             for (n, sp) in &d.tparams {
                 check_case(n, true, "type parameter", *sp, diags);
             }
-            if matches!(d.body, TypeBody::Variants(_)) {
-                diags.push(Diag::new("E0900", d.span, "generic variants are not available yet; use a generic struct or `?T`"));
+            let m = &mut g.mods[g.cur];
+            if m.names.contains_key(&d.name) || m.gtypes.contains_key(&d.name) {
+                diags.push(Diag::new("E0110", d.span, format!("`{}` is defined twice", d.name)));
             } else {
-                let m = &mut g.mods[g.cur];
-                if m.names.contains_key(&d.name) || m.gtypes.contains_key(&d.name) {
-                    diags.push(Diag::new("E0110", d.span, format!("`{}` is defined twice", d.name)));
-                } else {
-                    m.gtypes.insert(d.name.clone(), (d, d.public));
+                m.gtypes.insert(d.name.clone(), (d, d.public));
+                if let TypeBody::Variants(vars) = &d.body {
+                    for (i, v) in vars.iter().enumerate() {
+                        check_case(&v.name, true, "variant", v.span, diags);
+                        let m = &mut g.mods[g.cur];
+                        if m.names.contains_key(&v.name) || m.gtypes.contains_key(&v.name) || m.gvariants.contains_key(&v.name) {
+                            diags.push(Diag::new("E0110", v.span, format!("`{}` is defined twice", v.name)));
+                        } else {
+                            m.gvariants.insert(v.name.clone(), (d, i, d.public));
+                        }
+                    }
                 }
             }
             ids.push(None);
@@ -778,7 +843,8 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
         }
         g.mods[g.cur].funcs.insert(f.name.clone(), (None, f.public));
         let own = f.params.iter().map(|p| p.own).collect();
-        g.sigs.insert(format!("{prefix}{}", f.name), FnSig { params, own, ret, ext: None, variadic: false });
+        let has_need = f.contracts.iter().any(|c| !c.sure);
+        g.sigs.insert(format!("{prefix}{}", f.name), FnSig { params, own, ret, ext: None, variadic: false, has_need });
     }
     for x in &p.externs {
         if g.mods[g.cur].funcs.contains_key(&x.name) || BUILTINS.contains(&x.name.as_str()) {
@@ -798,7 +864,7 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
         g.mods[g.cur].funcs.insert(x.name.clone(), (None, x.public));
         let symbol = x.symbol.clone().unwrap_or_else(|| x.name.clone());
         let own = vec![false; params.len()];
-        g.sigs.insert(format!("{prefix}{}", x.name), FnSig { params, own, ret, ext: Some(symbol), variadic: x.variadic });
+        g.sigs.insert(format!("{prefix}{}", x.name), FnSig { params, own, ret, ext: Some(symbol), variadic: x.variadic, has_need: false });
     }
 }
 
@@ -814,6 +880,8 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
         loops: 0,
         is_main,
         locks: Vec::new(),
+        scope_locks: Vec::new(),
+        in_text: false,
         in_defer: false,
         moved: HashMap::new(),
         flows: Vec::new(),
@@ -866,7 +934,7 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
                 names: HashMap::new(),
                 consts: HashMap::new(),
                 funcs: HashMap::new(),
-                gtypes: HashMap::new(),
+                gtypes: HashMap::new(), gvariants: HashMap::new(),
             })
             .collect(),
         cur: 0,
@@ -980,6 +1048,10 @@ struct Ctx<'a, 'b> {
     is_main: bool,
     /// Arrays being walked by an enclosing `for ... in`.
     locks: Vec<String>,
+    /// Locks held until a block ends: (scope depth, how many locks there were then).
+    scope_locks: Vec<(usize, usize)>,
+    /// Inside `{...}` of a string.
+    in_text: bool,
     in_defer: bool,
     /// Variables whose value has left, and where it left.
     moved: HashMap<String, Span>,
@@ -1051,6 +1123,12 @@ pub fn walk<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
                 walk(a, f);
             }
         }
+        ExprKind::CallValue { f: callee, args } => {
+            walk(callee, f);
+            for a in args {
+                walk(a, f);
+            }
+        }
         ExprKind::Interp(parts) => {
             for p in parts {
                 if let Part::Expr(x) = p {
@@ -1101,6 +1179,7 @@ fn mentions_unbound(p: &TypeExpr, bind: &HashMap<String, Ty>, tparams: &[(String
         TypeKind::Name { name, targs, .. } => (tparams.iter().any(|t| t.0 == *name) && !bind.contains_key(name)) || targs.iter().any(rec),
         TypeKind::Pointer(x) | TypeKind::Ref(x) | TypeKind::Slice(x) | TypeKind::Array(_, x) | TypeKind::Option(x) => rec(x),
         TypeKind::Result(ok, err) => ok.as_deref().is_some_and(rec) || rec(err),
+        TypeKind::Fn { params, ret, .. } => params.iter().any(|x| rec(&x.1)) || ret.as_deref().is_some_and(rec),
     }
 }
 
@@ -1172,6 +1251,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
     }
 
     fn pop_scope(&mut self) {
+        while self.scope_locks.last().is_some_and(|l| l.0 == self.scopes.len()) {
+            let (_, count) = self.scope_locks.pop().unwrap();
+            self.locks.truncate(count - 1);
+        }
         let scope = self.scopes.pop().unwrap();
         for (name, v) in scope {
             self.moved.remove(&name);
@@ -1264,6 +1347,17 @@ impl<'a, 'b> Ctx<'a, 'b> {
             Kind::StrLit => self.err("E0900", span, "this string form only works directly inside `print`"),
             Kind::Ref(_) => self.err("E0157", span, "`&x` only works as an argument to a `&` parameter"),
             _ => ty,
+        }
+    }
+
+    fn printable(&mut self, span: Span, ty: Ty) {
+        self.value_type(span, ty);
+        if matches!(self.kind(ty), Kind::Fn(_)) {
+            self.err("E0104", span, "a function has nothing to print");
+        }
+        if self.g.types.contains_itself(ty) {
+            let n = self.tname(ty);
+            self.err("E0179", span, format!("`{n}` contains itself, so it cannot be printed whole; write a function that walks it"));
         }
     }
 
@@ -1397,13 +1491,24 @@ impl<'a, 'b> Ctx<'a, 'b> {
                         self.value_type(init.span, got)
                     }
                 };
-                self.consume(init);
+                let held = if *mutable || init.coerce.get() != Coerce::No { None } else { self.view_of(init) };
+                match &held {
+                    Some(_) => init.coerce.set(Coerce::View),
+                    None => self.consume(init),
+                }
                 let decl = if *mutable {
                     Span { start: s.span.start, end: name_span.start, line: s.span.line, col: s.span.col, file: s.span.file }
                 } else {
                     Span { start: s.span.start, end: s.span.start, line: s.span.line, col: s.span.col, file: s.span.file }
                 };
                 self.declare(name, final_ty, *mutable, *name_span, decl);
+                if let Some(root) = held {
+                    if let Some(v) = self.lookup(name) {
+                        v.view = true;
+                    }
+                    self.locks.push(root);
+                    self.scope_locks.push((self.scopes.len(), self.locks.len()));
+                }
                 false
             }
             StmtKind::Assign { target, op, value } => {
@@ -1419,7 +1524,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                             self.lookup(&root).unwrap().written = true;
                         }
                         if self.locks.contains(&root) {
-                            self.diags.push(Diag::new("E0122", target.span, format!("`{root}` cannot change while a `for` is walking it")));
+                            self.diags.push(Diag::new("E0122", target.span, format!("`{root}` cannot change while a `for` or a view is reading it")));
                         }
                     }
                     Root::Through => {}
@@ -1478,7 +1583,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             StmtKind::Expr(e) => {
                 let got = self.expr(e, None);
                 match &e.kind {
-                    ExprKind::Call { .. } | ExprKind::Try(_) | ExprKind::Else { .. } => {
+                    ExprKind::Call { .. } | ExprKind::CallValue { .. } | ExprKind::Try(_) | ExprKind::Else { .. } => {
                         if got != VOID && got != ERR {
                             let d = Diag::new("E0111", e.span, "result is not used").suggest(e.span.before(), "_ = ", "assign it to `_` if it really does not matter");
                             self.diags.push(d);
@@ -1690,6 +1795,21 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
+    /// `x := a.b[i]`: the variable this would be a read-only view into, if it can be one.
+    fn view_of(&self, e: &Expr) -> Option<String> {
+        if !matches!(e.kind, ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Slice { .. }) || !self.g.types.needs_drop(e.ty.get()) || self.in_contract {
+            return None;
+        }
+        let mut at = e;
+        loop {
+            match &at.kind {
+                ExprKind::Field { e: inner, .. } | ExprKind::Index { e: inner, .. } | ExprKind::Slice { e: inner, .. } if !self.g.types.is_ptr(inner.ty.get()) => at = inner,
+                ExprKind::Var(n) => return Some(n.clone()),
+                _ => return None,
+            }
+        }
+    }
+
     /// `e` is being taken over by something else. Only whole local variables can go.
     fn consume(&mut self, e: &Expr) {
         let t = e.ty.get();
@@ -1711,7 +1831,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     return;
                 }
                 if self.locks.contains(n) {
-                    self.diags.push(Diag::new("E0122", e.span, format!("`{n}` cannot move while it is being walked or matched")));
+                    self.diags.push(Diag::new("E0122", e.span, format!("`{n}` cannot move while it is being walked, matched or viewed")));
                     return;
                 }
                 self.moved.insert(n.clone(), e.span);
@@ -1915,8 +2035,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
             ExprKind::Interp(parts) => {
                 for p in parts {
                     if let Part::Expr(x) = p {
+                        self.in_text = true;
                         let t = self.expr(x, None);
-                        self.value_type(x.span, t);
+                        self.in_text = false;
+                        self.printable(x.span, t);
                     }
                 }
                 STR
@@ -1952,13 +2074,17 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
                 t
             }
-            ExprKind::Var(name) => self.var(e, name),
+            ExprKind::Var(name) => self.var(e, name, num_hint),
             ExprKind::AddrOf(inner) => self.addr_of(e, inner, hint),
             ExprKind::Deref(inner) => self.deref_type(e, inner),
             ExprKind::Unary { op, e: inner } => self.unary(e, *op, inner, num_hint),
             ExprKind::Binary { op, l, r } => self.binary(*op, l, r, num_hint),
-            ExprKind::Call { module, name, name_span, targs, args } => self.call(e, module.as_deref(), name, *name_span, targs, args),
-            ExprKind::StructLit { module, name, name_span, targs, args } => self.struct_lit(e, module.as_deref(), name, *name_span, targs, args),
+            ExprKind::Call { module, name, name_span, targs, args, via } => self.call(e, module.as_deref(), name, *name_span, targs, args, via.as_deref()),
+            ExprKind::CallValue { f, args } => {
+                let t = self.expr(f, None);
+                self.call_value(e, t, f.span, args)
+            }
+            ExprKind::StructLit { module, name, name_span, targs, args } => self.struct_lit(e, module.as_deref(), name, *name_span, targs, args, num_hint),
             ExprKind::ArrayLit(items) => self.array_lit(e, items, num_hint),
             ExprKind::ArrayFill(item) => match num_hint.map(|h| self.kind(h)) {
                 Some(Kind::Array(elem, _)) => {
@@ -1981,7 +2107,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if let ExprKind::Var(alias) = &base.kind {
                     if self.lookup(alias).is_none() && self.g.mods[self.g.cur].imports.contains_key(alias) {
                         let m = self.g.import(alias, base.span, self.diags).unwrap();
-                        return self.member(e, m, name, *name_span);
+                        return self.member(e, m, name, *name_span, num_hint);
                     }
                 }
                 let b = self.expr(base, None);
@@ -2010,7 +2136,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
-    fn var(&mut self, e: &Expr, name: &str) -> Ty {
+    fn var(&mut self, e: &Expr, name: &str, hint: Option<Ty>) -> Ty {
         if self.lookup(name).is_some() {
             self.check_live(name, e.span);
             let v = self.lookup(name).unwrap();
@@ -2023,18 +2149,43 @@ impl<'a, 'b> Ctx<'a, 'b> {
             return ty;
         }
         let m = self.g.cur;
-        if self.g.mods[m].consts.contains_key(name) || self.g.mods[m].names.contains_key(name) {
-            return self.member(e, m, name, e.span);
+        if self.g.mods[m].consts.contains_key(name) || self.g.mods[m].names.contains_key(name) || self.g.mods[m].gvariants.contains_key(name) || self.g.mods[m].funcs.contains_key(name) {
+            return self.member(e, m, name, e.span, hint);
+        }
+        let core = self.g.core;
+        if self.g.mods[core].funcs.get(name).is_some_and(|f| f.1) {
+            return self.member(e, core, name, e.span, hint);
         }
         if name == "_" {
             return self.err("E0101", e.span, "`_` can only be assigned to, not read");
         }
-        self.err("E0101", e.span, format!("unknown name `{name}`"))
+        let hint = if self.in_text { "; a literal brace in a string is `{{`" } else { "" };
+        self.err("E0101", e.span, format!("unknown name `{name}`{hint}"))
     }
 
     /// A constant or a field-less variant of module `m`.
-    fn member(&mut self, e: &Expr, m: usize, name: &str, span: Span) -> Ty {
+    fn member(&mut self, e: &Expr, m: usize, name: &str, span: Span, hint: Option<Ty>) -> Ty {
         let local = m == self.g.cur;
+        if self.g.mods[m].funcs.contains_key(name) {
+            return self.func_value(e, m, name, span, hint);
+        }
+        if let Some(&(d, idx, public)) = self.g.mods[m].gvariants.get(name) {
+            if !public && !local {
+                return self.err("E0147", span, private_msg(name));
+            }
+            let TypeBody::Variants(vars) = &d.body else { return ERR };
+            if !vars[idx].fields.is_empty() {
+                return self.err("E0106", span, format!("`{name}` needs its fields: `{name}{{...}}`"));
+            }
+            let Some(args) = self.targs_from_hint(d, m, hint) else {
+                return self.err("E0123", span, format!("cannot tell which `{}[...]` this `{name}` is; give the variable a type or write `{name}[...]{{}}`", d.name));
+            };
+            let ty = self.g.instantiate_type(d, m, args, self.diags);
+            if let Kind::Enum(eid) = self.kind(ty) {
+                *e.res.borrow_mut() = Res::Variant(eid, idx);
+            }
+            return ty;
+        }
         if let Some(&(v, t, public)) = self.g.mods[m].consts.get(name) {
             if !public && !local {
                 return self.err("E0147", span, private_msg(name));
@@ -2058,6 +2209,40 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
+    /// The type arguments of the template `d`, if `hint` is an instance of it.
+    fn targs_from_hint(&self, d: &TypeDecl, m: usize, hint: Option<Ty>) -> Option<Vec<Ty>> {
+        let (module, name, args) = self.g.instance_of.get(&hint?)?;
+        (*module == m && *name == d.name).then(|| args.clone())
+    }
+
+    /// A function named where a value is expected: `apply(double, 3)`.
+    fn func_value(&mut self, e: &Expr, m: usize, name: &str, span: Span, hint: Option<Ty>) -> Ty {
+        let (generic, public) = self.g.mods[m].funcs[name];
+        if !public && m != self.g.cur {
+            return self.err("E0147", span, private_msg(name));
+        }
+        if generic.is_some() {
+            return self.err("E0176", span, format!("`{name}` is a template, so it is not one function; wrap the use you want in a small `fn`"));
+        }
+        let full = format!("{}{name}", self.g.mods[m].prefix);
+        let Some(sig) = self.g.sigs.get(&full).cloned() else { return ERR };
+        if sig.ext.is_some() {
+            return self.err("E0176", span, format!("`extern fn {name}` cannot be a value; wrap it in a small `claw fn`"));
+        }
+        if sig.has_need {
+            return self.err("E0177", span, format!("`{name}` has a `need`, and a call through a value could not check it; wrap it in a `fn` that handles every input"));
+        }
+        let Some(Kind::Fn(id)) = hint.map(|h| self.kind(h)) else {
+            if matches!(hint.map(|h| self.kind(h)), Some(Kind::Err)) {
+                return ERR;
+            }
+            return self.err("E0123", span, format!("cannot tell which function type `{name}` should have; write `f fn(int) int = {name}`"));
+        };
+        let effects = self.g.types.fns[id].effects;
+        *e.res.borrow_mut() = Res::Func(full);
+        self.g.types.fn_type(FnType { params: sig.params, own: sig.own, ret: sig.ret, effects })
+    }
+
     fn addr_of(&mut self, e: &Expr, inner: &Expr, hint: Option<Ty>) -> Ty {
         if self.in_contract {
             self.expr(inner, None);
@@ -2078,7 +2263,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             Root::Var(root) => {
                 self.check_live(&root, inner.span);
                 if self.locks.contains(&root) {
-                    self.diags.push(Diag::new("E0122", inner.span, format!("`{root}` cannot change while it is being walked or matched")));
+                    self.diags.push(Diag::new("E0122", inner.span, format!("`{root}` cannot change while it is being walked, matched or viewed")));
                 }
                 let info = self.lookup(&root).map(|v| (v.mutable, v.decl));
                 if let Some((mutable, decl)) = info {
@@ -2214,14 +2399,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 a.ty.set(STRLIT);
                 for p in parts {
                     if let Part::Expr(e) = p {
+                        self.in_text = true;
                         let t = self.expr(e, None);
-                        self.value_type(e.span, t);
+                        self.in_text = false;
+                        self.printable(e.span, t);
                     }
                 }
             }
             _ => {
                 let t = self.expr(a, None);
-                self.value_type(a.span, t);
+                self.printable(a.span, t);
             }
         }
     }
@@ -2358,12 +2545,42 @@ impl<'a, 'b> Ctx<'a, 'b> {
     }
 
     /// Works out type parameters from the arguments; each argument is checked once.
+    /// Only the expected type can say what this name means.
+    fn waits_for_hint(&mut self, a: &Expr) -> bool {
+        if hint_dep(a) {
+            return true;
+        }
+        let ExprKind::Var(name) = &a.kind else { return false };
+        if self.lookup(name).is_some() {
+            return false;
+        }
+        let m = &self.g.mods[self.g.cur];
+        m.gvariants.contains_key(name) || self.named_function(name).is_some()
+    }
+
+    /// The signature behind a plain name, if it means an ordinary function.
+    fn named_function(&self, name: &str) -> Option<FnSig> {
+        let cur = &self.g.mods[self.g.cur];
+        if cur.consts.contains_key(name) || cur.names.contains_key(name) {
+            return None;
+        }
+        let m = match cur.funcs.get(name) {
+            Some((None, _)) => self.g.cur,
+            Some(_) => return None,
+            None => match self.g.mods[self.g.core].funcs.get(name) {
+                Some((None, true)) => self.g.core,
+                _ => return None,
+            },
+        };
+        self.g.sigs.get(&format!("{}{name}", self.g.mods[m].prefix)).cloned()
+    }
+
     fn infer(&mut self, tparams: &[(String, Span)], pats: &[&TypeExpr], args: &[Expr], explicit: &[Ty], first: Option<Ty>) -> (HashMap<String, Ty>, Vec<Option<Ty>>) {
         let mut bind: HashMap<String, Ty> = tparams.iter().map(|p| p.0.clone()).zip(explicit.iter().copied()).collect();
         let mut got: Vec<Option<Ty>> = vec![None; args.len()];
         got[..first.map_or(0, |_| 1).min(args.len())].fill(first);
         for (i, a) in args.iter().enumerate() {
-            if hint_dep(a) {
+            if self.waits_for_hint(a) {
                 continue;
             }
             let t = match got[i] {
@@ -2373,6 +2590,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
             got[i] = Some(t);
             if let Some(p) = pats.get(i) {
                 self.g.unify(p, t, &mut bind, tparams);
+            }
+        }
+        // A function named as an argument says what its parameter's type variables are.
+        for (i, a) in args.iter().enumerate() {
+            let (ExprKind::Var(name), Some(p), true) = (&a.kind, pats.get(i), got[i].is_none()) else { continue };
+            if self.lookup(name).is_none() && matches!(p.kind, TypeKind::Fn { .. }) {
+                if let Some(sig) = self.named_function(name) {
+                    let t = self.g.types.fn_type(FnType { params: sig.params, own: sig.own, ret: sig.ret, effects: 0 });
+                    self.g.unify(p, t, &mut bind, tparams);
+                }
             }
         }
         for (i, a) in args.iter().enumerate() {
@@ -2390,10 +2617,24 @@ impl<'a, 'b> Ctx<'a, 'b> {
         (bind, got)
     }
 
-    fn finish_args(&mut self, args: &[Expr], wants: &[Ty], got: &[Option<Ty>]) {
+    /// A fixed array handed to a parameter that only reads a `[]T`.
+    fn array_view(&self, got: Ty, want: Ty, own: bool) -> bool {
+        !own && matches!((self.kind(got), self.kind(want)), (Kind::Array(a, _), Kind::Slice(b)) if a == b)
+    }
+
+    /// `own` says which parameters take the value over; shorter means none may be viewed.
+    fn finish_args(&mut self, args: &[Expr], wants: &[Ty], got: &[Option<Ty>], own: &[bool]) {
         for (i, a) in args.iter().enumerate() {
+            let is_own = own.get(i).copied().unwrap_or(true);
             match (wants.get(i), got.get(i).copied().flatten()) {
+                (Some(want), Some(g)) if self.array_view(g, *want, is_own) => {}
                 (Some(want), Some(g)) => self.accept(a, g, *want),
+                (Some(want), None) if !is_own && matches!(self.kind(*want), Kind::Slice(_)) => {
+                    let g = self.expr(a, Some(*want));
+                    if !self.array_view(g, *want, false) {
+                        self.accept(a, g, *want);
+                    }
+                }
                 (Some(want), None) => self.check(a, *want),
                 (None, Some(_)) => {}
                 (None, None) => {
@@ -2406,8 +2647,49 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
-    fn call(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr]) -> Ty {
+    /// A call through something that holds a function.
+    fn call_value(&mut self, e: &Expr, ty: Ty, span: Span, args: &[Expr]) -> Ty {
+        let Kind::Fn(id) = self.kind(ty) else {
+            for a in args {
+                self.expr(a, None);
+            }
+            if ty == ERR {
+                return ERR;
+            }
+            let n = self.tname(ty);
+            return self.err("E0104", span, format!("{n} cannot be called"));
+        };
+        let f = self.g.types.fns[id].clone();
+        if args.len() != f.params.len() {
+            self.diags.push(Diag::new("E0106", span, format!("this function takes {} values, found {}", f.params.len(), args.len())));
+        }
+        self.finish_args(args, &f.params, &vec![None; args.len()], &f.own);
+        for (a, own) in args.iter().zip(&f.own) {
+            if *own {
+                self.consume(a);
+            }
+        }
+        if !self.func.claw {
+            self.check_exclusive(span, args);
+        }
+        *e.res.borrow_mut() = Res::Value(ty);
+        f.ret
+    }
+
+    fn call(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr], via: Option<&Expr>) -> Ty {
         if module.is_none() {
+            let held = self.lookup(name).map(|v| v.ty);
+            if held == Some(ERR) {
+                self.var(e, name, None);
+                for a in args {
+                    self.expr(a, None);
+                }
+                return ERR;
+            }
+            if let Some(t) = held.filter(|t| matches!(self.kind(*t), Kind::Fn(_))) {
+                self.var(e, name, None);
+                return self.call_value(e, t, span, args);
+            }
             if let Some(t) = self.builtin(e, name, span, targs, args) {
                 return t;
             }
@@ -2418,6 +2700,19 @@ impl<'a, 'b> Ctx<'a, 'b> {
             Some(alias) => {
                 if let Some(v) = self.lookup(alias) {
                     v.read = true;
+                    let base = v.ty;
+                    let base = match self.kind(base) {
+                        Kind::Ref(t) => t,
+                        _ => base,
+                    };
+                    let field = match self.kind(base) {
+                        Kind::Struct(id) => self.g.types.structs[id].fields.iter().find(|f| f.name == name).map(|f| f.ty),
+                        _ => None,
+                    };
+                    if let (Some(t), Some(callee)) = (field.filter(|t| matches!(self.kind(*t), Kind::Fn(_))), via) {
+                        self.expr(callee, None);
+                        return self.call_value(e, t, span, args);
+                    }
                     for a in args {
                         self.expr(a, None);
                     }
@@ -2429,7 +2724,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
             None => {
                 // Not here: look in the module that declares the first argument's type.
                 let mut found = None;
-                if let Some(a) = args.first().filter(|a| !hint_dep(a)) {
+                let plain = args.first().is_some_and(|a| !self.waits_for_hint(a));
+                if let Some(a) = args.first().filter(|_| plain) {
                     let t = self.expr(a, None);
                     first = Some(t);
                     found = self.g.owner_of(t).filter(|m| self.g.mods[*m].funcs.get(name).is_some_and(|f| f.1));
@@ -2496,7 +2792,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if !arity_ok && generic.is_none() {
             self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", sig.params.len(), args.len())));
         }
-        self.finish_args(args, &sig.params, &got);
+        self.finish_args(args, &sig.params, &got, &sig.own);
         for (a, own) in args.iter().zip(&sig.own) {
             if *own {
                 self.consume(a);
@@ -2541,7 +2837,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
     }
 
-    fn struct_lit(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr]) -> Ty {
+    fn struct_lit(&mut self, e: &Expr, module: Option<&str>, name: &str, span: Span, targs: &[TypeExpr], args: &[Expr], hint: Option<Ty>) -> Ty {
         let cur = self.g.cur;
         let m = match module {
             Some(alias) => match self.g.import(alias, span, self.diags) {
@@ -2586,7 +2882,41 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
             let Kind::Struct(id) = self.kind(ty) else { return ERR };
             let wants: Vec<Ty> = self.g.types.structs[id].fields.iter().map(|f| f.ty).collect();
-            self.finish_args(args, &wants, &got);
+            self.finish_args(args, &wants, &got, &[]);
+            for a in args {
+                self.consume(a);
+            }
+            return ty;
+        }
+        if let Some(&(d, idx, public)) = self.g.mods[m].gvariants.get(name) {
+            if !public && m != cur {
+                check_all(self);
+                return self.err("E0147", span, private_msg(name));
+            }
+            let TypeBody::Variants(vars) = &d.body else { return ERR };
+            let fields = &vars[idx].fields;
+            let Some(mut explicit) = self.resolve_targs(targs) else { return ERR };
+            if explicit.is_empty() {
+                explicit = self.targs_from_hint(d, m, hint).unwrap_or_default();
+            }
+            if args.len() != fields.len() {
+                self.diags.push(Diag::new("E0106", span, format!("`{name}` has {} fields, found {}", fields.len(), args.len())));
+            }
+            let pats: Vec<&TypeExpr> = fields.iter().map(|f| &f.ty).collect();
+            let (bind, got) = self.infer(&d.tparams, &pats, args, &explicit, None);
+            let mut ordered = Vec::with_capacity(d.tparams.len());
+            for (p, _) in &d.tparams {
+                match bind.get(p) {
+                    Some(&ERR) => return ERR,
+                    Some(t) => ordered.push(*t),
+                    None => return self.err("E0144", span, format!("cannot work out `{p}`; write `{name}[...]{{...}}`")),
+                }
+            }
+            let ty = self.g.instantiate_type(d, m, ordered, self.diags);
+            let Kind::Enum(eid) = self.kind(ty) else { return ERR };
+            *e.res.borrow_mut() = Res::Variant(eid, idx);
+            let wants: Vec<Ty> = self.g.types.enums[eid].variants[idx].fields.iter().map(|f| f.ty).collect();
+            self.finish_args(args, &wants, &got, &[]);
             for a in args {
                 self.consume(a);
             }
@@ -2773,6 +3103,7 @@ fn expr_breaks(e: &Expr) -> bool {
         ExprKind::Slice { e, .. } => expr_breaks(e),
         ExprKind::Binary { l, r, .. } => expr_breaks(l) || expr_breaks(r),
         ExprKind::Call { args, .. } | ExprKind::StructLit { args, .. } | ExprKind::ArrayLit(args) => args.iter().any(expr_breaks),
+        ExprKind::CallValue { f, args } => expr_breaks(f) || args.iter().any(expr_breaks),
         ExprKind::ArrayFill(e) => expr_breaks(e),
         _ => false,
     }

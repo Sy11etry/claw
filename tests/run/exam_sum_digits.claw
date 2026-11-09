@@ -1,0 +1,10 @@
+fn main() {
+    mut n := 98765
+    mut s := 0
+    for n > 0 {
+        s += n % 10
+        n = n / 10
+    }
+    print(s)
+}
+// expect: 35

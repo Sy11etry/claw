@@ -1,0 +1,41 @@
+type P { x int, y f64 }
+
+fn nine(a int, b int, c int, d int, e int, f int, g int, h int, i int) int {
+    ret a + b * 2 + c + d + e + f + g + h + i * 3
+}
+
+fn point(x int) P {
+    ret P{x, 1.5}
+}
+
+fn scale(p P, k f64) f64 {
+    ret p.y * k + f64(p.x)
+}
+
+fn fails(x int) int ! str {
+    if x < 0 {
+        fail "negative"
+    }
+    ret x + 1
+}
+
+fn run(g fn(int) int ! str, x int) int {
+    ret g(x) else -1
+}
+
+fn main() {
+    n fn(int, int, int, int, int, int, int, int, int) int = nine
+    print(n(1, 2, 3, 4, 5, 6, 7, 8, 9))
+    p fn(int) P = point
+    v := p(4)
+    print(v)
+    s fn(P, f64) f64 = scale
+    print(s(v, 2.0))
+    print(run(fails, 3))
+    print(run(fails, -3))
+}
+// expect: 65
+// expect: P{4, 1.5}
+// expect: 7
+// expect: 4
+// expect: -1

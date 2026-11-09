@@ -1,0 +1,9 @@
+fn main() {
+    words := split("a quick brownish fox", " ")
+    mut best := ""
+    for w in words {
+        if len(w) > len(best) { best = copy(w) }
+    }
+    print(best)
+}
+// expect: brownish

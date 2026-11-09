@@ -1,6 +1,9 @@
 // error: E0152
+fn keep(own x []int) int {
+    ret len(x)
+}
+
 fn main() {
     a [][]int = []
-    b := a[0]
-    print(b)
+    print(keep(a[0]))
 }

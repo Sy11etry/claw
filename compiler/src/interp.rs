@@ -17,6 +17,8 @@ const TRACE_NOTES: usize = 1 << 20;
 const NONE: u32 = u32::MAX;
 /// The runtime's words, and C's `errno`, live in one block.
 const ERRNO_AT: u64 = 64;
+/// A function as a value: this bit, and the function's number.
+const FN_TAG: u64 = 1 << 63;
 
 extern "C" {
     fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, ...) -> i32;
@@ -886,8 +888,8 @@ impl<'m> Machine<'m> {
         let line = self.cur_line();
         let ctrl = self.ctrl();
         match i {
-            Inst::Line { .. } | Inst::SetSite { .. } | Inst::Note { .. } | Inst::MemCopy { .. } | Inst::MemCopyDyn { .. } | Inst::Call { .. } => {}
-            Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } | Inst::DataAddr { d, .. } | Inst::ConstRef { d, .. } => self.trace.regs[base + *d as usize] = 0,
+            Inst::Line { .. } | Inst::SetSite { .. } | Inst::Note { .. } | Inst::MemCopy { .. } | Inst::MemCopyDyn { .. } | Inst::Call { .. } | Inst::CallInd { .. } => {}
+            Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } | Inst::DataAddr { d, .. } | Inst::ConstRef { d, .. } | Inst::FuncAddr { d, .. } => self.trace.regs[base + *d as usize] = 0,
             Inst::Mov { d, s } | Inst::AddImm { d, s, .. } => self.trace.regs[base + *d as usize] = self.trace.regs[base + *s as usize],
             Inst::Load { d, p, off, .. } => {
                 let m = self.mem_shadow(self.regs[base + *p as usize].wrapping_add(*off));
@@ -1076,16 +1078,22 @@ impl<'m> Machine<'m> {
                             let x = r!(*s);
                             r!(*d) = if *to_bits == 64 { (f32::from_bits(x as u32) as f64).to_bits() } else { (f64::from_bits(x) as f32).to_bits() as u64 };
                         }
-                        Inst::Call { d, f, args } => {
+                        Inst::FuncAddr { d, f } => r!(*d) = FN_TAG | *f as u64,
+                        Inst::Call { .. } | Inst::CallInd { .. } => {
+                            let (d, f, args) = match inst {
+                                Inst::Call { d, f, args } => (*d, *f, args),
+                                Inst::CallInd { d, callee, args } => (*d, (r!(*callee) & !FN_TAG) as usize, args),
+                                _ => unreachable!("matched above"),
+                            };
                             let line = self.frames[top].line;
                             let ctrl = if self.cfg.trace { self.ctrl() } else { 0 };
                             self.frames[top].block = block;
                             self.frames[top].ip = ip + 1;
-                            let nb = match self.push_frame(*f, *d, ctrl, line) {
+                            let nb = match self.push_frame(f, d, ctrl, line) {
                                 Ok(b) => b,
                                 Err(s) => return s,
                             };
-                            for (p, a) in m.funcs[*f].params.iter().zip(args) {
+                            for (p, a) in m.funcs[f].params.iter().zip(args) {
                                 self.regs[nb + *p as usize] = self.regs[base + *a as usize];
                                 if self.cfg.trace {
                                     self.trace.regs[nb + *p as usize] = self.trace.regs[base + *a as usize];

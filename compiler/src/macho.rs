@@ -274,6 +274,12 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
         code[*at] = page_patch(code[*at], pc, target);
         code[*at + 1] |= ((target & 0xFFF) as u32) << 10;
     }
+    for (at, pos) in &obj.code_refs {
+        let target = code_addr + *pos as u64 * 4;
+        let pc = code_addr + *at as u64 * 4;
+        code[*at] = page_patch(code[*at], pc, target);
+        code[*at + 1] |= ((target & 0xFFF) as u32) << 10;
+    }
     for at in &obj.bss_refs {
         let pc = code_addr + *at as u64 * 4;
         code[*at] = page_patch(code[*at], pc, bss_addr);

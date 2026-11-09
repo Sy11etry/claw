@@ -1,0 +1,19 @@
+fn shift(s str, n int) str {
+    alpha := "abcdefghijklmnopqrstuvwxyz"
+    mut res str = ""
+    for i in 0..len(s) {
+        c := s[i]
+        mut ch := copy(s[i..i+1])
+        if c >= 'a' and c <= 'z' {
+            k := (int(c) - int('a') + n) % 26
+            ch = copy(alpha[k..k+1])
+        }
+        res = "{res}{ch}"
+    }
+    ret res
+}
+
+fn main() {
+    print(shift("xyz abc", 3))
+}
+// expect: abc def

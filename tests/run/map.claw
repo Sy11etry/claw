@@ -1,0 +1,71 @@
+fn freq(words []str) Map[str, int] +mem {
+    mut m := new_map[str, int](hash_str)
+    for w in words {
+        n := get(m, w) else 0
+        put(&m, copy(w), n + 1)
+    }
+    ret m
+}
+
+fn main() {
+    m := freq(split("a b a c b a", " "))
+    print(get(m, "a") else 0)
+    print(get(m, "b") else 0)
+    print(get(m, "c") else 0)
+    print(get(m, "zzz") else -1)
+    print(len(m.items))
+
+    mut big := new_map[int, int](hash_int)
+    for i in 0..5000 {
+        put(&big, i * 7 - 2500, i)
+    }
+    print(len(big.items))
+    print(get(big, 4 * 7 - 2500) else -1)
+    mut removed := 0
+    for i in 0..5000 {
+        if i % 2 == 0 {
+            if del(&big, i * 7 - 2500) { removed += 1 }
+        }
+    }
+    print(removed)
+    print(len(big.items))
+    mut wrong := 0
+    for i in 0..5000 {
+        v := get(big, i * 7 - 2500) else -1
+        if i % 2 == 0 and v != -1 { wrong += 1 }
+        if i % 2 == 1 and v != i { wrong += 1 }
+    }
+    print(wrong)
+    print(del(&big, 123456))
+    print(has_key(big, 7 - 2500))
+    mut sum := 0
+    for e in big.items {
+        sum += e.val
+    }
+    print(sum)
+    mut strs := new_map[str, str](hash_str)
+    put(&strs, "k", "one")
+    put(&strs, "k", "two")
+    print(get(strs, "k") else "none")
+    print(len(strs.items))
+    empty := new_map[int, str](hash_int)
+    print(has_key(empty, 1))
+    print(get(empty, 1) else "absent")
+}
+// expect: 3
+// expect: 2
+// expect: 1
+// expect: -1
+// expect: 3
+// expect: 5000
+// expect: 4
+// expect: 2500
+// expect: 2500
+// expect: 0
+// expect: false
+// expect: true
+// expect: 6250000
+// expect: two
+// expect: 1
+// expect: false
+// expect: absent

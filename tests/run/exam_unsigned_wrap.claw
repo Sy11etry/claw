@@ -1,0 +1,13 @@
+fn main() {
+    a u8 = 250
+    print(a + 10)
+    mut v u32 = 255
+    mut count := 0
+    for v > 0 {
+        count += int(v % 2)
+        v = v / 2
+    }
+    print(count)
+}
+// expect: 4
+// expect: 8

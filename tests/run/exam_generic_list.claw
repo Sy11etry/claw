@@ -1,0 +1,19 @@
+type List[T] = Empty | Cons{v T, rest []List[T]}
+
+fn count[T](l List[T]) int {
+    match l {
+        Empty: ret 0
+        Cons{_, rest}: ret 1 + count[T](rest[0])
+    }
+}
+
+fn main() {
+    e []List[int] = [Empty]
+    r3 List[int] = Cons{3, e}
+    a3 []List[int] = [r3]
+    r2 List[int] = Cons{2, a3}
+    a2 []List[int] = [r2]
+    r1 List[int] = Cons{1, a2}
+    print(count[int](r1))
+}
+// expect: 3

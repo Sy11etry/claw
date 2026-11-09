@@ -1,0 +1,8 @@
+// error: E0122
+fn main() {
+    mut a []str = []
+    push(&a, "x")
+    v := a[0]
+    push(&a, "y")
+    print(v)
+}

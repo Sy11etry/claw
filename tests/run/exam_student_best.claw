@@ -1,0 +1,23 @@
+type Student { name str, marks []int }
+
+fn total(s Student) int {
+    mut sum := 0
+    for m in s.marks { sum += m }
+    ret sum
+}
+
+fn main() {
+    ann_marks []int = [3, 5]
+    bob_marks []int = [4, 5, 5]
+    a := Student{"ann", ann_marks}
+    b := Student{"bob", bob_marks}
+    if total(b) > total(a) {
+        print(b.name)
+        print(total(b))
+    } else {
+        print(a.name)
+        print(total(a))
+    }
+}
+// expect: bob
+// expect: 14

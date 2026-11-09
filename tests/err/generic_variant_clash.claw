@@ -1,0 +1,6 @@
+// error: E0110
+type A[T] = X{v T} | Y
+type B[T] = X{v T} | Z
+
+fn main() {
+}

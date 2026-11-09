@@ -112,6 +112,10 @@ pub enum Inst {
     FloatToInt { d: VReg, s: VReg, bits: u8, to: Num, loc: Loc },
     FloatCast { d: VReg, s: VReg, to_bits: u8 },
     Call { d: Option<VReg>, f: FuncId, args: Vec<VReg> },
+    /// A call through a function value.
+    CallInd { d: Option<VReg>, callee: VReg, args: Vec<VReg> },
+    /// A function as a value.
+    FuncAddr { d: VReg, f: FuncId },
     ObjAddr { d: VReg, obj: ObjId },
     AddImm { d: VReg, s: VReg, imm: u64 },
     Load { d: VReg, p: VReg, off: u64, mem: Mem },
@@ -233,7 +237,7 @@ pub struct CheckRt {
 macro_rules! walk_inst {
     ($i:expr, $f:ident, $($m:tt)?) => {
         match $i {
-            Inst::Const { d, .. } | Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } | Inst::DataAddr { d, .. } | Inst::ConstRef { d, .. } => $f(d, true),
+            Inst::Const { d, .. } | Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } | Inst::DataAddr { d, .. } | Inst::ConstRef { d, .. } | Inst::FuncAddr { d, .. } => $f(d, true),
             Inst::Mov { d, s } | Inst::BitNot { d, s, .. } | Inst::BoolNot { d, s } | Inst::Neg { d, s, .. } | Inst::FNeg { d, s, .. }
             | Inst::IntCast { d, s, .. } | Inst::IntToFloat { d, s, .. } | Inst::FloatToInt { d, s, .. } | Inst::FloatCast { d, s, .. }
             | Inst::AddImm { d, s, .. } => {
@@ -257,6 +261,15 @@ macro_rules! walk_inst {
                 $f(d, true);
             }
             Inst::Call { d, args, .. } => {
+                for a in args {
+                    $f(a, false);
+                }
+                if let Some(d) = d {
+                    $f(d, true);
+                }
+            }
+            Inst::CallInd { d, callee, args } => {
+                $f(callee, false);
                 for a in args {
                     $f(a, false);
                 }
@@ -366,7 +379,7 @@ impl Inst {
     /// Can a call's register rules touch this? Then x0-x7 are not safe across or into it.
     pub fn is_call(&self) -> bool {
         match self {
-            Inst::Call { .. } | Inst::CallC { .. } | Inst::MemCopyDyn { .. } | Inst::Alloc { .. } | Inst::Free { .. } | Inst::BufStr { .. } | Inst::BufInt { .. } | Inst::BufPtr { .. } | Inst::CaptureTake { .. } | Inst::BufBool { .. } | Inst::BufFloat { .. } | Inst::Flush { .. } | Inst::Exit { .. } => true,
+            Inst::Call { .. } | Inst::CallInd { .. } | Inst::CallC { .. } | Inst::MemCopyDyn { .. } | Inst::Alloc { .. } | Inst::Free { .. } | Inst::BufStr { .. } | Inst::BufInt { .. } | Inst::BufPtr { .. } | Inst::CaptureTake { .. } | Inst::BufBool { .. } | Inst::BufFloat { .. } | Inst::Flush { .. } | Inst::Exit { .. } => true,
             Inst::MemCopy { size, .. } => *size > 64,
             _ => false,
         }
@@ -375,7 +388,7 @@ impl Inst {
     /// If the result is unused, may this instruction simply disappear?
     pub fn removable(&self) -> bool {
         match self {
-            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } | Inst::DataAddr { .. } => true,
+            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } | Inst::DataAddr { .. } | Inst::FuncAddr { .. } => true,
             Inst::Bin { op, num, .. } => match op {
                 Arith::And | Arith::Or | Arith::Xor => true,
                 Arith::Add | Arith::Sub | Arith::Mul => !num.signed || !num.checked,

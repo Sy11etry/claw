@@ -1,0 +1,10 @@
+// error: E0178
+fn loud(x int) int {
+    print(x)
+    ret x
+}
+
+fn main() {
+    f fn(int) int = loud
+    print(f(2))
+}

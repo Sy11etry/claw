@@ -1,0 +1,22 @@
+fn isort(a &[]int) {
+    for i in 1..len(a) {
+        x := a[i]
+        mut j := i
+        for j > 0 and a[j - 1] > x {
+            a[j] = a[j - 1]
+            j -= 1
+        }
+        a[j] = x
+    }
+}
+
+fn main() {
+    mut a := [5, 2, 9, 1, 7]
+    mut b []int = []
+    for x in a {
+        push(&b, x)
+    }
+    a[0] = 5
+    isort(&b)
+    print(b)
+}

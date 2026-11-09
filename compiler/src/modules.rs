@@ -198,6 +198,27 @@ fn find_std() -> Option<PathBuf> {
     repo.is_dir().then_some(repo)
 }
 
+/// The public face of the standard library: every module but the memory checker, parsed only.
+pub fn std_programs() -> Vec<(String, Program)> {
+    let Some(root) = find_std() else { return Vec::new() };
+    let Ok(dir) = std::fs::read_dir(&root) else { return Vec::new() };
+    let mut names: Vec<PathBuf> = dir.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "claw")).collect();
+    names.sort();
+    let mut out = Vec::new();
+    for path in names {
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        if stem == "check_rt" {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let mut diags = Vec::new();
+        let toks = lexer::lex(&src, 0, &mut diags);
+        let program = parser::Parser::new(toks, &mut diags).with_source(&src).parse_program();
+        out.push((stem, program));
+    }
+    out
+}
+
 pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)> {
     let mut l = Loader {
         std_root: find_std(),

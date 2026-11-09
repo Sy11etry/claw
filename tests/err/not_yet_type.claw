@@ -1,5 +1,7 @@
-// error: E0900
+// error: E0104
 type Opt[T] = S{v T}
 
 fn main() {
+    x Opt[int] = S{"a"}
+    print(x)
 }

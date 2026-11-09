@@ -1,5 +1,7 @@
-// error: E0900
+// error: E0123
 type Opt[T] = Some{v T} | Nope
 
 fn main() {
+    x := Nope
+    print(x)
 }

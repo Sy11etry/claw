@@ -1,0 +1,12 @@
+fn repeat_str(s str, n int) str {
+    mut out := ""
+    for _ in 0..n {
+        out = "{out}{s}"
+    }
+    ret out
+}
+
+fn main() {
+    print(repeat_str("ab", 3))
+}
+// expect: ababab

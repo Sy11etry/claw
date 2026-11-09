@@ -1,0 +1,18 @@
+type Shape = Square{s int} | Rect{w int, h int} | Empty
+
+fn area(x Shape) int {
+    match x {
+        Square{s}: ret s * s
+        Rect{w, h}: ret w * h
+        Empty: ret 0
+    }
+}
+
+fn main() {
+    a := [Square{3}, Rect{2, 5}, Empty]
+    mut t := 0
+    for x in a {
+        t += area(x)
+    }
+    print(t)
+}

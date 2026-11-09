@@ -1,0 +1,28 @@
+type ParseErr = Bad
+
+fn parse(s str) int ! ParseErr {
+    mut n := 0
+    for i in 0..len(s) {
+        c := s[i]
+        if c < '0' or c > '9' { fail Bad }
+        n = n * 10 + int(c - '0')
+    }
+    ret n
+}
+
+fn double_parsed(s str) int ! ParseErr {
+    v := parse(s)?
+    ret v * 2
+}
+
+fn main() {
+    a := double_parsed("21") else 0
+    print(a)
+    b := double_parsed("zz") else {
+        print("bad")
+        ret
+    }
+    print(b)
+}
+// expect: 42
+// expect: bad

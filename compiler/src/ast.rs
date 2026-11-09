@@ -22,6 +22,8 @@ pub enum TypeKind {
     Option(Box<TypeExpr>),
     /// `T ! E`, or `! E` when the success value is nothing.
     Result(Option<Box<TypeExpr>>, Box<TypeExpr>),
+    /// `fn(int, &[]int) int +mem`: `(own, type)` of each parameter.
+    Fn { params: Vec<(bool, TypeExpr)>, ret: Option<Box<TypeExpr>>, effects: Vec<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +98,8 @@ pub struct ConstDecl {
     pub value: Expr,
     /// The value needs running code; it became the function `const <name>`.
     pub computed: bool,
+    /// The value as written, for `claw sig`.
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +254,8 @@ pub enum Res {
     #[default]
     None,
     Func(String),
+    /// A call through a variable or field holding a function of this type.
+    Value(Ty),
     Const(ConstVal, Ty),
     Variant(usize, usize),
 }
@@ -260,6 +266,8 @@ pub enum Coerce {
     No,
     Some(Ty),
     Ok(Ty),
+    /// `x := a[i]`: `x` is the element itself, read-only, not a copy.
+    View,
 }
 
 #[derive(Debug, Clone)]
@@ -305,7 +313,10 @@ pub enum ExprKind {
     Var(String),
     Unary { op: UnOp, e: Box<Expr> },
     Binary { op: BinOp, l: Box<Expr>, r: Box<Expr> },
-    Call { module: Option<String>, name: String, name_span: Span, targs: Vec<TypeExpr>, args: Vec<Expr> },
+    /// `via` is `module.name` read as a field, for when `module` turns out to be a variable.
+    Call { module: Option<String>, name: String, name_span: Span, targs: Vec<TypeExpr>, args: Vec<Expr>, via: Option<Box<Expr>> },
+    /// `table[i](x)`: a call through any other expression.
+    CallValue { f: Box<Expr>, args: Vec<Expr> },
     StructLit { module: Option<String>, name: String, name_span: Span, targs: Vec<TypeExpr>, args: Vec<Expr> },
     AddrOf(Box<Expr>),
     Deref(Box<Expr>),

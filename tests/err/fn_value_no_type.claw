@@ -1,0 +1,9 @@
+// error: E0123
+fn one() int {
+    ret 1
+}
+
+fn main() {
+    f := one
+    print(f())
+}

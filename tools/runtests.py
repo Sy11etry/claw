@@ -152,6 +152,25 @@ def why_test(path):
     return None
 
 
+def info_test(path):
+    """`claw sig`, `ctx`, `audit`: the whole output is compared."""
+    text = path.read_text()
+    word, *rest = headers(text, "cmd")[0].split()
+    tail = [path, *rest] if word == "ctx" else [*rest, path]
+    p = child([CLAW, word, *tail], capture_output=True, text=True, env={"PATH": ""})
+    if p.returncode != 0:
+        return f"exit code {p.returncode}\n{p.stderr}"
+    if p.stdout.splitlines() != headers(text, "expect"):
+        return "output differs\n  got:  " + "\n        ".join(p.stdout.splitlines()) + "\n  want: " + "\n        ".join(headers(text, "expect"))
+    return None
+
+
+def card_command():
+    """`claw card` is exactly the card the size budget is checked on."""
+    p = child([CLAW, "card"], capture_output=True, text=True)
+    return None if p.stdout == (ROOT / "docs/CARD.md").read_text() else "`claw card` differs from docs/CARD.md"
+
+
 def fix_test(path, tmp):
     """`claw fix` must produce tests/fix/x.out; applying it again must change nothing."""
     text = path.read_text()
@@ -333,6 +352,17 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL why/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/info").glob("*.claw")):
+            total += 1
+            msg = info_test(path)
+            if msg:
+                failures += 1
+                print(f"FAIL info/{path.name}: {msg}")
+        total += 1
+        msg = card_command()
+        if msg:
+            failures += 1
+            print(f"FAIL card command: {msg}")
         for path in sorted((ROOT / "tests/fix").glob("*.claw")):
             total += 1
             msg = fix_test(path, tmp)

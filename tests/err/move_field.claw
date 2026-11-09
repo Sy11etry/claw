@@ -1,8 +1,11 @@
 // error: E0152
 type P { a []int }
 
+fn keep(own x []int) int {
+    ret len(x)
+}
+
 fn main() {
     p := P{[]}
-    q := p.a
-    print(q)
+    print(keep(p.a))
 }

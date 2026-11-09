@@ -1,0 +1,10 @@
+// error: E0104
+type O[T] = S{v T} | N
+
+fn main() {
+    x O[int] = S{"a"}
+    match x {
+        S{v}: print(v)
+        N: print(0)
+    }
+}

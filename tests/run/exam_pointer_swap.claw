@@ -1,0 +1,21 @@
+claw fn exchange(p *int, q *int) {
+    t := *p
+    *p = *q
+    *q = t
+}
+
+claw fn run() {
+    mut x := 1
+    mut y := 2
+    p := &x
+    q := &y
+    exchange(p, q)
+    print(x)
+    print(y)
+}
+
+fn main() {
+    run()
+}
+// expect: 2
+// expect: 1

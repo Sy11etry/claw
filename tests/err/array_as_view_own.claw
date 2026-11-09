@@ -1,0 +1,9 @@
+// error: E0104
+fn keep(own a []int) int {
+    ret len(a)
+}
+
+fn main() {
+    b := [1, 2]
+    print(keep(b))
+}

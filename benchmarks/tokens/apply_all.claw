@@ -1,0 +1,20 @@
+fn double(x int) int {
+    ret x * 2
+}
+
+fn square(x int) int {
+    ret x * x
+}
+
+fn apply(a []int, f fn(int) int) []int {
+    mut out []int = []
+    for x in a {
+        push(&out, f(x))
+    }
+    ret out
+}
+
+fn main() {
+    print(apply([1, 2, 3], double))
+    print(apply([1, 2, 3], square))
+}

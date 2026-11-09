@@ -1,0 +1,22 @@
+type Mat { a [2][2]int }
+
+fn mul(x Mat, y Mat) Mat {
+    mut r [2][2]int = [[0...]...]
+    for i in 0..2 {
+        for j in 0..2 {
+            for k in 0..2 {
+                r[i][j] += x.a[i][k] * y.a[k][j]
+            }
+        }
+    }
+    ret Mat{r}
+}
+
+fn main() {
+    m := Mat{[[1, 1], [1, 0]]}
+    mut p := m
+    for _ in 0..9 {
+        p = mul(p, m)
+    }
+    print(p.a[0][1])
+}

@@ -1,0 +1,14 @@
+fn main() {
+    mut composite [100]bool = [false...]
+    mut count := 0
+    for i in 2..100 {
+        if composite[i] { continue }
+        count += 1
+        mut j := i * i
+        for j < 100 {
+            composite[j] = true
+            j += i
+        }
+    }
+    print(count)
+}

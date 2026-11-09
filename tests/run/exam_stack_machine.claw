@@ -1,0 +1,36 @@
+type Instr = Push{n int} | Add | Mul
+
+fn add_top(st &[]int) {
+    b := pop(&st) else 0
+    a := pop(&st) else 0
+    push(&st, a + b)
+}
+
+fn mul_top(st &[]int) {
+    b := pop(&st) else 0
+    a := pop(&st) else 0
+    push(&st, a * b)
+}
+
+fn run(prog []Instr) int {
+    mut st []int = []
+    for ins in prog {
+        match ins {
+            Push{n}: push(&st, n)
+            Add: add_top(&st)
+            Mul: mul_top(&st)
+        }
+    }
+    ret st[len(st) - 1]
+}
+
+fn main() {
+    mut prog []Instr = []
+    push(&prog, Push{2})
+    push(&prog, Push{3})
+    push(&prog, Add)
+    push(&prog, Push{4})
+    push(&prog, Mul)
+    print(run(prog))
+}
+// expect: 20

@@ -1173,9 +1173,14 @@ impl<'a, 'i> FnLower<'a, 'i> {
         match &s.kind {
             StmtKind::Let { name, init, .. } => {
                 let ty = init.ty.get();
+                if init.coerce.get() == Coerce::View {
+                    let v = self.expr_value(init);
+                    self.vars.insert(name.clone(), v);
+                    return;
+                }
                 let ty = match init.coerce.get() {
                     Coerce::Some(t) | Coerce::Ok(t) => t,
-                    Coerce::No => ty,
+                    Coerce::No | Coerce::View => ty,
                 };
                 let v = self.owned_value(init);
                 self.note(name, v, ty);
@@ -1596,7 +1601,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
 
     fn wrap(&mut self, e: &Expr, v: Option<VReg>) -> Option<VReg> {
         match e.coerce.get() {
-            Coerce::No => v,
+            Coerce::No | Coerce::View => v,
             Coerce::Some(t) => {
                 let a = self.temp_obj(t);
                 self.set_tag(a, 1);
@@ -1734,7 +1739,11 @@ impl<'a, 'i> FnLower<'a, 'i> {
                     }
                 }
             },
-            ExprKind::Call { name, args, .. } => return self.call(e, name, args),
+            ExprKind::Call { name, args, via, .. } => return self.call(e, name, args, via.as_deref()),
+            ExprKind::CallValue { f, args } => {
+                let callee = self.expr_value(f);
+                return self.call_through(callee, f.ty.get(), args, e.ty.get());
+            }
             ExprKind::StructLit { args, .. } => self.struct_lit(e, args, ty),
             ExprKind::ArrayLit(items) if matches!(self.t().kind(ty), Kind::Slice(_)) => {
                 let elem = self.elem_of(ty);
@@ -1825,6 +1834,11 @@ impl<'a, 'i> FnLower<'a, 'i> {
     /// A constant or a field-less variant, as sema resolved it.
     fn resolved(&mut self, e: &Expr, ty: Ty) -> VReg {
         match *e.res.borrow() {
+            Res::Func(ref full) => {
+                let d = self.vreg();
+                self.emit(Inst::FuncAddr { d, f: self.ids[full] });
+                d
+            }
             Res::Const(ConstVal::Int(n), _) => self.constant(n as i64),
             Res::Const(ConstVal::Bool(b), _) => self.constant(b as i64),
             Res::Const(ConstVal::Float(x), t) => self.float_const(x, t),
@@ -1922,15 +1936,61 @@ impl<'a, 'i> FnLower<'a, 'i> {
         d
     }
 
-    fn call(&mut self, e: &'a Expr, name: &str, args: &'a [Expr]) -> Option<VReg> {
+    fn argument(&mut self, a: &'a Expr, own: bool, want: Ty) -> VReg {
+        if own {
+            return self.owned_value(a);
+        }
+        let v = self.expr_value(a);
+        let have = a.ty.get();
+        if !matches!((self.t().kind(have), self.t().kind(want)), (Kind::Array(..), Kind::Slice(_))) {
+            return v;
+        }
+        // A fixed array read as `[]T`: a view that owns nothing.
+        let (p, n) = self.seq(have, v);
+        let view = self.temp_obj(want);
+        let zero = self.constant(0);
+        self.store_seq(view, p, n, zero);
+        view
+    }
+
+    /// A call whose target is only known when the program runs.
+    fn call_through(&mut self, callee: VReg, callee_ty: Ty, args: &'a [Expr], ty: Ty) -> Option<VReg> {
+        let Kind::Fn(id) = self.t().kind(callee_ty) else { unreachable!("sema checked what is called") };
+        let own = self.t().fns[id].own.clone();
+        let params = self.t().fns[id].params.clone();
+        let aggregate = self.t().is_aggregate(ty);
+        let mut vals = Vec::with_capacity(args.len() + 1);
+        let sret = if aggregate { Some(self.temp_obj(ty)) } else { None };
+        vals.extend(sret);
+        for ((a, own), want) in args.iter().zip(&own).zip(&params) {
+            let v = self.argument(a, *own, *want);
+            vals.push(v);
+        }
+        let d = if ty == VOID || aggregate { None } else { Some(self.vreg()) };
+        self.emit(Inst::CallInd { d, callee, args: vals });
+        if aggregate {
+            sret
+        } else {
+            d
+        }
+    }
+
+    fn call(&mut self, e: &'a Expr, name: &str, args: &'a [Expr], via: Option<&'a Expr>) -> Option<VReg> {
         let ty = e.ty.get();
         let res = e.res.borrow().clone();
         let full = match res {
+            Res::Value(t) => {
+                let callee = match via {
+                    Some(field) => self.expr_value(field),
+                    None => self.var(e, name, t),
+                };
+                return self.call_through(callee, t, args, ty);
+            }
             Res::Const(..) => return Some(self.resolved(e, ty)),
             Res::Func(full) => full,
             _ => return self.builtin_call(e, name, args),
         };
-        let sig = &self.c.sigs[&full];
+        let sig = self.c.sigs[&full].clone();
         if let Some(sym) = &sig.ext {
             return self.call_c(sym.clone(), sig.params.len(), sig.variadic, args, ty);
         }
@@ -1939,8 +1999,8 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let mut vals = Vec::with_capacity(args.len() + 1);
         let sret = if aggregate { Some(self.temp_obj(ty)) } else { None };
         vals.extend(sret);
-        for (a, own) in args.iter().zip(&sig.own) {
-            let v = if *own { self.owned_value(a) } else { self.expr_value(a) };
+        for ((a, own), want) in args.iter().zip(&sig.own).zip(&sig.params) {
+            let v = self.argument(a, *own, *want);
             vals.push(v);
         }
         self.check_needs(&full, &vals[sret.is_some() as usize..], e.span);
@@ -2354,6 +2414,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 self.finish(Term::Jmp(join));
                 self.switch(join);
             }
+            Kind::Fn(_) => self.lit("<fn>"),
             Kind::Void | Kind::StrLit | Kind::Err | Kind::Ref(_) => unreachable!("sema rejects printing these"),
         }
     }

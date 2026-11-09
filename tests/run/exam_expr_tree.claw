@@ -1,0 +1,18 @@
+type Expr = Num{v int} | Add{kids []Expr} | Mul{kids []Expr}
+
+fn evaluate(e Expr) int {
+    match e {
+        Num{v}: ret v
+        Add{kids}: ret evaluate(kids[0]) + evaluate(kids[1])
+        Mul{kids}: ret evaluate(kids[0]) * evaluate(kids[1])
+    }
+}
+
+fn main() {
+    a []Expr = [Num{2}, Num{3}]
+    left Expr = Add{a}
+    b []Expr = [left, Num{4}]
+    e Expr = Mul{b}
+    print(evaluate(e))
+}
+// expect: 20

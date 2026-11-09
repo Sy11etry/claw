@@ -1,0 +1,25 @@
+fn balanced(s str) bool {
+    mut st []u8 = []
+    for i in 0..len(s) {
+        c := s[i]
+        if c == '(' or c == '[' or c == '{' {
+            push(&st, c)
+        }
+        if c == ')' or c == ']' or c == '}' {
+            if len(st) == 0 { ret false }
+            top := st[len(st) - 1]
+            _ = pop(&st)
+            if c == ')' and top != '(' { ret false }
+            if c == ']' and top != '[' { ret false }
+            if c == '}' and top != '{' { ret false }
+        }
+    }
+    ret len(st) == 0
+}
+
+fn main() {
+    print(balanced("(a[b]{{c}})"))
+    print(balanced("(]"))
+}
+// expect: true
+// expect: false

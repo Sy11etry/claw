@@ -1,0 +1,21 @@
+fn is_anagram(a str, b str) bool {
+    if len(a) != len(b) { ret false }
+    mut counts [26]int = [0...]
+    for i in 0..len(a) {
+        counts[int(a[i]) - 97] += 1
+    }
+    for i in 0..len(b) {
+        counts[int(b[i]) - 97] -= 1
+    }
+    for c in counts {
+        if c != 0 { ret false }
+    }
+    ret true
+}
+
+fn main() {
+    print(is_anagram("listen", "silent"))
+    print(is_anagram("abc", "abd"))
+}
+// expect: true
+// expect: false

@@ -1,0 +1,9 @@
+// error: E0161
+fn check(f fn(int) int +io, x int) int
+    need f(x) > 0
+{
+    ret x
+}
+
+fn main() {
+}

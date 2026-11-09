@@ -274,3 +274,128 @@ pub fn to_int(s str) int ! NumErr {
     if negative { ret -n }
     ret n
 }
+
+// ---- hash maps ----
+
+pub type Entry[K, V] { key K, val V }
+
+// `items` keeps the entries, so `for e in m.items` walks the map; `table` finds them.
+pub type Map[K, V] { hash fn(K) u64, items []Entry[K, V], table []int }
+
+pub fn new_map[K, V](hash fn(K) u64) Map[K, V] {
+    ret Map[K, V]{hash, [], []}
+}
+
+pub fn hash_int(x int) u64 {
+    mut h := u64(x)
+    h = (h ^ (h >> 33)) * 18397679294719823053
+    h = (h ^ (h >> 33)) * 14181476777654086739
+    ret h ^ (h >> 33)
+}
+
+pub fn hash_str(s str) u64 {
+    mut h u64 = 14695981039346656037
+    for c in s {
+        h = (h ^ u64(c)) * 1099511628211
+    }
+    ret h
+}
+
+fn home[K, V](m Map[K, V], k K) int {
+    ret int(m.hash(k) & u64(len(m.table) - 1))
+}
+
+// Where `k` is in the table, or the empty place where it would go.
+fn slot_of[K, V](m Map[K, V], k K) int {
+    mask := len(m.table) - 1
+    mut i := home(m, k)
+    for {
+        at := m.table[i]
+        if at == 0 { ret i }
+        if m.items[at - 1].key == k { ret i }
+        i = (i + 1) & mask
+    }
+}
+
+fn rebuild[K, V](m &Map[K, V], size int) +mem {
+    mut t []int = []
+    reserve(&t, size)
+    for _ in 0..size {
+        push(&t, 0)
+    }
+    mask := size - 1
+    for e, n in m.items {
+        mut i := int(m.hash(e.key) & u64(mask))
+        for t[i] != 0 {
+            i = (i + 1) & mask
+        }
+        t[i] = n + 1
+    }
+    m.table = t
+}
+
+claw fn swap_at[T](a &[]T, i int, j int) {
+    t := a.ptr[i]
+    a.ptr[i] = a.ptr[j]
+    a.ptr[j] = t
+}
+
+pub fn put[K, V](m &Map[K, V], own k K, own v V) +mem {
+    if (len(m.items) + 1) * 4 > len(m.table) * 3 {
+        mut size := len(m.table) * 2
+        if size < 8 { size = 8 }
+        rebuild(&m, size)
+    }
+    i := slot_of(m, k)
+    if m.table[i] != 0 {
+        m.items[m.table[i] - 1].val = v
+        ret
+    }
+    push(&m.items, Entry[K, V]{k, v})
+    m.table[i] = len(m.items)
+}
+
+pub fn get[K, V](m Map[K, V], k K) ?V +mem {
+    if len(m.table) == 0 { ret none }
+    at := m.table[slot_of(m, k)]
+    if at == 0 { ret none }
+    ret copy(m.items[at - 1].val)
+}
+
+pub fn has_key[K, V](m Map[K, V], k K) bool {
+    if len(m.table) == 0 { ret false }
+    ret m.table[slot_of(m, k)] != 0
+}
+
+pub fn del[K, V](m &Map[K, V], k K) bool {
+    if len(m.table) == 0 { ret false }
+    mask := len(m.table) - 1
+    mut i := slot_of(m, k)
+    gone := m.table[i] - 1
+    if gone < 0 { ret false }
+    // Close the gap in the table: later entries of the same run move back.
+    mut j := i
+    for {
+        j = (j + 1) & mask
+        at := m.table[j]
+        if at == 0 { break }
+        h := home(m, m.items[at - 1].key)
+        if ((j - h) & mask) >= ((j - i) & mask) {
+            m.table[i] = at
+            i = j
+        }
+    }
+    m.table[i] = 0
+    // The last entry fills the hole in `items`.
+    last := len(m.items) - 1
+    if gone != last {
+        mut s := home(m, m.items[last].key)
+        for m.table[s] != last + 1 {
+            s = (s + 1) & mask
+        }
+        m.table[s] = gone + 1
+        swap_at(&m.items, gone, last)
+    }
+    _ = pop(&m.items)
+    ret true
+}

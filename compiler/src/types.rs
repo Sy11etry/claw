@@ -24,6 +24,31 @@ pub enum Kind {
     Ref(Ty),
     Option(Ty),
     Result(Ty, Ty),
+    /// A function as a value: an index into `Types::fns`.
+    Fn(usize),
+}
+
+pub const MEM: u8 = 1;
+pub const IO: u8 = 2;
+
+/// The two effects as written in a signature.
+pub fn spell_effects(mask: u8) -> String {
+    let mut parts = Vec::new();
+    if mask & MEM != 0 {
+        parts.push("+mem");
+    }
+    if mask & IO != 0 {
+        parts.push("+io");
+    }
+    parts.join(" ")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FnType {
+    pub params: Vec<Ty>,
+    pub own: Vec<bool>,
+    pub ret: Ty,
+    pub effects: u8,
 }
 
 pub const I8: Ty = Ty(0);
@@ -86,6 +111,7 @@ pub struct Types {
     pub enums: Vec<EnumDef>,
     /// Types with a user-written `drop`, and the function that does it.
     pub user_drop: HashMap<Ty, String>,
+    pub fns: Vec<FnType>,
 }
 
 /// `[]T` and `str` in memory: pointer, length, capacity. Capacity 0 means the
@@ -101,7 +127,7 @@ pub fn align_up(v: u64, a: u64) -> u64 {
 
 impl Types {
     pub fn new() -> Types {
-        let mut t = Types { kinds: Vec::new(), map: HashMap::new(), structs: Vec::new(), enums: Vec::new(), user_drop: HashMap::new() };
+        let mut t = Types { kinds: Vec::new(), map: HashMap::new(), structs: Vec::new(), enums: Vec::new(), user_drop: HashMap::new(), fns: Vec::new() };
         for k in [
             Kind::Int { bits: 8, signed: true },
             Kind::Int { bits: 16, signed: true },
@@ -132,6 +158,17 @@ impl Types {
         self.kinds.push(k);
         self.map.insert(k, t);
         t
+    }
+
+    pub fn fn_type(&mut self, f: FnType) -> Ty {
+        let id = match self.fns.iter().position(|x| *x == f) {
+            Some(i) => i,
+            None => {
+                self.fns.push(f);
+                self.fns.len() - 1
+            }
+        };
+        self.intern(Kind::Fn(id))
     }
 
     pub fn kind(&self, t: Ty) -> Kind {
@@ -220,6 +257,28 @@ impl Types {
         }
     }
 
+    /// Can a value of `t` hold another value of `t`, through `[]`?
+    pub fn contains_itself(&self, t: Ty) -> bool {
+        self.reaches_itself(t, &mut Vec::new())
+    }
+
+    fn reaches_itself(&self, t: Ty, path: &mut Vec<Ty>) -> bool {
+        if path.contains(&t) {
+            return true;
+        }
+        let parts: Vec<Ty> = match self.kind(t) {
+            Kind::Struct(id) => self.structs[id].fields.iter().map(|f| f.ty).collect(),
+            Kind::Enum(id) => self.enums[id].variants.iter().flat_map(|v| v.fields.iter().map(|f| f.ty)).collect(),
+            Kind::Array(e, _) | Kind::Option(e) | Kind::Slice(e) => vec![e],
+            Kind::Result(a, b) => vec![a, b],
+            _ => return false,
+        };
+        path.push(t);
+        let found = parts.into_iter().any(|p| self.reaches_itself(p, path));
+        path.pop();
+        found
+    }
+
     pub fn size(&self, t: Ty) -> u64 {
         self.layout(t).0
     }
@@ -229,7 +288,7 @@ impl Types {
             Kind::Int { bits, .. } | Kind::Float { bits } => ((bits / 8) as u64, (bits / 8) as u64),
             Kind::Bool => (1, 1),
             Kind::Void | Kind::StrLit | Kind::Err => (0, 1),
-            Kind::Pointer(_) | Kind::Ref(_) => (8, 8),
+            Kind::Pointer(_) | Kind::Ref(_) | Kind::Fn(_) => (8, 8),
             Kind::Slice(_) | Kind::Str => (SEQ_SIZE, 8),
             Kind::Struct(id) => (self.structs[id].size, self.structs[id].align),
             Kind::Enum(id) => (self.enums[id].size, 8),
@@ -259,6 +318,18 @@ impl Types {
             Kind::Str => "str".to_string(),
             Kind::Ref(p) => format!("&{}", self.name(p)),
             Kind::Option(p) => format!("?{}", self.name(p)),
+            Kind::Fn(id) => {
+                let f = &self.fns[id];
+                let params: Vec<String> = f.params.iter().zip(&f.own).map(|(p, own)| format!("{}{}", if *own { "own " } else { "" }, self.name(*p))).collect();
+                let mut out = format!("fn({})", params.join(", "));
+                if f.ret != VOID {
+                    out += &format!(" {}", self.name(f.ret));
+                }
+                if f.effects != 0 {
+                    out += &format!(" {}", spell_effects(f.effects));
+                }
+                out
+            }
             Kind::Result(ok, err) => {
                 if ok == VOID {
                     format!("! {}", self.name(err))

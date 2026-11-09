@@ -1,0 +1,13 @@
+type Counter { count int }
+
+fn bump(c &Counter, by int) {
+    c.count += by
+}
+
+fn main() {
+    mut c := Counter{0}
+    bump(&c, 2)
+    bump(&c, 5)
+    print(c.count)
+}
+// expect: 7

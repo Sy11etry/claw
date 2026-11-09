@@ -1,0 +1,9 @@
+// error: E0176
+fn id[T](x T) T {
+    ret x
+}
+
+fn main() {
+    f fn(int) int = id
+    print(f(1))
+}

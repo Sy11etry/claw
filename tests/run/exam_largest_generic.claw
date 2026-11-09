@@ -1,0 +1,14 @@
+fn largest[T](a []T) T {
+    mut best := copy(a[0])
+    for v in a {
+        if v > best { best = copy(v) }
+    }
+    ret best
+}
+
+fn main() {
+    print(largest[int]([3, 9, 2]))
+    print(largest[str](["pear", "apple"]))
+}
+// expect: 9
+// expect: pear

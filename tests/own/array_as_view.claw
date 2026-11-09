@@ -1,0 +1,42 @@
+fn total(a []int) int {
+    mut s := 0
+    for x in a {
+        s += x
+    }
+    ret s
+}
+
+fn first[T](a []T) T {
+    ret a[0]
+}
+
+fn longest(names []str) int {
+    mut best := 0
+    for n in names {
+        if len(n) > best { best = len(n) }
+    }
+    ret best
+}
+
+fn main() {
+    a := [1, 2, 3]
+    print(total(a))
+    mut b [4]int = [7...]
+    b[1] = 1
+    print(total(b))
+    print(total(b[1..3]))
+    print(first(a))
+    print(first([5, 6]))
+    print(longest(["ab", "abcd"]))
+    f fn([]int) int = total
+    print(f(a))
+    print(a)
+}
+// expect: 6
+// expect: 22
+// expect: 8
+// expect: 1
+// expect: 5
+// expect: 4
+// expect: 6
+// expect: [1, 2, 3]

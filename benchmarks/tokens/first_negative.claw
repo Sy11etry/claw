@@ -1,0 +1,11 @@
+fn first_neg(a []int) ?int {
+    for x in a {
+        if x < 0 { ret x }
+    }
+    ret none
+}
+
+fn main() {
+    print(first_neg([3, -4, 5]) else 0)
+    print(first_neg([3, 4]) else 0)
+}

@@ -1,0 +1,17 @@
+type Account { name str, balance int }
+
+fn move_money(accts &[]Account) {
+    accts[0].balance -= 30
+    accts[1].balance += 30
+}
+
+fn main() {
+    mut accts []Account = []
+    push(&accts, Account{"a", 100})
+    push(&accts, Account{"b", 5})
+    move_money(&accts)
+    print(accts[0].balance)
+    print(accts[1].balance)
+}
+// expect: 70
+// expect: 35

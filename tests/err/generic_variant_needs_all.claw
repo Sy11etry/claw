@@ -1,0 +1,9 @@
+// error: E0120
+type O[T] = S{v T} | N
+
+fn main() {
+    x O[int] = N
+    match x {
+        N: print(0)
+    }
+}

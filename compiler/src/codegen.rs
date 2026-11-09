@@ -54,6 +54,8 @@ pub struct Object {
     pub data_refs: Vec<(usize, usize)>,
     /// index of `adrp`, followed by `add`
     pub bss_refs: Vec<usize>,
+    /// (index of `adrp`, followed by `add`; position in `code`)
+    pub code_refs: Vec<(usize, usize)>,
     /// (index of `adrp`, followed by `ldr`; GOT slot)
     pub got_refs: Vec<(usize, usize)>,
     pub imports: Vec<String>,
@@ -71,6 +73,8 @@ struct Gen {
     got_refs: Vec<(usize, usize)>,
     /// Instructions waiting for a `b`/`bl` displacement.
     calls: Vec<(usize, Target)>,
+    /// `FuncAddr`: (index of `adrp`, the function).
+    func_refs: Vec<(usize, FuncId)>,
     files: Vec<String>,
     imports: Vec<String>,
     too_large: Option<String>,
@@ -641,7 +645,7 @@ impl Gen {
         let mut outgoing = 0u32;
         for b in &f.blocks {
             for i in &b.insts {
-                if let Inst::Call { args, .. } = i {
+                if let Inst::Call { args, .. } | Inst::CallInd { args, .. } = i {
                     outgoing = outgoing.max(args.len().saturating_sub(8) as u32 * 8);
                 }
                 if let Inst::CallC { args, variadic, .. } = i {
@@ -1050,6 +1054,26 @@ impl Gen {
                 if let Some(d) = d {
                     self.store(fr, X0, *d);
                 }
+            }
+            Inst::CallInd { d, callee, args } => {
+                for (n, a) in args.iter().enumerate().skip(8) {
+                    self.load(fr, X9, *a);
+                    self.e(str(X9, SP, (n as u32 - 8) * 8));
+                }
+                self.load(fr, X16, *callee);
+                for (n, a) in args.iter().enumerate().take(8) {
+                    self.load(fr, n as Reg, *a);
+                }
+                self.e(blr(X16));
+                if let Some(d) = d {
+                    self.store(fr, X0, *d);
+                }
+            }
+            Inst::FuncAddr { d, f } => {
+                self.func_refs.push((self.code.len(), *f));
+                self.e(adrp(X9, 0));
+                self.e(add_imm(X9, X9, 0));
+                self.store(fr, X9, *d);
             }
             Inst::ObjAddr { d, obj } => {
                 if !matches!(fr.place(*d), Place::Obj(_) | Place::None) {
@@ -1566,6 +1590,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         bss_refs: Vec::new(),
         got_refs: Vec::new(),
         calls: Vec::new(),
+        func_refs: Vec::new(),
         files: files.to_vec(),
         imports: imports.clone(),
         too_large: None,
@@ -1653,6 +1678,8 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         g.code[at] = b_at(g.code[at], (dest as i64 - at as i64) as i32);
     }
 
+    let code_refs = std::mem::take(&mut g.func_refs).into_iter().map(|(at, f)| (at, func_pos[f])).collect();
+
     if let Some(name) = g.too_large {
         return Err(format!("E0901 function `{name}` is too large for this version: at most 1 MB of code and 7 MB of local data"));
     }
@@ -1662,6 +1689,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         rodata: g.rodata,
         data_refs: g.data_refs,
         bss_refs: g.bss_refs,
+        code_refs,
         got_refs: g.got_refs,
         imports,
         symbols,

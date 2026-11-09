@@ -1,0 +1,16 @@
+fn main() {
+    mut a []str = ["kiwi", "apple", "kiwi", "fig"]
+    sort(&a)
+    mut uniq []str = []
+    for w in a {
+        if not has(uniq, w) {
+            push(&uniq, copy(w))
+        }
+    }
+    for w in uniq {
+        print(w)
+    }
+}
+// expect: apple
+// expect: fig
+// expect: kiwi

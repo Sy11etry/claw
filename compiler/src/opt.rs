@@ -620,7 +620,7 @@ fn promote_fields(f: &mut Func) {
                     }
                 }
                 Inst::AddImm { .. } | Inst::ObjAddr { .. } => {}
-                Inst::Call { args, .. } => {
+                Inst::Call { args, .. } | Inst::CallInd { args, .. } => {
                     for a in args {
                         if let Some((x, _)) = addr[*a as usize] {
                             passed.push(x);
@@ -705,7 +705,7 @@ fn promote_fields(f: &mut Func) {
                         }
                     }
                 }
-                Inst::Call { args, .. } => {
+                Inst::Call { args, .. } | Inst::CallInd { args, .. } => {
                     let mut hit: Vec<Base> = args.iter().filter_map(|a| addr[*a as usize].map(|t| t.0)).collect();
                     hit.sort_by_key(|x| format!("{x:?}"));
                     hit.dedup();
@@ -1031,7 +1031,7 @@ pub fn shake(m: &mut Module) {
         }
         for b in &m.funcs[f].blocks {
             for i in &b.insts {
-                if let Inst::Call { f: g, .. } = i {
+                if let Inst::Call { f: g, .. } | Inst::FuncAddr { f: g, .. } = i {
                     work.push(*g);
                 }
             }

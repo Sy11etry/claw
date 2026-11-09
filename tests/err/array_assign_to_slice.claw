@@ -1,0 +1,6 @@
+// error: E0104
+fn main() {
+    b := [1, 2]
+    c []int = b
+    print(c)
+}

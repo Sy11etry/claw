@@ -1,0 +1,19 @@
+fn to_roman(n int) str {
+    vals := [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+    syms := ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
+    mut x := n
+    mut res str = ""
+    for i in 0..len(vals) {
+        sym := syms[i]
+        for x >= vals[i] {
+            x -= vals[i]
+            res = "{res}{sym}"
+        }
+    }
+    ret res
+}
+
+fn main() {
+    print(to_roman(1994))
+}
+// expect: MCMXCIV

@@ -1,0 +1,40 @@
+type Node { v int, left int, right int }
+
+fn add(t &[]Node, x int) {
+    push(&t, Node{x, -1, -1})
+    id := len(t) - 1
+    if id == 0 { ret }
+    mut i := 0
+    for {
+        if x < t[i].v {
+            if t[i].left < 0 {
+                t[i].left = id
+                ret
+            }
+            i = t[i].left
+        } else {
+            if t[i].right < 0 {
+                t[i].right = id
+                ret
+            }
+            i = t[i].right
+        }
+    }
+}
+
+fn walk(t []Node, i int, out &[]int) {
+    if i < 0 { ret }
+    walk(t, t[i].left, &out)
+    push(&out, t[i].v)
+    walk(t, t[i].right, &out)
+}
+
+fn main() {
+    mut t []Node = []
+    for x in [5, 2, 8, 1, 9] {
+        add(&t, x)
+    }
+    mut out []int = []
+    walk(t, 0, &out)
+    print(out)
+}

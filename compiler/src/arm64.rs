@@ -344,6 +344,11 @@ pub fn fmov_d_x(rd: Reg, rn: Reg) -> u32 {
 // Branch encoders take the displacement in instructions, not bytes.
 pub const B: u32 = 0x1400_0000;
 pub const BL: u32 = 0x9400_0000;
+
+/// Call the address in `rn`.
+pub fn blr(rn: Reg) -> u32 {
+    0xD63F_0000 | ((rn as u32) << 5)
+}
 pub fn b_at(base: u32, disp: i32) -> u32 {
     base | (disp as u32 & 0x03FF_FFFF)
 }
@@ -446,6 +451,7 @@ pub fn golden() -> Vec<(u32, String)> {
         s(cbz(X9, 3), "cbz x9, #12"),
         s(cbnz(X9, -3), "cbnz x9, #-12"),
         s(br(X16), "br x16"),
+        s(blr(X16), "blr x16"),
         s(ret(), "ret"),
         s(brk(1), "brk #1"),
         s(umulh(X12, X9, X10), "umulh x12, x9, x10"),

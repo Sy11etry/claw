@@ -1,5 +1,7 @@
-// error: E0900
+// error: E0123
 type Opt[T] = S{v T} | N
 
 fn main() {
+    x := N
+    print(x)
 }

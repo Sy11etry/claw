@@ -1,0 +1,18 @@
+fn main() {
+    mut m [][]int = []
+    mut r1 []int = []
+    push(&r1, 1)
+    push(&r1, 2)
+    push(&m, r1)
+    mut r2 []int = []
+    push(&r2, 3)
+    push(&r2, 4)
+    push(&r2, 5)
+    push(&m, r2)
+    mut total := 0
+    for row in m {
+        for v in row { total += v }
+    }
+    print(total)
+}
+// expect: 15

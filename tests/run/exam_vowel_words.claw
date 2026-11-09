@@ -1,0 +1,12 @@
+fn is_vowel(c u8) bool {
+    ret c == 'a' or c == 'e' or c == 'i' or c == 'o' or c == 'u'
+}
+
+fn main() {
+    words := split("apple tree orange kite", " ")
+    for w in words {
+        if is_vowel(w[0]) { print(w) }
+    }
+}
+// expect: apple
+// expect: orange

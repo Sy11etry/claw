@@ -578,7 +578,7 @@ fn dictionary(m: &Module, start: FuncId) -> (Vec<i128>, Vec<Vec<u8>>) {
                     Inst::StrAddr { text, .. } if !text.is_empty() && text.len() < 32 && strs.len() < 32 => {
                         strs.insert(text.clone().into_bytes());
                     }
-                    Inst::Call { f, .. } => work.push(*f),
+                    Inst::Call { f, .. } | Inst::FuncAddr { f, .. } => work.push(*f),
                     _ => {}
                 }
             }

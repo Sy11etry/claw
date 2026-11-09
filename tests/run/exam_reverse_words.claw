@@ -1,0 +1,11 @@
+fn main() {
+    words := split("one two three", " ")
+    mut rev []str = []
+    mut i := len(words) - 1
+    for i >= 0 {
+        push(&rev, copy(words[i]))
+        i -= 1
+    }
+    print(join(rev, " "))
+}
+// expect: three two one

@@ -1,0 +1,16 @@
+type StatErr = NoData
+
+fn average(xs []int) int ! StatErr {
+    if len(xs) == 0 { fail NoData }
+    mut sum := 0
+    for x in xs {
+        sum += x
+    }
+    ret sum / len(xs)
+}
+
+fn main() {
+    print(average([2, 4, 9]) else -1)
+    empty []int = []
+    print(average(empty) else -1)
+}

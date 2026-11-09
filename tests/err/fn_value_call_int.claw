@@ -1,0 +1,5 @@
+// error: E0104
+fn main() {
+    a := [1, 2]
+    print(a[0](1))
+}
