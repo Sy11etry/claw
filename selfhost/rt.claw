@@ -1,0 +1,319 @@
+// What the compiler needs from the operating system.
+
+extern "open" fn c_open(path *u8, flags i32, ...) i32
+extern "close" fn c_close(fd i32) i32
+extern "read" fn c_read(fd i32, p *u8, n u64) i64
+extern "write" fn c_write(fd i32, p *u8, n u64) i64
+extern "rename" fn c_rename(from *u8, to *u8) i32
+extern "strtod" fn c_strtod(s *u8, end *u8) f64
+extern "exit" fn c_exit(code i32)
+extern "_NSGetArgc" fn c_argc() *i32
+extern "_NSGetArgv" fn c_argv() **u8
+extern "strlen" fn c_strlen(s *u8) u64
+extern "memcpy" fn c_memcpy(d *u8, s *u8, n u64) *u8
+extern "snprintf" fn c_snprintf(buf *u8, n u64, fmt *u8, ...) i32
+extern "realpath" fn c_realpath(path *u8, out *u8) *u8
+extern "stat" fn c_stat(path *u8, out *u8) i32
+extern "strerror" fn c_strerror(code i32) *u8
+extern "__error" fn c_errno() *i32
+extern "_NSGetExecutablePath" fn c_exe_path(out *u8, size *u32) i32
+extern "getrlimit" fn c_getrlimit(resource i32, out *u8) i32
+extern "setrlimit" fn c_setrlimit(resource i32, value *u8) i32
+extern "execv" fn c_execv(path *u8, argv **u8) i32
+extern "getpid" fn c_getpid() i32
+extern "getenv" fn c_getenv(name *u8) *u8
+extern "mkdir" fn c_mkdir(path *u8, mode u16) i32
+extern "rmdir" fn c_rmdir(path *u8) i32
+extern "unlink" fn c_unlink(path *u8) i32
+extern "isatty" fn c_isatty(fd i32) i32
+extern "posix_spawn" fn c_posix_spawn(pid *i32, path *u8, actions *u8, attrs *u8, argv **u8, envp **u8) i32
+extern "waitpid" fn c_waitpid(pid i32, status *i32, options i32) i32
+extern "_NSGetEnviron" fn c_environ() **u8
+
+claw fn cstring(s str) *u8 +mem {
+    p := alloc[u8](s.len + 1)
+    if s.len > 0 { _ = c_memcpy(p, s.ptr, u64(s.len)) }
+    p[s.len] = 0
+    ret p
+}
+
+pub claw fn args() []str +mem +io {
+    mut out []str = []
+    n := int(*c_argc())
+    v := *c_argv()
+    for i in 0..n {
+        a := cast[**u8](cast[int](v) + i * 8)
+        b := *a
+        size := int(c_strlen(b))
+        mut s []u8 = []
+        for j in 0..size {
+            push(&s, b[j])
+        }
+        push(&out, text(s))
+    }
+    ret out
+}
+
+// The bytes become a string without being copied.
+pub claw fn text(own b []u8) str {
+    mut x := b
+    mut s := ""
+    s.ptr = x.ptr
+    s.len = x.len
+    s.cap = x.cap
+    x.cap = 0
+    ret s
+}
+
+pub claw fn parse_f64(s str) f64 +mem {
+    p := cstring(s)
+    defer free(p)
+    ret c_strtod(p, cast[*u8](0))
+}
+
+pub claw fn read_file(path str) ?str +io +mem {
+    p := cstring(path)
+    defer free(p)
+    fd := c_open(p, 0)
+    if fd < 0 { ret none }
+    mut out []u8 = []
+    reserve(&out, 65536)
+    for {
+        if out.cap - out.len < 65536 { reserve(&out, out.cap * 2) }
+        n := c_read(fd, out.ptr + out.len, 65536)
+        if n < 0 {
+            _ = c_close(fd)
+            ret none
+        }
+        if n == 0 { break }
+        out.len += int(n)
+    }
+    _ = c_close(fd)
+    ret text(out)
+}
+
+pub claw fn write_exec(path str, data []u8) bool +io +mem {
+    tmp := cstring("{path}.tmp")
+    defer free(tmp)
+    dest := cstring(path)
+    defer free(dest)
+    fd := c_open(tmp, 1537, 493)
+    if fd < 0 { ret false }
+    mut done := 0
+    for done < data.len {
+        n := c_write(fd, data.ptr + done, u64(data.len - done))
+        if n <= 0 { break }
+        done += int(n)
+    }
+    _ = c_close(fd)
+    ret done == data.len and c_rename(tmp, dest) == 0
+}
+
+pub claw fn eprint(s str) +io {
+    _ = c_write(2, s.ptr, u64(s.len))
+}
+
+// All of `s` to standard output, and nothing more: no newline.
+pub claw fn write_out(s str) +io {
+    mut done := 0
+    for done < s.len {
+        n := c_write(1, s.ptr + done, u64(s.len - done))
+        if n <= 0 { ret }
+        done += int(n)
+    }
+}
+
+pub claw fn exit(code int) +io {
+    c_exit(i32(code))
+}
+
+// The path with symlinks resolved, like Rust's `canonicalize`.
+pub claw fn canonicalize(path str) ?str +mem +io {
+    p := cstring(path)
+    defer free(p)
+    buf := alloc[u8](1024)
+    defer free(buf)
+    if cast[int](c_realpath(p, buf)) == 0 { ret none }
+    ret copy_c(buf)
+}
+
+claw fn copy_c(p *u8) str +mem {
+    n := int(c_strlen(p))
+    mut out []u8 = []
+    for i in 0..n {
+        push(&out, p[i])
+    }
+    ret text(out)
+}
+
+// S_IFMT of `path`, 0 if there is nothing there.
+claw fn file_mode(path str) int +mem +io {
+    p := cstring(path)
+    defer free(p)
+    buf := alloc[u8](144)
+    defer free(buf)
+    if c_stat(p, buf) != 0 { ret 0 }
+    ret (int(buf[4]) + int(buf[5]) * 256) & 0xF000
+}
+
+pub fn is_file(path str) bool +mem +io {
+    ret file_mode(path) == 0x8000
+}
+
+pub fn is_dir(path str) bool +mem +io {
+    ret file_mode(path) == 0x4000
+}
+
+// The front end recurses on expression depth. Rust gives it a 256 MB thread; there are no
+// threads here, so raise the stack limit as far as the system allows and start again with it.
+pub claw fn ensure_stack() +mem +io {
+    want u64 = 268435456
+    buf := alloc[u64](2)
+    defer free(buf)
+    if c_getrlimit(3, cast[*u8](buf)) != 0 { ret }
+    mut target := want
+    if buf[1] < target { target = buf[1] }
+    if buf[0] >= target { ret }
+    buf[0] = target
+    if c_setrlimit(3, cast[*u8](buf)) != 0 { ret }
+    exe := current_exe() else { ret }
+    path := cstring(exe)
+    defer free(path)
+    _ = c_execv(path, cast[**u8](*c_argv()))
+}
+
+// Where the running program is, as the system says.
+pub claw fn current_exe() ?str +mem +io {
+    buf := alloc[u8](4096)
+    defer free(buf)
+    mut size u32 = 4096
+    if c_exe_path(buf, &size) != 0 { ret none }
+    ret copy_c(buf)
+}
+
+// The last system error in the form Rust prints it.
+pub claw fn last_error() str +mem +io {
+    code := *c_errno()
+    ret "{copy_c(c_strerror(code))} (os error {code})"
+}
+
+// `{v}` of Rust: the shortest digits that read back the same, never an exponent.
+pub claw fn f64_text(v f64) str +mem {
+    if v != v { ret "NaN" }
+    if v > 1.7976931348623157e308 { ret "inf" }
+    if v < -1.7976931348623157e308 { ret "-inf" }
+    buf := alloc[u8](64)
+    defer free(buf)
+    mut p i32 = 0
+    for p < 17 {
+        _ = c_snprintf(buf, 64, "%.*e", p, v)
+        if c_strtod(buf, cast[*u8](0)) == v { break }
+        p += 1
+    }
+    s := copy_c(buf)
+    at := find(s, "e") else { ret s }
+    mut neg := false
+    mut digits []u8 = []
+    for c in s[..at] {
+        if c == '-' { neg = true }
+        if c >= '0' and c <= '9' { push(&digits, c) }
+    }
+    mut exp := 0
+    for c in s[at + 2..] {
+        exp = exp * 10 + int(c - '0')
+    }
+    if s[at + 1] == '-' { exp = -exp }
+    for len(digits) > 1 and digits[len(digits) - 1] == '0' {
+        _ = pop(&digits)
+    }
+    mut out []u8 = []
+    if neg { push(&out, '-') }
+    if digits[0] == '0' {
+        push(&out, '0')
+        ret text(out)
+    }
+    if exp < 0 {
+        push(&out, '0')
+        push(&out, '.')
+        for _ in 0..-exp - 1 {
+            push(&out, '0')
+        }
+        for c in digits {
+            push(&out, c)
+        }
+        ret text(out)
+    }
+    for i in 0..len(digits) {
+        if i == exp + 1 { push(&out, '.') }
+        push(&out, digits[i])
+    }
+    for _ in len(digits)..exp + 1 {
+        push(&out, '0')
+    }
+    ret text(out)
+}
+
+pub claw fn pid() int {
+    ret int(c_getpid())
+}
+
+// Rust's `std::env::temp_dir()`: `$TMPDIR`, or `/tmp`.
+pub claw fn temp_dir() str +mem +io {
+    name := cstring("TMPDIR")
+    defer free(name)
+    p := c_getenv(name)
+    if cast[int](p) == 0 { ret "/tmp" }
+    s := copy_c(p)
+    if len(s) == 0 { ret "/tmp" }
+    // `Path::join` does not double a separator already there.
+    if ends_with(s, "/") { ret copy(s[..len(s) - 1]) }
+    ret s
+}
+
+// Creates a directory, or finds one already there, as `create_dir_all` does for the last part.
+pub claw fn make_dir(path str) bool +mem +io {
+    p := cstring(path)
+    defer free(p)
+    if c_mkdir(p, 511) == 0 { ret true }
+    ret is_dir(path)
+}
+
+pub claw fn remove_file(path str) +mem +io {
+    p := cstring(path)
+    defer free(p)
+    _ = c_unlink(p)
+}
+
+pub claw fn remove_dir(path str) +mem +io {
+    p := cstring(path)
+    defer free(p)
+    _ = c_rmdir(p)
+}
+
+pub claw fn stderr_is_terminal() bool +io {
+    ret c_isatty(2) == 1
+}
+
+// Runs the program with no arguments, sharing this process's input and output, and waits for it.
+// The exit code, or 128 plus the signal that ended it; -1 if it could not start (errno is set).
+pub claw fn run_program(path str) int +mem +io {
+    p := cstring(path)
+    defer free(p)
+    argv := alloc[*u8](2)
+    defer free(argv)
+    argv[0] = p
+    argv[1] = cast[*u8](0)
+    mut child i32 = 0
+    err := c_posix_spawn(&child, p, cast[*u8](0), cast[*u8](0), argv, cast[**u8](*c_environ()))
+    if err != 0 {
+        *c_errno() = err
+        ret -1
+    }
+    mut status i32 = 0
+    for c_waitpid(child, &status, 0) < 0 {
+        if *c_errno() != 4 { ret -1 }
+    }
+    sig := int(status) & 0x7f
+    if sig == 0 { ret (int(status) >> 8) & 0xff }
+    ret 128 + sig
+}

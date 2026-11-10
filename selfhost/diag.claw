@@ -1,0 +1,74 @@
+// Source positions and compiler errors.
+
+pub type Span { start int, stop int, line int, col int, file int }
+
+// `fix`: the label of the patch offered, printed after `; fix:`; "" when there is none.
+pub type Diag { code str, span Span, msg str, fix str }
+
+pub fn new(code str, span Span, msg str) Diag +mem {
+    ret Diag{copy(code), span, copy(msg), ""}
+}
+
+// A message that comes with a patch; only the label is kept.
+pub fn fixed(code str, span Span, msg str, label str) Diag +mem {
+    ret Diag{copy(code), span, copy(msg), copy(label)}
+}
+
+pub fn before(s Span) Span {
+    ret Span{s.start, s.start, s.line, s.col, s.file}
+}
+
+// `file:line:col CODE message`, in order of position.
+pub fn render(files []str, d []Diag) str +mem {
+    mut order []int = []
+    for _, i in d {
+        push(&order, i)
+    }
+    for i in 1..len(order) {
+        x := order[i]
+        mut j := i
+        for j > 0 and later(d[order[j - 1]], d[x]) {
+            order[j] = order[j - 1]
+            j -= 1
+        }
+        order[j] = x
+    }
+    mut out := ""
+    for i in order {
+        e := d[i]
+        if len(e.fix) > 0 {
+            out = "{out}{files[e.span.file]}:{e.span.line}:{e.span.col} {e.code} {e.msg}; fix: {e.fix}\n"
+        } else {
+            out = "{out}{files[e.span.file]}:{e.span.line}:{e.span.col} {e.code} {e.msg}\n"
+        }
+    }
+    ret out
+}
+
+// Rust's `diag::sort`: by position, stably, without repeats (one template body, several instances).
+pub fn sort(d &[]Diag) +mem {
+    mut sorted []Diag = []
+    for x in d {
+        mut j := len(sorted)
+        for j > 0 and later(sorted[j - 1], x) {
+            j -= 1
+        }
+        insert(&sorted, j, copy(x))
+    }
+    mut out []Diag = []
+    for x, i in sorted {
+        if i > 0 and same(sorted[i - 1], x) { continue }
+        push(&out, copy(x))
+    }
+    d = out
+}
+
+fn same(a Diag, b Diag) bool {
+    ret a.code == b.code and a.span.file == b.span.file and a.span.start == b.span.start and a.msg == b.msg
+}
+
+fn later(a Diag, b Diag) bool {
+    if a.span.file != b.span.file { ret a.span.file > b.span.file }
+    if a.span.line != b.span.line { ret a.span.line > b.span.line }
+    ret a.span.col > b.span.col
+}

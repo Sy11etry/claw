@@ -1,0 +1,13 @@
+// error: E0110
+fn twice() int {
+    print("hello")
+    ret 1
+}
+
+fn twice() int {
+    ret 2
+}
+
+fn main() {
+    print(twice())
+}

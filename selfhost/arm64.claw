@@ -1,0 +1,597 @@
+// ARM64 instruction encoders. Every function returns one 32-bit instruction.
+// `selfhost/dump_golden.claw` prints `golden` the way `claw __encoder-golden` does.
+// Registers are plain numbers: x0 is 0, d0 is 0, and number 31 is SP or XZR depending on the
+// instruction. `and`, `ret` and `str` are taken words, so those encoders are `and_x`, `ret_x`, `str_x`.
+
+pub const x0 u32 = 0
+pub const x1 u32 = 1
+pub const x2 u32 = 2
+pub const x9 u32 = 9
+pub const x10 u32 = 10
+pub const x11 u32 = 11
+pub const x12 u32 = 12
+pub const x13 u32 = 13
+pub const x14 u32 = 14
+pub const x16 u32 = 16
+pub const x19 u32 = 19
+pub const x20 u32 = 20
+pub const x21 u32 = 21
+pub const d0 u32 = 0
+pub const d1 u32 = 1
+pub const fp u32 = 29
+pub const lr u32 = 30
+pub const sp u32 = 31
+pub const xzr u32 = 31
+
+// Branch encoders take the displacement in instructions, not bytes.
+pub const b_op u32 = 0x1400_0000
+pub const bl_op u32 = 0x9400_0000
+
+pub type Cond = Eq | Ne | Hs | Lo | Mi | Vs | Vc | Hi | Ls | Ge | Lt | Gt | Le
+
+// The value of the condition field.
+pub fn cond_code(c Cond) u32 {
+    match c {
+        Eq: ret 0
+        Ne: ret 1
+        Hs: ret 2
+        Lo: ret 3
+        Mi: ret 4
+        Vs: ret 6
+        Vc: ret 7
+        Hi: ret 8
+        Ls: ret 9
+        Ge: ret 10
+        Lt: ret 11
+        Gt: ret 12
+        Le: ret 13
+    }
+}
+
+fn rrr(base u32, rd u32, rn u32, rm u32) u32 {
+    ret base | (rm << 16) | (rn << 5) | rd
+}
+
+fn ls(base u32, rt u32, rn u32, scaled u32) u32 {
+    ret base | (scaled << 10) | (rn << 5) | rt
+}
+
+// The float size bit: `ftype` 01 for double, 00 for single.
+fn ft(bits int) u32 {
+    if bits == 64 { ret 0x0040_0000 }
+    ret 0
+}
+
+pub fn movz(rd u32, imm u32, hw u32) u32 {
+    ret 0xD280_0000 | (hw << 21) | (imm << 5) | rd
+}
+
+pub fn movk(rd u32, imm u32, hw u32) u32 {
+    ret 0xF280_0000 | (hw << 21) | (imm << 5) | rd
+}
+
+pub fn movn(rd u32, imm u32, hw u32) u32 {
+    ret 0x9280_0000 | (hw << 21) | (imm << 5) | rd
+}
+
+pub fn mov(rd u32, rm u32) u32 {
+    ret rrr(0xAA00_03E0, rd, 0, rm)
+}
+
+// `mov` that can read or write SP.
+pub fn mov_sp(rd u32, rn u32) u32 {
+    ret add_imm(rd, rn, 0)
+}
+
+pub fn add_imm(rd u32, rn u32, imm u32) u32 {
+    ret 0x9100_0000 | (imm << 10) | (rn << 5) | rd
+}
+
+pub fn sub_imm(rd u32, rn u32, imm u32) u32 {
+    ret 0xD100_0000 | (imm << 10) | (rn << 5) | rd
+}
+
+pub fn sub_imm_lsl12(rd u32, rn u32, imm u32) u32 {
+    ret 0xD140_0000 | (imm << 10) | (rn << 5) | rd
+}
+
+pub fn cmp_imm(rn u32, imm u32) u32 {
+    ret 0xF100_0000 | (imm << 10) | (rn << 5) | xzr
+}
+
+pub fn cmn_imm(rn u32, imm u32) u32 {
+    ret 0xB100_0000 | (imm << 10) | (rn << 5) | xzr
+}
+
+pub fn adds(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xAB00_0000, rd, rn, rm)
+}
+
+pub fn adds_imm(rd u32, rn u32, imm u32) u32 {
+    ret 0xB100_0000 | (imm << 10) | (rn << 5) | rd
+}
+
+pub fn subs_imm(rd u32, rn u32, imm u32) u32 {
+    ret 0xF100_0000 | (imm << 10) | (rn << 5) | rd
+}
+
+// `add rd, rn, rm, lsl #shift`
+pub fn add_lsl(rd u32, rn u32, rm u32, shift u32) u32 {
+    ret 0x8B00_0000 | (rm << 16) | (shift << 10) | (rn << 5) | rd
+}
+
+// `ldr rt, [rn, rm, lsl #3]`
+pub fn ldr_idx(rt u32, rn u32, rm u32) u32 {
+    ret 0xF860_7800 | (rm << 16) | (rn << 5) | rt
+}
+
+// `str rt, [rn, rm, lsl #3]`
+pub fn str_idx(rt u32, rn u32, rm u32) u32 {
+    ret 0xF820_7800 | (rm << 16) | (rn << 5) | rt
+}
+
+// `ldrb wt, [rn, rm]`
+pub fn ldrb_idx(rt u32, rn u32, rm u32) u32 {
+    ret 0x3860_6800 | (rm << 16) | (rn << 5) | rt
+}
+
+// `strb wt, [rn, rm]`
+pub fn strb_idx(rt u32, rn u32, rm u32) u32 {
+    ret 0x3820_6800 | (rm << 16) | (rn << 5) | rt
+}
+
+// `ldr dt, [rn, rm, lsl #3]`
+pub fn ldr_d_idx(rt u32, rn u32, rm u32) u32 {
+    ret 0xFC60_7800 | (rm << 16) | (rn << 5) | rt
+}
+
+// `str dt, [rn, rm, lsl #3]`
+pub fn str_d_idx(rt u32, rn u32, rm u32) u32 {
+    ret 0xFC20_7800 | (rm << 16) | (rn << 5) | rt
+}
+
+pub fn adcs(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xBA00_0000, rd, rn, rm)
+}
+
+pub fn sbcs(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xFA00_0000, rd, rn, rm)
+}
+
+pub fn subs(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xEB00_0000, rd, rn, rm)
+}
+
+pub fn sub(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xCB00_0000, rd, rn, rm)
+}
+
+pub fn cmp(rn u32, rm u32) u32 {
+    ret subs(xzr, rn, rm)
+}
+
+// `cmp rn, rm, asr #shift`
+pub fn cmp_asr(rn u32, rm u32, shift u32) u32 {
+    ret 0xEB80_0000 | (rm << 16) | (shift << 10) | (rn << 5) | xzr
+}
+
+pub fn neg(rd u32, rm u32) u32 {
+    ret sub(rd, xzr, rm)
+}
+
+pub fn negs(rd u32, rm u32) u32 {
+    ret subs(rd, xzr, rm)
+}
+
+pub fn mul(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9B00_7C00, rd, rn, rm)
+}
+
+pub fn smulh(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9B40_7C00, rd, rn, rm)
+}
+
+// `rd = ra - rn * rm`
+pub fn msub(rd u32, rn u32, rm u32, ra u32) u32 {
+    ret 0x9B00_8000 | (rm << 16) | (ra << 10) | (rn << 5) | rd
+}
+
+pub fn umulh(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9BC0_7C00, rd, rn, rm)
+}
+
+pub fn sdiv(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9AC0_0C00, rd, rn, rm)
+}
+
+pub fn udiv(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9AC0_0800, rd, rn, rm)
+}
+
+pub fn and_x(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x8A00_0000, rd, rn, rm)
+}
+
+pub fn orr(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xAA00_0000, rd, rn, rm)
+}
+
+pub fn eor(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0xCA00_0000, rd, rn, rm)
+}
+
+pub fn mvn(rd u32, rm u32) u32 {
+    ret rrr(0xAA20_03E0, rd, 0, rm)
+}
+
+// `eor rd, rn, #1`
+pub fn eor_1(rd u32, rn u32) u32 {
+    ret 0xD240_0000 | (rn << 5) | rd
+}
+
+pub fn lsl(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9AC0_2000, rd, rn, rm)
+}
+
+pub fn asr(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9AC0_2800, rd, rn, rm)
+}
+
+// `cset rd, cond`
+pub fn cset(rd u32, cond u32) u32 {
+    ret 0x9A9F_07E0 | ((cond ^ 1) << 12) | rd
+}
+
+pub fn ldr(rt u32, rn u32, off u32) u32 {
+    ret 0xF940_0000 | ((off / 8) << 10) | (rn << 5) | rt
+}
+
+pub fn str_x(rt u32, rn u32, off u32) u32 {
+    ret 0xF900_0000 | ((off / 8) << 10) | (rn << 5) | rt
+}
+
+pub fn ldr_reg(rt u32, rn u32, rm u32) u32 {
+    ret rrr(0xF860_6800, rt, rn, rm)
+}
+
+pub fn str_reg(rt u32, rn u32, rm u32) u32 {
+    ret rrr(0xF820_6800, rt, rn, rm)
+}
+
+pub fn strb(rt u32, rn u32, off u32) u32 {
+    ret 0x3900_0000 | (off << 10) | (rn << 5) | rt
+}
+
+// `stp rt, rt2, [rn, #off]!`
+pub fn stp_pre(rt u32, rt2 u32, rn u32, off i32) u32 {
+    ret 0xA980_0000 | (((u32(off / 8)) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+
+// `ldp rt, rt2, [rn], #off`
+pub fn ldp_post(rt u32, rt2 u32, rn u32, off i32) u32 {
+    ret 0xA8C0_0000 | ((u32(off / 8) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+
+pub fn add(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x8B00_0000, rd, rn, rm)
+}
+
+// `add rd, rn, rm` where rn may be SP.
+pub fn add_ext(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x8B20_6000, rd, rn, rm)
+}
+
+pub fn lsr(rd u32, rn u32, rm u32) u32 {
+    ret rrr(0x9AC0_2400, rd, rn, rm)
+}
+
+// `sbfx rd, rn, #0, #bits`: sign-extend the low bits.
+pub fn sbfx(rd u32, rn u32, bits u32) u32 {
+    ret 0x9340_0000 | ((bits - 1) << 10) | (rn << 5) | rd
+}
+
+// `ubfx rd, rn, #0, #bits`: zero-extend the low bits.
+pub fn ubfx(rd u32, rn u32, bits u32) u32 {
+    ret 0xD340_0000 | ((bits - 1) << 10) | (rn << 5) | rd
+}
+
+pub fn ldrb(rt u32, rn u32, off u32) u32 {
+    ret ls(0x3940_0000, rt, rn, off)
+}
+
+pub fn ldrsb(rt u32, rn u32) u32 {
+    ret ls(0x3980_0000, rt, rn, 0)
+}
+
+pub fn ldrh(rt u32, rn u32) u32 {
+    ret ls(0x7940_0000, rt, rn, 0)
+}
+
+pub fn ldrsh(rt u32, rn u32) u32 {
+    ret ls(0x7980_0000, rt, rn, 0)
+}
+
+pub fn ldr_w(rt u32, rn u32) u32 {
+    ret ls(0xB940_0000, rt, rn, 0)
+}
+
+pub fn ldrsw(rt u32, rn u32) u32 {
+    ret ls(0xB980_0000, rt, rn, 0)
+}
+
+pub fn strh(rt u32, rn u32) u32 {
+    ret ls(0x7900_0000, rt, rn, 0)
+}
+
+pub fn str_w(rt u32, rn u32) u32 {
+    ret ls(0xB900_0000, rt, rn, 0)
+}
+
+pub fn strb_reg(rt u32, rn u32, rm u32) u32 {
+    ret rrr(0x3820_6800, rt, rn, rm)
+}
+
+// `stp rt, rt2, [rn, #off]`
+pub fn stp(rt u32, rt2 u32, rn u32, off u32) u32 {
+    ret 0xA900_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+
+// `ldp rt, rt2, [rn, #off]`
+pub fn ldp(rt u32, rt2 u32, rn u32, off u32) u32 {
+    ret 0xA940_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+
+pub fn ldr_d(rt u32, rn u32, off u32) u32 {
+    ret ls(0xFD40_0000, rt, rn, off / 8)
+}
+
+pub fn str_d(rt u32, rn u32, off u32) u32 {
+    ret ls(0xFD00_0000, rt, rn, off / 8)
+}
+
+pub fn ldr_s(rt u32, rn u32, off u32) u32 {
+    ret ls(0xBD40_0000, rt, rn, off / 4)
+}
+
+pub fn str_s(rt u32, rn u32, off u32) u32 {
+    ret ls(0xBD00_0000, rt, rn, off / 4)
+}
+
+pub fn fadd(rd u32, rn u32, rm u32, bits int) u32 {
+    ret rrr(0x1E20_2800 | ft(bits), rd, rn, rm)
+}
+
+pub fn fsub(rd u32, rn u32, rm u32, bits int) u32 {
+    ret rrr(0x1E20_3800 | ft(bits), rd, rn, rm)
+}
+
+pub fn fmul(rd u32, rn u32, rm u32, bits int) u32 {
+    ret rrr(0x1E20_0800 | ft(bits), rd, rn, rm)
+}
+
+pub fn fdiv(rd u32, rn u32, rm u32, bits int) u32 {
+    ret rrr(0x1E20_1800 | ft(bits), rd, rn, rm)
+}
+
+pub fn fneg(rd u32, rn u32, bits int) u32 {
+    ret 0x1E21_4000 | ft(bits) | (rn << 5) | rd
+}
+
+pub fn fcmp(rn u32, rm u32, bits int) u32 {
+    ret 0x1E20_2000 | ft(bits) | (rm << 16) | (rn << 5)
+}
+
+pub fn fcvt_s_to_d(rd u32, rn u32) u32 {
+    ret 0x1E22_C000 | (rn << 5) | rd
+}
+
+pub fn fcvt_d_to_s(rd u32, rn u32) u32 {
+    ret 0x1E62_4000 | (rn << 5) | rd
+}
+
+pub fn scvtf(rd u32, rn u32, bits int) u32 {
+    ret 0x9E22_0000 | ft(bits) | (rn << 5) | rd
+}
+
+pub fn ucvtf(rd u32, rn u32, bits int) u32 {
+    ret 0x9E23_0000 | ft(bits) | (rn << 5) | rd
+}
+
+pub fn fcvtzs(rd u32, rn u32) u32 {
+    ret 0x9E78_0000 | (rn << 5) | rd
+}
+
+pub fn fcvtzu(rd u32, rn u32) u32 {
+    ret 0x9E79_0000 | (rn << 5) | rd
+}
+
+// `fmov xd, dn`
+pub fn fmov_x_d(rd u32, rn u32) u32 {
+    ret 0x9E66_0000 | (rn << 5) | rd
+}
+
+// `fmov dd, dn`
+pub fn fmov_d_d(rd u32, rn u32) u32 {
+    ret 0x1E60_4000 | (rn << 5) | rd
+}
+
+pub fn fmov_d_x(rd u32, rn u32) u32 {
+    ret 0x9E67_0000 | (rn << 5) | rd
+}
+
+// Call the address in `rn`.
+pub fn blr(rn u32) u32 {
+    ret 0xD63F_0000 | (rn << 5)
+}
+
+pub fn b_at(base u32, disp i32) u32 {
+    ret base | (u32(disp) & 0x03FF_FFFF)
+}
+
+pub fn b_cond(cond Cond, disp i32) u32 {
+    ret 0x5400_0000 | ((u32(disp) & 0x7FFFF) << 5) | cond_code(cond)
+}
+
+pub fn cbz(rt u32, disp i32) u32 {
+    ret 0xB400_0000 | ((u32(disp) & 0x7FFFF) << 5) | rt
+}
+
+pub fn cbnz(rt u32, disp i32) u32 {
+    ret 0xB500_0000 | ((u32(disp) & 0x7FFFF) << 5) | rt
+}
+
+pub fn br(rn u32) u32 {
+    ret 0xD61F_0000 | (rn << 5)
+}
+
+pub fn ret_x() u32 {
+    ret 0xD65F_03C0
+}
+
+pub fn brk(imm u32) u32 {
+    ret 0xD420_0000 | (imm << 5)
+}
+
+// `adrp rd, target` with the page distance in pages.
+pub fn adrp(rd u32, pages int) u32 {
+    p := u32(pages)
+    ret 0x9000_0000 | ((p & 3) << 29) | (((p >> 2) & 0x7FFFF) << 5) | rd
+}
+
+// (the word, its assembly), checked against llvm-mc by `tools/check_encoder.py` in Rust.
+pub type Sample { word u32, text str }
+
+fn s(o &[]Sample, w u32, t str) {
+    push(&o, Sample{w, copy(t)})
+}
+
+pub fn golden() []Sample +mem {
+    mut o []Sample = []
+    s(&o, movz(x0, 42, 0), "movz x0, #42")
+    s(&o, movz(x9, 0xBEEF, 1), "movz x9, #48879, lsl #16")
+    s(&o, movk(x9, 0x1234, 3), "movk x9, #4660, lsl #48")
+    s(&o, movn(x10, 7, 0), "movn x10, #7")
+    s(&o, mov(x9, x11), "mov x9, x11")
+    s(&o, mov_sp(fp, sp), "mov x29, sp")
+    s(&o, add_imm(x9, sp, 47), "add x9, sp, #47")
+    s(&o, sub_imm(sp, sp, 32), "sub sp, sp, #32")
+    s(&o, sub_imm_lsl12(sp, sp, 3), "sub sp, sp, #3, lsl #12")
+    s(&o, cmp_imm(x0, 0), "cmp x0, #0")
+    s(&o, cmp_imm(x10, 64), "cmp x10, #64")
+    s(&o, cmn_imm(x10, 1), "cmn x10, #1")
+    s(&o, fmov_x_d(x9, 3), "fmov x9, d3")
+    s(&o, fmov_d_d(3, 17), "fmov d3, d17")
+    s(&o, adds_imm(x11, x9, 17), "adds x11, x9, #17")
+    s(&o, subs_imm(x11, x9, 4095), "subs x11, x9, #4095")
+    s(&o, add_lsl(x11, x9, x10, 3), "add x11, x9, x10, lsl #3")
+    s(&o, ldr_idx(x11, x9, x10), "ldr x11, [x9, x10, lsl #3]")
+    s(&o, str_idx(x11, x9, x10), "str x11, [x9, x10, lsl #3]")
+    s(&o, ldrb_idx(x11, x9, x10), "ldrb w11, [x9, x10]")
+    s(&o, strb_idx(x11, x9, x10), "strb w11, [x9, x10]")
+    s(&o, ldr_d_idx(3, x9, x10), "ldr d3, [x9, x10, lsl #3]")
+    s(&o, str_d_idx(3, x9, x10), "str d3, [x9, x10, lsl #3]")
+    s(&o, adds(x11, x9, x10), "adds x11, x9, x10")
+    s(&o, adcs(x14, x10, x12), "adcs x14, x10, x12")
+    s(&o, sbcs(x14, x10, x12), "sbcs x14, x10, x12")
+    s(&o, subs(x11, x9, x10), "subs x11, x9, x10")
+    s(&o, sub(x2, x2, x9), "sub x2, x2, x9")
+    s(&o, cmp(x9, x10), "cmp x9, x10")
+    s(&o, cmp_asr(x12, x11, 63), "cmp x12, x11, asr #63")
+    s(&o, neg(x11, x0), "neg x11, x0")
+    s(&o, negs(x11, x9), "negs x11, x9")
+    s(&o, mul(x11, x9, x10), "mul x11, x9, x10")
+    s(&o, smulh(x12, x9, x10), "smulh x12, x9, x10")
+    s(&o, msub(x13, x12, x10, x11), "msub x13, x12, x10, x11")
+    s(&o, sdiv(x11, x9, x10), "sdiv x11, x9, x10")
+    s(&o, udiv(x12, x11, x10), "udiv x12, x11, x10")
+    s(&o, and_x(x11, x9, x10), "and x11, x9, x10")
+    s(&o, orr(x11, x9, x10), "orr x11, x9, x10")
+    s(&o, eor(x11, x9, x10), "eor x11, x9, x10")
+    s(&o, mvn(x11, x9), "mvn x11, x9")
+    s(&o, eor_1(x11, x9), "eor x11, x9, #1")
+    s(&o, lsl(x11, x9, x10), "lsl x11, x9, x10")
+    s(&o, asr(x11, x9, x10), "asr x11, x9, x10")
+    s(&o, cset(x11, cond_code(Eq)), "cset x11, eq")
+    s(&o, cset(x11, cond_code(Ne)), "cset x11, ne")
+    s(&o, cset(x11, cond_code(Lt)), "cset x11, lt")
+    s(&o, cset(x11, cond_code(Le)), "cset x11, le")
+    s(&o, cset(x11, cond_code(Gt)), "cset x11, gt")
+    s(&o, cset(x11, cond_code(Ge)), "cset x11, ge")
+    s(&o, ldr(x9, sp, 8), "ldr x9, [sp, #8]")
+    s(&o, ldr(x16, x16, 4088), "ldr x16, [x16, #4088]")
+    s(&o, str_x(x11, sp, 32760), "str x11, [sp, #32760]")
+    s(&o, ldr_reg(x9, sp, x16), "ldr x9, [sp, x16]")
+    s(&o, str_reg(x11, sp, x16), "str x11, [sp, x16]")
+    s(&o, strb(x13, x9, 0), "strb w13, [x9]")
+    s(&o, stp_pre(fp, lr, sp, -16), "stp x29, x30, [sp, #-16]!")
+    s(&o, stp_pre(fp, lr, sp, -48), "stp x29, x30, [sp, #-48]!")
+    s(&o, ldp_post(fp, lr, sp, 16), "ldp x29, x30, [sp], #16")
+    s(&o, ldp_post(fp, lr, sp, 48), "ldp x29, x30, [sp], #48")
+    s(&o, b_at(b_op, 8), "b #32")
+    s(&o, b_at(b_op, -8), "b #-32")
+    s(&o, b_at(bl_op, 16), "bl #64")
+    s(&o, b_cond(Vs, 4), "b.vs #16")
+    s(&o, b_cond(Ne, -4), "b.ne #-16")
+    s(&o, b_cond(Hs, 4), "b.hs #16")
+    s(&o, b_cond(Vc, 4), "b.vc #16")
+    s(&o, cbz(x9, 3), "cbz x9, #12")
+    s(&o, cbnz(x9, -3), "cbnz x9, #-12")
+    s(&o, br(x16), "br x16")
+    s(&o, blr(x16), "blr x16")
+    s(&o, ret_x(), "ret")
+    s(&o, brk(1), "brk #1")
+    s(&o, umulh(x12, x9, x10), "umulh x12, x9, x10")
+    s(&o, add(x9, x9, x16), "add x9, x9, x16")
+    s(&o, add_ext(x9, sp, x16), "add x9, sp, x16")
+    s(&o, lsr(x11, x9, x10), "lsr x11, x9, x10")
+    s(&o, sbfx(x12, x11, 8), "sbfx x12, x11, #0, #8")
+    s(&o, sbfx(x12, x11, 32), "sbfx x12, x11, #0, #32")
+    s(&o, ubfx(x11, x11, 16), "ubfx x11, x11, #0, #16")
+    s(&o, ldrb(x10, x9, 0), "ldrb w10, [x9]")
+    s(&o, ldrb(x10, x9, 63), "ldrb w10, [x9, #63]")
+    s(&o, ldrsb(x10, x9), "ldrsb x10, [x9]")
+    s(&o, ldrh(x10, x9), "ldrh w10, [x9]")
+    s(&o, ldrsh(x10, x9), "ldrsh x10, [x9]")
+    s(&o, ldr_w(x10, x9), "ldr w10, [x9]")
+    s(&o, ldrsw(x10, x9), "ldrsw x10, [x9]")
+    s(&o, strh(x10, x9), "strh w10, [x9]")
+    s(&o, str_w(x10, x9), "str w10, [x9]")
+    s(&o, strb_reg(x13, x12, x10), "strb w13, [x12, x10]")
+    s(&o, stp(x19, x20, sp, 16), "stp x19, x20, [sp, #16]")
+    s(&o, ldp(x19, x20, sp, 16), "ldp x19, x20, [sp, #16]")
+    s(&o, ldr_d(d0, sp, 8), "ldr d0, [sp, #8]")
+    s(&o, str_d(d0, sp, 32760), "str d0, [sp, #32760]")
+    s(&o, ldr_s(d1, sp, 4), "ldr s1, [sp, #4]")
+    s(&o, str_s(d0, x16, 0), "str s0, [x16]")
+    s(&o, fadd(d0, d0, d1, 64), "fadd d0, d0, d1")
+    s(&o, fsub(d0, d0, d1, 64), "fsub d0, d0, d1")
+    s(&o, fmul(d0, d0, d1, 64), "fmul d0, d0, d1")
+    s(&o, fdiv(d0, d0, d1, 64), "fdiv d0, d0, d1")
+    s(&o, fadd(d0, d0, d1, 32), "fadd s0, s0, s1")
+    s(&o, fsub(d0, d0, d1, 32), "fsub s0, s0, s1")
+    s(&o, fmul(d0, d0, d1, 32), "fmul s0, s0, s1")
+    s(&o, fdiv(d0, d0, d1, 32), "fdiv s0, s0, s1")
+    s(&o, fneg(d0, d0, 64), "fneg d0, d0")
+    s(&o, fneg(d0, d0, 32), "fneg s0, s0")
+    s(&o, fcmp(d0, d1, 64), "fcmp d0, d1")
+    s(&o, fcmp(d0, d1, 32), "fcmp s0, s1")
+    s(&o, fcvt_s_to_d(d0, d0), "fcvt d0, s0")
+    s(&o, fcvt_d_to_s(d0, d0), "fcvt s0, d0")
+    s(&o, scvtf(d0, x9, 64), "scvtf d0, x9")
+    s(&o, scvtf(d0, x9, 32), "scvtf s0, x9")
+    s(&o, ucvtf(d0, x9, 64), "ucvtf d0, x9")
+    s(&o, ucvtf(d0, x9, 32), "ucvtf s0, x9")
+    s(&o, fcvtzs(x11, d0), "fcvtzs x11, d0")
+    s(&o, fcvtzu(x11, d0), "fcvtzu x11, d0")
+    s(&o, fmov_d_x(d1, x16), "fmov d1, x16")
+    s(&o, b_cond(Lo, 4), "b.lo #16")
+    s(&o, b_cond(Mi, 4), "b.mi #16")
+    s(&o, b_cond(Hi, 4), "b.hi #16")
+    s(&o, b_cond(Ls, 4), "b.ls #16")
+    s(&o, cset(x11, cond_code(Lo)), "cset x11, lo")
+    s(&o, cset(x11, cond_code(Ls)), "cset x11, ls")
+    s(&o, cset(x11, cond_code(Hi)), "cset x11, hi")
+    s(&o, cset(x11, cond_code(Hs)), "cset x11, hs")
+    s(&o, cset(x11, cond_code(Mi)), "cset x11, mi")
+    ret o
+}

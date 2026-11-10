@@ -175,6 +175,11 @@ impl Types {
         self.kinds[t.0 as usize]
     }
 
+    /// How many types have been interned.
+    pub fn count(&self) -> usize {
+        self.kinds.len()
+    }
+
     pub fn is_int(&self, t: Ty) -> bool {
         matches!(self.kind(t), Kind::Int { .. })
     }

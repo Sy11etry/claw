@@ -31,6 +31,9 @@ python3 tools/exam.py <папка> [--tasks=tasks2.json]         # оценка 
 python3 tools/install.py                                    # установка версии в ~/.claw
 ```
 
+Компилятор на самом Claw: `selfhost/` (правила переноса в `selfhost/PORTING.md`). Мерка: байты как у `claw build --no-opt`; самосборку до неподвижной точки проверяет `tools/runtests.py`.
+
+
 ## Устройство
 
 `compiler/src`: `lexer → parser → ast → sema → effects → lower → cir → codegen (arm64) → macho + sha256`, ошибки в `diag`.

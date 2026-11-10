@@ -1,0 +1,322 @@
+// Tokens. Newlines are significant: a line ends a statement unless it ends
+// in an operator, a comma or an open bracket, or sits inside () or [].
+
+use diag
+use rt
+
+pub const t_int = 0
+pub const t_float = 1
+pub const t_char = 2
+pub const t_str = 3
+pub const t_ident = 4
+pub const t_kw = 5
+pub const t_op = 6
+pub const t_newline = 7
+pub const t_eof = 8
+
+// `value` is an integer literal or a char; `big` means it does not fit 64 bits.
+pub type Token { kind int, text str, value u64, big bool, float f64, span diag.Span }
+
+type Lexer { pos int, line int, col int, file int }
+
+fn words() []str {
+    ret ["fn", "type", "use", "pub", "const", "mut", "own", "if", "else", "for", "in", "break",
+        "continue", "match", "ret", "fail", "need", "sure", "test", "claw", "defer", "extern", "and",
+        "or", "not", "true", "false", "none"]
+}
+
+fn operators() []str {
+    ret ["<<=", ">>=", "...", ":=", "==", "!=", "<=", ">=", "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=",
+        "|=", "^=", "..", "+", "-", "*", "/", "%", "&", "|", "^", "~", "<", ">", "=", "(", ")", "{{",
+        "}", "[", "]", ",", ".", ":", "!", "?"]
+}
+
+fn peek(src str, l Lexer, off int) u8 {
+    if l.pos + off >= len(src) { ret 0 }
+    ret src[l.pos + off]
+}
+
+fn bump(src str, l &Lexer) u8 {
+    c := peek(src, l, 0)
+    l.pos += 1
+    if c == '\n' {
+        l.line += 1
+        l.col = 1
+    } else {
+        l.col += 1
+    }
+    ret c
+}
+
+fn is_digit(c u8) bool {
+    ret c >= '0' and c <= '9'
+}
+
+fn is_alpha(c u8) bool {
+    ret (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
+}
+
+fn span_from(l Lexer, start int, line int, col int) diag.Span {
+    ret diag.Span{start, l.pos, line, col, l.file}
+}
+
+fn plain(kind int, own text str, span diag.Span) Token {
+    ret Token{kind, text, 0, false, 0.0, span}
+}
+
+fn continues_line(t Token) bool {
+    if t.kind == t_kw { ret t.text == "and" or t.text == "or" or t.text == "not" }
+    if t.kind == t_op {
+        ret not (t.text == ")" or t.text == "]" or t.text == "}" or t.text == "?" or t.text == "!" or t.text == "." or t.text == "...")
+    }
+    ret false
+}
+
+pub fn lex(src str, file int, diags &[]diag.Diag) []Token +mem {
+    kw := words()
+    ops := operators()
+    mut l := Lexer{0, 1, 1, file}
+    mut out []Token = []
+    mut brackets []u8 = []
+    for l.pos < len(src) {
+        c := peek(src, l, 0)
+        start := l.pos
+        line := l.line
+        col := l.col
+        if c == ' ' or c == '\t' or c == '\r' {
+            _ = bump(src, &l)
+        } else if c == '\n' {
+            _ = bump(src, &l)
+            inside := len(brackets) > 0 and (brackets[len(brackets) - 1] == '(' or brackets[len(brackets) - 1] == '[')
+            mut keep := false
+            if len(out) > 0 {
+                last := out[len(out) - 1]
+                keep = not continues_line(last) and last.kind != t_newline
+            }
+            if keep and not inside {
+                push(&out, plain(t_newline, "", span_from(l, start, line, col)))
+            }
+        } else if c == '/' and peek(src, l, 1) == '/' {
+            for l.pos < len(src) and peek(src, l, 0) != '\n' {
+                _ = bump(src, &l)
+            }
+        } else if is_digit(c) {
+            push(&out, lex_number(src, &l, &diags))
+        } else if c == '"' {
+            push(&out, lex_string(src, &l, &diags))
+        } else if c == 39 {
+            push(&out, lex_char(src, &l, &diags))
+        } else if c == '_' or is_alpha(c) {
+            for peek(src, l, 0) == '_' or is_alpha(peek(src, l, 0)) or is_digit(peek(src, l, 0)) {
+                _ = bump(src, &l)
+            }
+            text := copy(src[start..l.pos])
+            mut kind := t_ident
+            if has(kw, text) { kind = t_kw }
+            push(&out, plain(kind, text, span_from(l, start, line, col)))
+        } else {
+            lex_op(src, &l, &out, &brackets, ops, &diags)
+        }
+    }
+    span := diag.Span{l.pos, l.pos, l.line, l.col, file}
+    if len(out) > 0 and out[len(out) - 1].kind != t_newline {
+        push(&out, plain(t_newline, "", span))
+    }
+    push(&out, plain(t_eof, "", span))
+    ret out
+}
+
+fn lex_op(src str, l &Lexer, out &[]Token, brackets &[]u8, ops []str, diags &[]diag.Diag) {
+    start := l.pos
+    line := l.line
+    col := l.col
+    rest := src[l.pos..]
+    for op in ops {
+        if starts_with(rest, op) {
+            for _ in 0..len(op) {
+                _ = bump(src, &l)
+            }
+            if op == "(" or op == "[" or op == "{{" {
+                push(&brackets, op[0])
+            } else if op == ")" or op == "]" or op == "}" {
+                _ = pop(&brackets)
+            }
+            push(&out, plain(t_op, copy(op), span_from(l, start, line, col)))
+            ret
+        }
+    }
+    // A whole UTF-8 character, so the report points at it.
+    _ = bump(src, &l)
+    for peek(src, l, 0) & 0xC0 == 0x80 {
+        _ = bump(src, &l)
+    }
+    push(&diags, diag.new("E0001", span_from(l, start, line, col), "unexpected character `{src[start..l.pos]}`"))
+}
+
+fn digit_value(c u8, radix u64) ?u64 {
+    mut d u64 = 99
+    if is_digit(c) { d = u64(c - '0') }
+    if c >= 'a' and c <= 'f' { d = u64(c - 'a') + 10 }
+    if c >= 'A' and c <= 'F' { d = u64(c - 'A') + 10 }
+    if d < radix { ret d }
+    ret none
+}
+
+fn is_sign(c u8) bool {
+    ret c == '+' or c == '-'
+}
+
+fn is_e(c u8) bool {
+    ret c == 'e' or c == 'E'
+}
+
+fn after_e(src str, l Lexer) u8 {
+    if is_sign(peek(src, l, 1)) { ret peek(src, l, 2) }
+    ret peek(src, l, 1)
+}
+
+fn lex_number(src str, l &Lexer, diags &[]diag.Diag) Token {
+    start := l.pos
+    line := l.line
+    col := l.col
+    mut radix u64 = 10
+    if peek(src, l, 0) == '0' and peek(src, l, 1) == 'x' { radix = 16 }
+    if peek(src, l, 0) == '0' and peek(src, l, 1) == 'b' { radix = 2 }
+    if radix != 10 {
+        _ = bump(src, &l)
+        _ = bump(src, &l)
+    }
+    mut value u64 = 0
+    mut digits := 0
+    mut big := false
+    limit u64 = 18446744073709551615
+    for {
+        c := peek(src, l, 0)
+        if c == '_' {
+            _ = bump(src, &l)
+            continue
+        }
+        d := digit_value(c, radix) else { break }
+        _ = bump(src, &l)
+        digits += 1
+        if value > (limit - d) / radix {
+            big = true
+        } else {
+            value = value * radix + d
+        }
+    }
+    if radix == 10 {
+        frac := peek(src, l, 0) == '.' and is_digit(peek(src, l, 1))
+        exp_now := is_e(peek(src, l, 0)) and is_digit(after_e(src, l))
+        if frac or exp_now {
+            if frac {
+                _ = bump(src, &l)
+                for is_digit(peek(src, l, 0)) or peek(src, l, 0) == '_' {
+                    _ = bump(src, &l)
+                }
+            }
+            if is_e(peek(src, l, 0)) and is_digit(after_e(src, l)) {
+                _ = bump(src, &l)
+                if is_sign(peek(src, l, 0)) { _ = bump(src, &l) }
+                for is_digit(peek(src, l, 0)) {
+                    _ = bump(src, &l)
+                }
+            }
+            mut clean := ""
+            for c in src[start..l.pos] {
+                if c != '_' { clean = "{clean}{char_text(c)}" }
+            }
+            ret Token{t_float, "", 0, false, rt.parse_f64(clean), span_from(l, start, line, col)}
+        }
+    }
+    span := span_from(l, start, line, col)
+    next := peek(src, l, 0)
+    if digits == 0 {
+        push(&diags, diag.new("E0003", span, "number has no digits"))
+    } else if next == '_' or is_alpha(next) {
+        push(&diags, diag.new("E0003", span, "number runs into a name; add a space"))
+    }
+    ret Token{t_int, "", value, big, 0.0, span}
+}
+
+pub fn char_text(c u8) str +mem {
+    mut b []u8 = []
+    push(&b, c)
+    ret rt.text(b)
+}
+
+fn lex_string(src str, l &Lexer, diags &[]diag.Diag) Token {
+    start := l.pos
+    line := l.line
+    col := l.col
+    _ = bump(src, &l)
+    mut bytes []u8 = []
+    for {
+        if l.pos >= len(src) or peek(src, l, 0) == '\n' {
+            push(&diags, diag.new("E0002", span_from(l, start, line, col), "string is not closed; add `\"`"))
+            break
+        }
+        c := bump(src, &l)
+        if c == '"' { break }
+        if c == '\\' {
+            e := bump(src, &l)
+            if e == 'n' {
+                push(&bytes, '\n')
+            } else if e == 't' {
+                push(&bytes, '\t')
+            } else if e == 'r' {
+                push(&bytes, '\r')
+            } else if e == '0' {
+                push(&bytes, 0)
+            } else if e == '\\' {
+                push(&bytes, '\\')
+            } else if e == '"' {
+                push(&bytes, '"')
+            } else {
+                mut c2 := l.col - 2
+                if c2 < 0 { c2 = 0 }
+                span := diag.Span{l.pos - 2, l.pos, l.line, c2, l.file}
+                push(&diags, diag.new("E0004", span, "unknown escape; use \\n \\t \\r \\0 \\\\ \\\""))
+            }
+        } else {
+            push(&bytes, c)
+        }
+    }
+    ret plain(t_str, rt.text(bytes), span_from(l, start, line, col))
+}
+
+fn lex_char(src str, l &Lexer, diags &[]diag.Diag) Token {
+    start := l.pos
+    line := l.line
+    col := l.col
+    _ = bump(src, &l)
+    c := bump(src, &l)
+    mut value := c
+    if c == '\\' {
+        e := bump(src, &l)
+        if e == 'n' {
+            value = '\n'
+        } else if e == 't' {
+            value = '\t'
+        } else if e == 'r' {
+            value = '\r'
+        } else if e == '0' {
+            value = 0
+        } else if e == '\\' {
+            value = '\\'
+        } else if e == 39 {
+            value = 39
+        } else {
+            push(&diags, diag.new("E0004", span_from(l, start, line, col), "unknown escape; use \\n \\t \\r \\0 \\\\ \\'"))
+            value = 0
+        }
+    }
+    if peek(src, l, 0) != 39 or c >= 0x80 {
+        push(&diags, diag.new("E0005", span_from(l, start, line, col), "a character literal holds exactly one ASCII character; close it with `'`"))
+        for l.pos < len(src) and peek(src, l, 0) != 39 and peek(src, l, 0) != '\n' {
+            _ = bump(src, &l)
+        }
+    }
+    if peek(src, l, 0) == 39 { _ = bump(src, &l) }
+    ret Token{t_char, "", u64(value), false, 0.0, span_from(l, start, line, col)}
+}

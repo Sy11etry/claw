@@ -1,0 +1,228 @@
+// A signed 128-bit integer, for evaluating `const` expressions the way Rust's i128 does.
+// `big`: built from a literal past 64 bits, whose digits the lexer has not kept.
+
+pub type Wide { hi u64, lo u64, big bool }
+
+pub fn of(value u64, neg bool, big bool) Wide {
+    if big { ret Wide{0, 0, true} }
+    if neg {
+        ret negate(Wide{0, value, false})
+    }
+    ret Wide{0, value, false}
+}
+
+fn is_neg(w Wide) bool {
+    ret w.hi >> 63 == 1
+}
+
+pub fn is_zero(w Wide) bool {
+    ret not w.big and w.hi == 0 and w.lo == 0
+}
+
+pub fn negate(w Wide) Wide {
+    lo := 0 - w.lo
+    mut hi := 0 - w.hi
+    if w.lo != 0 { hi -= 1 }
+    ret Wide{hi, lo, w.big}
+}
+
+pub fn add(a Wide, b Wide) ?Wide {
+    if a.big or b.big { ret Wide{0, 0, true} }
+    lo := a.lo + b.lo
+    mut carry u64 = 0
+    if lo < a.lo { carry = 1 }
+    hi := a.hi + b.hi + carry
+    r := Wide{hi, lo, false}
+    if is_neg(a) == is_neg(b) and is_neg(r) != is_neg(a) { ret none }
+    ret r
+}
+
+pub fn sub(a Wide, b Wide) ?Wide {
+    if a.big or b.big { ret Wide{0, 0, true} }
+    lo := a.lo - b.lo
+    mut borrow u64 = 0
+    if a.lo < b.lo { borrow = 1 }
+    hi := a.hi - b.hi - borrow
+    r := Wide{hi, lo, false}
+    if is_neg(a) != is_neg(b) and is_neg(r) != is_neg(a) { ret none }
+    ret r
+}
+
+fn mag(w Wide) Wide {
+    if is_neg(w) { ret negate(w) }
+    ret Wide{w.hi, w.lo, false}
+}
+
+fn limbs(w Wide) [4]u64 {
+    ret [w.lo & 0xFFFFFFFF, w.lo >> 32, w.hi & 0xFFFFFFFF, w.hi >> 32]
+}
+
+fn signed_from_mag(m Wide, want_neg bool) ?Wide {
+    if m.hi >> 63 == 1 {
+        // Only i128::MIN itself has the top bit of its magnitude set.
+        if want_neg and m.hi == 1 << 63 and m.lo == 0 { ret m }
+        ret none
+    }
+    if want_neg { ret negate(m) }
+    ret m
+}
+
+pub fn mul(a Wide, b Wide) ?Wide {
+    if a.big or b.big { ret Wide{0, 0, true} }
+    x := limbs(mag(a))
+    y := limbs(mag(b))
+    mut r [8]u64 = [0...]
+    for i in 0..4 {
+        mut carry u64 = 0
+        for j in 0..4 {
+            t := x[i] * y[j] + r[i + j] + carry
+            r[i + j] = t & 0xFFFFFFFF
+            carry = t >> 32
+        }
+        r[i + 4] = carry
+    }
+    if r[4] != 0 or r[5] != 0 or r[6] != 0 or r[7] != 0 { ret none }
+    m := Wide{(r[3] << 32) | r[2], (r[1] << 32) | r[0], false}
+    ret signed_from_mag(m, is_neg(a) != is_neg(b))
+}
+
+fn mag_less(a Wide, b Wide) bool {
+    if a.hi != b.hi { ret a.hi < b.hi }
+    ret a.lo < b.lo
+}
+
+fn bit_of(w Wide, i int) u64 {
+    if i < 64 { ret (w.lo >> u64(i)) & 1 }
+    ret (w.hi >> u64(i - 64)) & 1
+}
+
+fn shl1(w Wide, bit u64) Wide {
+    ret Wide{(w.hi << 1) | (w.lo >> 63), (w.lo << 1) | bit, false}
+}
+
+fn mag_sub(a Wide, b Wide) Wide {
+    lo := a.lo - b.lo
+    mut borrow u64 = 0
+    if a.lo < b.lo { borrow = 1 }
+    ret Wide{a.hi - b.hi - borrow, lo, false}
+}
+
+type DivOut { q Wide, r Wide }
+
+// Unsigned 128-bit division, bit by bit. `b` is not zero.
+fn div_mag(a Wide, b Wide) DivOut {
+    mut q := Wide{0, 0, false}
+    mut r := Wide{0, 0, false}
+    mut i := 127
+    for i >= 0 {
+        r = shl1(r, bit_of(a, i))
+        q = shl1(q, 0)
+        if not mag_less(r, b) {
+            r = mag_sub(r, b)
+            q.lo = q.lo | 1
+        }
+        i -= 1
+    }
+    ret DivOut{q, r}
+}
+
+// `checked_div`: none on division by zero and on the one quotient that does not fit.
+pub fn div(a Wide, b Wide) ?Wide {
+    if is_zero(b) { ret none }
+    if a.big or b.big { ret Wide{0, 0, true} }
+    out := div_mag(mag(a), mag(b))
+    ret signed_from_mag(out.q, is_neg(a) != is_neg(b))
+}
+
+// `checked_rem`: `i128::MIN % -1` is the one case that fails besides zero.
+pub fn rem(a Wide, b Wide) ?Wide {
+    if is_zero(b) { ret none }
+    if a.big or b.big { ret Wide{0, 0, true} }
+    if a.hi == 1 << 63 and a.lo == 0 and b.hi == 0xFFFFFFFFFFFFFFFF and b.lo == 0xFFFFFFFFFFFFFFFF { ret none }
+    out := div_mag(mag(a), mag(b))
+    if is_neg(a) { ret negate(out.r) }
+    ret out.r
+}
+
+pub fn band(a Wide, b Wide) Wide {
+    if a.big or b.big { ret Wide{0, 0, true} }
+    ret Wide{a.hi & b.hi, a.lo & b.lo, false}
+}
+
+pub fn bor(a Wide, b Wide) Wide {
+    if a.big or b.big { ret Wide{0, 0, true} }
+    ret Wide{a.hi | b.hi, a.lo | b.lo, false}
+}
+
+pub fn bxor(a Wide, b Wide) Wide {
+    if a.big or b.big { ret Wide{0, 0, true} }
+    ret Wide{a.hi ^ b.hi, a.lo ^ b.lo, false}
+}
+
+pub fn bnot(a Wide) Wide {
+    if a.big { ret Wide{0, 0, true} }
+    ret Wide{~a.hi, ~a.lo, false}
+}
+
+// `y` is known to be in 0..64.
+pub fn shl(a Wide, y Wide) Wide {
+    if a.big or y.big { ret Wide{0, 0, true} }
+    n := y.lo
+    if n == 0 { ret Wide{a.hi, a.lo, false} }
+    ret Wide{(a.hi << n) | (a.lo >> (64 - n)), a.lo << n, false}
+}
+
+// Arithmetic shift; `y` is known to be in 0..64.
+pub fn shr(a Wide, y Wide) Wide {
+    if a.big or y.big { ret Wide{0, 0, true} }
+    n := y.lo
+    if n == 0 { ret Wide{a.hi, a.lo, false} }
+    mut hi := a.hi >> n
+    if is_neg(a) {
+        hi = hi | (0xFFFFFFFFFFFFFFFF << (64 - n))
+    }
+    ret Wide{hi, (a.lo >> n) | (a.hi << (64 - n)), false}
+}
+
+// Is this in 0..64?
+pub fn is_shift(y Wide) bool {
+    ret not y.big and y.hi == 0 and y.lo < 64
+}
+
+// Does it fit a `bits`-wide integer type?
+pub fn fits(w Wide, bits int, signed bool) bool {
+    if w.big { ret false }
+    if is_neg(w) {
+        if not signed { ret false }
+        m := negate(w)
+        if m.hi != 0 { ret false }
+        ret m.lo <= (1 << (u64(bits) - 1))
+    }
+    if w.hi != 0 { ret false }
+    if signed {
+        ret w.lo <= (1 << (u64(bits) - 1)) - 1
+    }
+    if bits == 64 { ret true }
+    ret w.lo <= (1 << u64(bits)) - 1
+}
+
+// The value as a float: exact below 2^64, as Rust's `as f64` rounds it above.
+pub fn to_f64(w Wide) f64 {
+    m := mag(w)
+    mut out := f64(m.lo)
+    if m.hi != 0 {
+        // Combining the two words: a double rounding only for values past 2^64.
+        out = f64(m.hi) * 18446744073709551616.0 + f64(m.lo)
+    }
+    if is_neg(w) { ret -out }
+    ret out
+}
+
+// The magnitude, once `fits` has said it is 64-bit.
+pub fn magnitude(w Wide) u64 {
+    ret mag(w).lo
+}
+
+pub fn negative(w Wide) bool {
+    ret is_neg(w)
+}

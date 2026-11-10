@@ -1,0 +1,1275 @@
+// Hand-written recursive descent with precedence climbing for expressions.
+
+use ast
+use diag
+use lexer
+use rt
+
+// `PResult<T>` in Rust is `T ! Failed` here; the message has already gone to `diags`.
+pub type Failed = Stop
+
+// `in_head`: in `if`/`for`/`match` heads a bare `Name{` or `else` would be ambiguous.
+// `src`: the source text, for quoting contracts in their failure messages.
+// `a`: the arena; the parser holds it while it runs.
+pub type Parser { toks []lexer.Token, pos int, diags []diag.Diag, in_head bool, in_contract bool, src str, tests int, a ast.Ast }
+
+fn join_spans(a diag.Span, b diag.Span) diag.Span {
+    ret diag.Span{a.start, b.stop, a.line, a.col, a.file}
+}
+
+fn is_type_name(s str) bool {
+    ret len(s) > 0 and s[0] >= 'A' and s[0] <= 'Z'
+}
+
+pub fn new(own toks []lexer.Token) Parser {
+    ret Parser{toks, 0, [], false, false, "", 0, ast.new_ast()}
+}
+
+// Parses one file into the arena `a`, adding to `diags`.
+pub fn parse_file(own toks []lexer.Token, src str, a &ast.Ast, diags &[]diag.Diag) ast.Program +mem {
+    mut p := new(toks)
+    p.src = copy(src)
+    swap(&p.a, &a)
+    swap(&p.diags, &diags)
+    prog := parse_program(&p)
+    swap(&p.a, &a)
+    swap(&p.diags, &diags)
+    ret prog
+}
+
+// Rust's char::is_whitespace, as the length of the character at `i`, 0 if it is something else.
+fn ws_len(s str, i int) int {
+    c := s[i]
+    if c == ' ' or (c >= 9 and c <= 13) { ret 1 }
+    if c == 0xC2 and i + 1 < len(s) and (s[i + 1] == 0x85 or s[i + 1] == 0xA0) { ret 2 }
+    if i + 2 >= len(s) { ret 0 }
+    d := s[i + 1]
+    e := s[i + 2]
+    if c == 0xE1 and d == 0x9A and e == 0x80 { ret 3 }
+    if c == 0xE2 and d == 0x80 and ((e >= 0x80 and e <= 0x8A) or e == 0xA8 or e == 0xA9 or e == 0xAF) { ret 3 }
+    if c == 0xE2 and d == 0x81 and e == 0x9F { ret 3 }
+    if c == 0xE3 and d == 0x80 and e == 0x80 { ret 3 }
+    ret 0
+}
+
+// The source between a starting span and the last token consumed, on one line.
+fn text_since(p Parser, start diag.Span) str +mem {
+    mut prev := p.pos - 1
+    if prev < 0 { prev = 0 }
+    stop := p.toks[prev].span.stop
+    if start.start > stop or stop > len(p.src) { ret "" }
+    mut out []u8 = []
+    mut pending := false
+    mut i := start.start
+    for i < stop {
+        w := ws_len(p.src, i)
+        if w > 0 {
+            pending = len(out) > 0
+            i += w
+            continue
+        }
+        if pending {
+            push(&out, ' ')
+            pending = false
+        }
+        push(&out, p.src[i])
+        i += 1
+    }
+    ret rt.text(out)
+}
+
+fn parse_test(p &Parser, index int) ast.Func ! Failed +mem {
+    span := bump(&p)
+    if kind_at(p, 0) != lexer.t_str { fail expected(&p, "the test's name in quotes") }
+    title := copy(p.toks[p.pos].text)
+    _ = bump(&p)
+    body := parse_block(&p)?
+    ret ast.Func{"test {index}", span, false, false, [], new_map[str, bool](hash_str), [], -1, [], [], span, title, body}
+}
+
+fn slot(p Parser, off int) int {
+    i := p.pos + off
+    if i > len(p.toks) - 1 { ret len(p.toks) - 1 }
+    ret i
+}
+
+fn kind_at(p Parser, off int) int {
+    ret p.toks[slot(p, off)].kind
+}
+
+fn op_at(p Parser, off int, op str) bool {
+    t := p.toks[slot(p, off)]
+    ret t.kind == lexer.t_op and t.text == op
+}
+
+fn kw_at(p Parser, off int, kw str) bool {
+    t := p.toks[slot(p, off)]
+    ret t.kind == lexer.t_kw and t.text == kw
+}
+
+fn ident_at(p Parser, off int) bool {
+    ret kind_at(p, off) == lexer.t_ident
+}
+
+fn cur_span(p Parser) diag.Span {
+    ret p.toks[p.pos].span
+}
+
+// Moves on; returns the span of the token it moved past.
+fn bump(p &Parser) diag.Span {
+    span := p.toks[p.pos].span
+    if p.pos + 1 < len(p.toks) { p.pos += 1 }
+    ret span
+}
+
+fn at_op(p Parser, op str) bool {
+    ret op_at(p, 0, op)
+}
+
+fn at_kw(p Parser, kw str) bool {
+    ret kw_at(p, 0, kw)
+}
+
+fn eat_op(p &Parser, op str) bool {
+    if at_op(p, op) {
+        _ = bump(&p)
+        ret true
+    }
+    ret false
+}
+
+// A number past 64 bits is not kept; its digits come from the source where there is one.
+fn big_text(p Parser, t lexer.Token) str +mem {
+    if t.span.stop > len(p.src) { ret "big" }
+    mut out []u8 = []
+    for c in p.src[t.span.start..t.span.stop] {
+        if c != '_' { push(&out, c) }
+    }
+    ret rt.text(out)
+}
+
+fn describe(p Parser) str +mem {
+    t := p.toks[p.pos]
+    if t.kind == lexer.t_int {
+        if t.big { ret "number `{big_text(p, t)}`" }
+        ret "number `{t.value}`"
+    }
+    if t.kind == lexer.t_float { ret "number `{rt.f64_text(t.float)}`" }
+    if t.kind == lexer.t_char { ret "a character" }
+    if t.kind == lexer.t_str { ret "a string" }
+    if t.kind == lexer.t_ident { ret "name `{t.text}`" }
+    if t.kind == lexer.t_kw { ret "keyword `{t.text}`" }
+    if t.kind == lexer.t_op { ret "`{t.text}`" }
+    if t.kind == lexer.t_newline { ret "end of line" }
+    ret "end of file"
+}
+
+fn error(p &Parser, code str, span diag.Span, msg str) Failed +mem {
+    push(&p.diags, diag.new(code, span, msg))
+    ret Stop
+}
+
+fn expected(p &Parser, what str) Failed +mem {
+    msg := "expected {what}, found {describe(p)}"
+    span := cur_span(p)
+    ret error(&p, "E0201", span, msg)
+}
+
+fn expect_op(p &Parser, op str) diag.Span ! Failed +mem {
+    if at_op(p, op) { ret bump(&p) }
+    fail expected(&p, "`{op}`")
+}
+
+fn expect_ident(p &Parser, what str) ast.Binding ! Failed +mem {
+    if ident_at(p, 0) {
+        name := copy(p.toks[p.pos].text)
+        span := bump(&p)
+        ret ast.Binding{name, span}
+    }
+    if kind_at(p, 0) == lexer.t_kw {
+        msg := "`{p.toks[p.pos].text}` is a keyword and cannot be used as {what}"
+        span := cur_span(p)
+        fail error(&p, "E0202", span, msg)
+    }
+    fail expected(&p, what)
+}
+
+// expect_ident when only the name matters.
+fn expect_name(p &Parser, what str) str ! Failed +mem {
+    b := expect_ident(&p, what)?
+    ret copy(b.name)
+}
+
+fn skip_newlines(p &Parser) {
+    for kind_at(p, 0) == lexer.t_newline {
+        _ = bump(&p)
+    }
+}
+
+pub fn parse_program(p &Parser) ast.Program +mem {
+    mut prog := ast.Program{[], [], [], [], []}
+    for {
+        skip_newlines(&p)
+        if kind_at(p, 0) == lexer.t_eof { break }
+        public := at_kw(p, "pub")
+        if public { _ = bump(&p) }
+        parse_decl(&p, &prog, public) else {
+            _ = bump(&p)
+            sync_top(&p)
+            continue
+        }
+    }
+    ret prog
+}
+
+fn parse_decl(p &Parser, prog &ast.Program, public bool) ! Failed +mem {
+    if at_kw(p, "fn") {
+        push(&prog.funcs, parse_func(&p, public, false)?)
+    } else if at_kw(p, "claw") {
+        _ = bump(&p)
+        if not at_kw(p, "fn") { fail expected(&p, "`fn` after `claw`") }
+        push(&prog.funcs, parse_func(&p, public, true)?)
+    } else if at_kw(p, "type") {
+        push(&prog.types, parse_type_decl(&p, public)?)
+    } else if at_kw(p, "const") {
+        push(&prog.consts, parse_const(&p, public)?)
+    } else if at_kw(p, "extern") {
+        push(&prog.externs, parse_extern(&p, public)?)
+    } else if at_kw(p, "use") and not public {
+        push(&prog.uses, parse_use(&p)?)
+    } else if at_kw(p, "test") and not public {
+        p.tests += 1
+        push(&prog.funcs, parse_test(&p, p.tests)?)
+    } else {
+        fail expected(&p, "`fn`, `claw fn`, `type`, `const`, `extern`, `use` or `test`")
+    }
+}
+
+// Recover at the next declaration that starts a line.
+fn sync_top(p &Parser) {
+    for {
+        if kind_at(p, 0) == lexer.t_eof { ret }
+        starts := at_kw(p, "fn") or at_kw(p, "type") or at_kw(p, "const") or at_kw(p, "claw") or at_kw(p, "extern") or at_kw(p, "use") or at_kw(p, "pub") or at_kw(p, "test")
+        if starts and (p.pos == 0 or p.toks[p.pos - 1].kind == lexer.t_newline) { ret }
+        _ = bump(&p)
+    }
+}
+
+fn parse_use(p &Parser) ast.UseDecl ! Failed +mem {
+    span := bump(&p)
+    mut path []str = []
+    push(&path, expect_name(&p, "a module name")?)
+    for eat_op(&p, ".") {
+        push(&path, expect_name(&p, "a module name")?)
+    }
+    ret ast.UseDecl{path, span}
+}
+
+fn parse_extern(p &Parser, public bool) ast.ExternDecl ! Failed +mem {
+    _ = bump(&p)
+    mut symbol ?str = none
+    if kind_at(p, 0) == lexer.t_str {
+        symbol = copy(p.toks[p.pos].text)
+        _ = bump(&p)
+    }
+    if not at_kw(p, "fn") { fail expected(&p, "`fn` after `extern`") }
+    _ = bump(&p)
+    b := expect_ident(&p, "a function name")?
+    _ = expect_op(&p, "(")?
+    mut params []ast.Param = []
+    mut variadic := false
+    for not at_op(p, ")") {
+        if eat_op(&p, "...") {
+            variadic = true
+            break
+        }
+        x := expect_ident(&p, "a parameter name")?
+        ty := parse_type(&p)?
+        push(&params, ast.Param{false, copy(x.name), x.span, ty})
+        if not eat_op(&p, ",") { break }
+    }
+    _ = expect_op(&p, ")")?
+    mut ret_ty := -1
+    if ident_at(p, 0) or at_op(p, "*") { ret_ty = parse_type(&p)? }
+    ret ast.ExternDecl{symbol, copy(b.name), b.span, public, params, variadic, ret_ty}
+}
+
+fn parse_tparams(p &Parser) []ast.Binding ! Failed +mem {
+    mut out []ast.Binding = []
+    if eat_op(&p, "[") {
+        for not at_op(p, "]") {
+            push(&out, expect_ident(&p, "a type parameter")?)
+            if not eat_op(&p, ",") { break }
+        }
+        _ = expect_op(&p, "]")?
+    }
+    ret out
+}
+
+fn parse_const(p &Parser, public bool) ast.ConstDecl ! Failed +mem {
+    _ = bump(&p)
+    b := expect_ident(&p, "a constant name")?
+    mut ty := -1
+    if not at_op(p, "=") { ty = parse_type(&p)? }
+    _ = expect_op(&p, "=")?
+    start := cur_span(p)
+    value := parse_expr(&p, 0)?
+    text := text_since(p, start)
+    ret ast.ConstDecl{copy(b.name), b.span, public, ty, value, false, text}
+}
+
+fn parse_fields(p &Parser) []ast.FieldDecl ! Failed +mem {
+    _ = expect_op(&p, "{{")?
+    mut fields []ast.FieldDecl = []
+    for {
+        skip_newlines(&p)
+        if at_op(p, "}") { break }
+        b := expect_ident(&p, "a field name")?
+        ty := parse_type(&p)?
+        push(&fields, ast.FieldDecl{copy(b.name), b.span, ty})
+        skip_newlines(&p)
+        if not eat_op(&p, ",") and not at_op(p, "}") and not ident_at(p, 0) {
+            fail expected(&p, "`,` or `}`")
+        }
+    }
+    _ = bump(&p)
+    ret fields
+}
+
+fn parse_type_decl(p &Parser, public bool) ast.TypeDecl ! Failed +mem {
+    _ = bump(&p)
+    b := expect_ident(&p, "a type name")?
+    tparams := parse_tparams(&p)?
+    if at_op(p, "{{") {
+        fields := parse_fields(&p)?
+        ret ast.TypeDecl{copy(b.name), b.span, public, tparams, ast.Struct{fields}}
+    }
+    _ = expect_op(&p, "=")?
+    mut variants []ast.VariantDecl = []
+    for {
+        v := expect_ident(&p, "a variant name")?
+        mut fields []ast.FieldDecl = []
+        if at_op(p, "{{") { fields = parse_fields(&p)? }
+        push(&variants, ast.VariantDecl{copy(v.name), v.span, fields})
+        if not eat_op(&p, "|") { break }
+    }
+    ret ast.TypeDecl{copy(b.name), b.span, public, tparams, ast.Variants{variants}}
+}
+
+fn is_option(p Parser, t int) bool {
+    match p.a.tys[t].kind {
+        TOption{_}: ret true
+        _: ret false
+    }
+}
+
+fn parse_type_base(p &Parser) int ! Failed +mem {
+    span := cur_span(p)
+    if at_op(p, "?") {
+        _ = bump(&p)
+        inner := parse_type_base(&p)?
+        if is_option(p, inner) { fail error(&p, "E0134", span, "`??T` is not allowed") }
+        ret ast.new_type(&p.a, ast.TOption{inner}, span)
+    }
+    if at_op(p, "[") {
+        _ = bump(&p)
+        mut size ast.Size = ast.SizeName{""}
+        if kind_at(p, 0) == lexer.t_int {
+            size = ast.SizeLit{tok_num(p)}
+            _ = bump(&p)
+        } else if ident_at(p, 0) {
+            size = ast.SizeName{copy(p.toks[p.pos].text)}
+            _ = bump(&p)
+        } else if at_op(p, "]") {
+            _ = bump(&p)
+            elem := parse_type_base(&p)?
+            ret ast.new_type(&p.a, ast.TSlice{elem}, span)
+        } else {
+            fail expected(&p, "an array size")
+        }
+        _ = expect_op(&p, "]")?
+        elem := parse_type_base(&p)?
+        ret ast.new_type(&p.a, ast.TArray{size, elem}, span)
+    }
+    if eat_op(&p, "*") {
+        inner := parse_type_base(&p)?
+        ret ast.new_type(&p.a, ast.TPointer{inner}, span)
+    }
+    if eat_op(&p, "&") {
+        inner := parse_type_base(&p)?
+        ret ast.new_type(&p.a, ast.TRef{inner}, span)
+    }
+    if at_kw(p, "fn") { ret parse_fn_type(&p, span)? }
+    first := expect_ident(&p, "a type")?
+    mut module ?str = none
+    mut name := copy(first.name)
+    if at_op(p, ".") {
+        _ = bump(&p)
+        module = copy(first.name)
+        name = expect_name(&p, "a type")?
+    }
+    mut targs []int = []
+    if at_op(p, "[") { targs = parse_targs(&p)? }
+    ret ast.new_type(&p.a, ast.TName{module, name, targs}, span)
+}
+
+fn at_type_start(p Parser) bool {
+    ret ident_at(p, 0) or at_op(p, "[") or at_op(p, "?") or at_op(p, "*") or at_op(p, "!") or at_op(p, "&") or at_kw(p, "fn")
+}
+
+fn parse_effects(p &Parser) []str ! Failed +mem {
+    mut effects []str = []
+    for at_op(p, "+") {
+        _ = bump(&p)
+        b := expect_ident(&p, "an effect name")?
+        if b.name != "mem" and b.name != "io" {
+            fail error(&p, "E0132", b.span, "unknown effect `{b.name}`; use `+mem` or `+io`")
+        }
+        push(&effects, copy(b.name))
+    }
+    ret effects
+}
+
+// `fn(int, own str) int +mem`, at the word `fn`.
+fn parse_fn_type(p &Parser, span diag.Span) int ! Failed +mem {
+    _ = bump(&p)
+    _ = expect_op(&p, "(")?
+    mut params []ast.FnParam = []
+    for not at_op(p, ")") {
+        is_own := at_kw(p, "own")
+        if is_own { _ = bump(&p) }
+        ty := parse_type(&p)?
+        push(&params, ast.FnParam{is_own, ty})
+        if not eat_op(&p, ",") { break }
+    }
+    _ = expect_op(&p, ")")?
+    mut ret_ty := -1
+    if at_type_start(p) { ret_ty = parse_type(&p)? }
+    effects := parse_effects(&p)?
+    ret ast.new_type(&p.a, ast.TFn{params, ret_ty, effects}, span)
+}
+
+fn parse_targs(p &Parser) []int ! Failed +mem {
+    _ = expect_op(&p, "[")?
+    mut out []int = []
+    for not at_op(p, "]") {
+        push(&out, parse_type(&p)?)
+        if not eat_op(&p, ",") { break }
+    }
+    _ = expect_op(&p, "]")?
+    ret out
+}
+
+fn is_prim(t str) bool {
+    ret t == "int" or t == "i8" or t == "i16" or t == "i32" or t == "i64" or t == "u8" or t == "u16" or t == "u32" or t == "u64" or t == "f32" or t == "f64" or t == "bool" or t == "str"
+}
+
+// At `[`: does this bracket hold type arguments, as in `max[int](1, 2)`?
+fn looks_like_targs(p Parser, name str) bool {
+    // `table[i](x)` indexes; only a type can start `max[int](x)`.
+    mut is_type := false
+    if ident_at(p, 1) {
+        t := p.toks[slot(p, 1)].text
+        is_type = is_type_name(t) or is_prim(t) or op_at(p, 2, ".")
+    } else if op_at(p, 1, "[") or op_at(p, 1, "*") or op_at(p, 1, "?") or op_at(p, 1, "&") or kw_at(p, 1, "fn") {
+        is_type = true
+    }
+    if not is_type { ret false }
+    mut i := 1
+    mut depth := 1
+    for depth > 0 {
+        if op_at(p, i, "[") {
+            depth += 1
+        } else if op_at(p, i, "]") {
+            depth -= 1
+        } else if kind_at(p, i) == lexer.t_eof or kind_at(p, i) == lexer.t_newline {
+            ret false
+        }
+        i += 1
+    }
+    if op_at(p, i, "(") { ret true }
+    if op_at(p, i, "{{") { ret is_type_name(name) and not p.in_head }
+    ret false
+}
+
+fn parse_type(p &Parser) int ! Failed +mem {
+    span := cur_span(p)
+    if at_op(p, "!") {
+        _ = bump(&p)
+        e := parse_type_base(&p)?
+        ret ast.new_type(&p.a, ast.TResult{-1, e}, span)
+    }
+    t := parse_type_base(&p)?
+    if at_op(p, "!") {
+        _ = bump(&p)
+        e := parse_type_base(&p)?
+        ret ast.new_type(&p.a, ast.TResult{t, e}, span)
+    }
+    ret t
+}
+
+fn parse_func(p &Parser, public bool, is_claw bool) ast.Func ! Failed +mem {
+    _ = bump(&p)
+    b := expect_ident(&p, "a function name")?
+    tparams := parse_tparams(&p)?
+    _ = expect_op(&p, "(")?
+    mut params []ast.Param = []
+    for not at_op(p, ")") {
+        is_own := at_kw(p, "own")
+        if is_own { _ = bump(&p) }
+        x := expect_ident(&p, "a parameter name")?
+        ty := parse_type(&p)?
+        push(&params, ast.Param{is_own, copy(x.name), x.span, ty})
+        if not eat_op(&p, ",") { break }
+    }
+    _ = expect_op(&p, ")")?
+    mut ret_ty := -1
+    if at_type_start(p) { ret_ty = parse_type(&p)? }
+    effects := parse_effects(&p)?
+    mut prev := p.pos - 1
+    if prev < 0 { prev = 0 }
+    last := p.toks[prev].span
+    sig_end := diag.Span{last.stop, last.stop, last.line, last.col, last.file}
+
+    mut contracts []ast.Contract = []
+    skip_newlines(&p)
+    for at_kw(p, "need") or at_kw(p, "sure") {
+        is_sure := at_kw(p, "sure")
+        _ = bump(&p)
+        start := cur_span(p)
+        p.in_contract = true
+        // `need x == Empty {`: the brace opens the body, not a struct.
+        head := p.in_head
+        p.in_head = true
+        e := parse_expr(&p, 0) else {
+            p.in_head = head
+            p.in_contract = false
+            fail Stop
+        }
+        p.in_head = head
+        p.in_contract = false
+        text := text_since(p, start)
+        push(&contracts, ast.Contract{is_sure, e, text})
+        skip_newlines(&p)
+    }
+    body := parse_block(&p)?
+    ret ast.Func{copy(b.name), b.span, public, is_claw, tparams, new_map[str, bool](hash_str), params, ret_ty, contracts, effects, sig_end, none, body}
+}
+
+fn parse_block(p &Parser) int ! Failed +mem {
+    was_head := p.in_head
+    p.in_head = false
+    b := parse_block_inner(&p) else {
+        p.in_head = was_head
+        fail Stop
+    }
+    p.in_head = was_head
+    ret b
+}
+
+fn parse_block_inner(p &Parser) int ! Failed +mem {
+    _ = expect_op(&p, "{{")?
+    mut stmts []int = []
+    for {
+        skip_newlines(&p)
+        if at_op(p, "}") { break }
+        if kind_at(p, 0) == lexer.t_eof {
+            span := cur_span(p)
+            fail error(&p, "E0204", span, "block is not closed; add `}`")
+        }
+        stmt := parse_stmt(&p)?
+        push(&stmts, stmt)
+        if not at_op(p, "}") and kind_at(p, 0) != lexer.t_newline {
+            msg := "one statement per line; found {describe(p)} after the statement"
+            span := cur_span(p)
+            fail error(&p, "E0205", span, msg)
+        }
+    }
+    end := bump(&p)
+    ret ast.new_block(&p.a, stmts, end)
+}
+
+// `x [4]int = ...` and `x ?int = ...` declare; `x[4] = ...` assigns.
+fn is_typed_let(p Parser) bool {
+    if ident_at(p, 1) or kw_at(p, 1, "fn") { ret true }
+    if op_at(p, 1, "?") {
+        ret ident_at(p, 2) or op_at(p, 2, "[") or op_at(p, 2, "?") or op_at(p, 2, "*") or kw_at(p, 2, "fn")
+    }
+    // `x * y` alone does nothing, so at the start of a line this is a pointer type.
+    if op_at(p, 1, "*") { ret true }
+    if op_at(p, 1, "[") {
+        // Skip every `[...]` group; a type follows only in a declaration.
+        mut i := 1
+        for op_at(p, i, "[") {
+            mut depth := 1
+            i += 1
+            for depth > 0 {
+                if op_at(p, i, "[") {
+                    depth += 1
+                } else if op_at(p, i, "]") {
+                    depth -= 1
+                } else if kind_at(p, i) == lexer.t_eof or kind_at(p, i) == lexer.t_newline {
+                    ret false
+                }
+                i += 1
+            }
+        }
+        ret ident_at(p, i) or op_at(p, i, "?") or op_at(p, i, "*") or kw_at(p, i, "fn")
+    }
+    ret false
+}
+
+fn parse_stmt(p &Parser) int ! Failed +mem {
+    start := cur_span(p)
+    if at_kw(p, "mut") {
+        _ = bump(&p)
+        ret parse_let(&p, start, true)?
+    }
+    if at_kw(p, "if") { ret parse_if(&p)? }
+    if at_kw(p, "for") { ret parse_for(&p)? }
+    if at_kw(p, "match") { ret parse_match(&p)? }
+    if at_kw(p, "ret") {
+        _ = bump(&p)
+        mut value := -1
+        if kind_at(p, 0) != lexer.t_newline and not at_op(p, "}") { value = parse_expr(&p, 0)? }
+        ret ast.new_stmt(&p.a, ast.Ret{value}, start)
+    }
+    if at_kw(p, "fail") {
+        _ = bump(&p)
+        e := parse_expr(&p, 0)?
+        ret ast.new_stmt(&p.a, ast.Fail{e}, start)
+    }
+    if at_kw(p, "break") {
+        _ = bump(&p)
+        ret ast.new_stmt(&p.a, ast.Break, start)
+    }
+    if at_kw(p, "continue") {
+        _ = bump(&p)
+        ret ast.new_stmt(&p.a, ast.Continue, start)
+    }
+    if at_kw(p, "else") { fail error(&p, "E0203", start, "`else` must be on the same line as the closing `}`") }
+    if at_kw(p, "defer") {
+        _ = bump(&p)
+        mut body := -1
+        if at_op(p, "{{") {
+            body = parse_block(&p)?
+        } else {
+            stmt := parse_stmt(&p)?
+            body = ast.new_block(&p.a, [stmt], start)
+        }
+        ret ast.new_stmt(&p.a, ast.Defer{body}, start)
+    }
+    if at_kw(p, "sure") {
+        _ = bump(&p)
+        at := cur_span(p)
+        e := parse_expr(&p, 0)?
+        text := text_since(p, at)
+        ret ast.new_stmt(&p.a, ast.Sure{e, text}, start)
+    }
+    if at_kw(p, "need") { fail error(&p, "E0168", start, "`need` belongs in a signature; inside a body write `sure`") }
+    if ident_at(p, 0) {
+        if op_at(p, 1, ":=") or is_typed_let(p) { ret parse_let(&p, start, false)? }
+        if p.toks[p.pos].text == "_" and op_at(p, 1, "=") {
+            _ = bump(&p)
+            _ = bump(&p)
+            e := parse_expr(&p, 0)?
+            ret ast.new_stmt(&p.a, ast.Discard{e}, start)
+        }
+    }
+    ret parse_expr_or_assign(&p, start)?
+}
+
+fn parse_expr_or_assign(p &Parser, start diag.Span) int ! Failed +mem {
+    e := parse_expr(&p, 0)?
+    if kind_at(p, 0) == lexer.t_op and is_assign(p.toks[p.pos].text) {
+        op := assign_op(p.toks[p.pos].text)
+        _ = bump(&p)
+        value := parse_expr(&p, 0)?
+        ret ast.new_stmt(&p.a, ast.Assign{e, op, value}, start)
+    }
+    ret ast.new_stmt(&p.a, ast.ExprStmt{e}, start)
+}
+
+fn parse_let(p &Parser, start diag.Span, mutable bool) int ! Failed +mem {
+    b := expect_ident(&p, "a variable name")?
+    mut ty := -1
+    if at_op(p, ":=") {
+        _ = bump(&p)
+    } else {
+        ty = parse_type(&p)?
+        _ = expect_op(&p, "=")?
+    }
+    init := parse_expr(&p, 0)?
+    ret ast.new_stmt(&p.a, ast.Let{mutable, copy(b.name), b.span, ty, init}, start)
+}
+
+fn parse_head(p &Parser) int ! Failed +mem {
+    was := p.in_head
+    p.in_head = true
+    e := parse_expr(&p, 0) else {
+        p.in_head = was
+        fail Stop
+    }
+    p.in_head = was
+    ret e
+}
+
+fn parse_if(p &Parser) int ! Failed +mem {
+    start := bump(&p)
+    cond := parse_head(&p)?
+    then := parse_block(&p)?
+    mut els ?ast.ElseStmt = none
+    if at_kw(p, "else") {
+        _ = bump(&p)
+        if at_kw(p, "if") {
+            els = ast.ElseIf{parse_if(&p)?}
+        } else {
+            els = ast.ElseBlockOf{parse_block(&p)?}
+        }
+    }
+    ret ast.new_stmt(&p.a, ast.If{cond, then, els}, start)
+}
+
+fn parse_for(p &Parser) int ! Failed +mem {
+    start := bump(&p)
+    if at_op(p, "{{") {
+        body := parse_block(&p)?
+        ret ast.new_stmt(&p.a, ast.ForEver{body}, start)
+    }
+    binds_two := ident_at(p, 0) and op_at(p, 1, ",") and ident_at(p, 2) and kw_at(p, 3, "in")
+    binds_one := ident_at(p, 0) and kw_at(p, 1, "in")
+    if binds_one or binds_two {
+        v := expect_ident(&p, "a loop variable")?
+        mut index ?ast.Binding = none
+        if binds_two {
+            _ = bump(&p)
+            index = expect_ident(&p, "an index variable")?
+        }
+        _ = bump(&p)
+        from := parse_head(&p)?
+        if at_op(p, "..") {
+            if binds_two {
+                span := cur_span(p)
+                fail error(&p, "E0135", span, "a range gives one value per step; use one loop variable")
+            }
+            _ = bump(&p)
+            to := parse_head(&p)?
+            body := parse_block(&p)?
+            ret ast.new_stmt(&p.a, ast.ForRange{copy(v.name), v.span, from, to, body}, start)
+        }
+        body := parse_block(&p)?
+        ret ast.new_stmt(&p.a, ast.ForIn{copy(v.name), v.span, index, from, body}, start)
+    }
+    cond := parse_head(&p)?
+    body := parse_block(&p)?
+    ret ast.new_stmt(&p.a, ast.ForCond{cond, body}, start)
+}
+
+// The integer token at the cursor.
+fn tok_num(p Parser) ast.Num {
+    t := p.toks[p.pos]
+    ret ast.Num{t.value, false, t.big}
+}
+
+fn negated(n ast.Num) ast.Num {
+    if n.value == 0 and not n.big { ret n }
+    ret ast.Num{n.value, not n.neg, n.big}
+}
+
+fn parse_pattern(p &Parser) ast.Pat ! Failed +mem {
+    if ident_at(p, 0) and p.toks[p.pos].text == "_" {
+        _ = bump(&p)
+        ret ast.PatWild
+    }
+    if ident_at(p, 0) {
+        name := copy(p.toks[p.pos].text)
+        _ = bump(&p)
+        mut binds []ast.Binding = []
+        if eat_op(&p, "{{") {
+            for not at_op(p, "}") {
+                push(&binds, expect_ident(&p, "a name to bind")?)
+                if not eat_op(&p, ",") { break }
+            }
+            _ = expect_op(&p, "}")?
+        }
+        ret ast.PatVariant{name, binds}
+    }
+    if kind_at(p, 0) == lexer.t_int {
+        n := tok_num(p)
+        _ = bump(&p)
+        ret ast.PatInt{n}
+    }
+    if kind_at(p, 0) == lexer.t_char {
+        n := tok_num(p)
+        _ = bump(&p)
+        ret ast.PatInt{n}
+    }
+    if at_op(p, "-") {
+        _ = bump(&p)
+        if kind_at(p, 0) == lexer.t_int {
+            n := negated(tok_num(p))
+            _ = bump(&p)
+            ret ast.PatInt{n}
+        }
+        fail expected(&p, "a number")
+    }
+    if at_kw(p, "true") {
+        _ = bump(&p)
+        ret ast.PatBool{true}
+    }
+    if at_kw(p, "false") {
+        _ = bump(&p)
+        ret ast.PatBool{false}
+    }
+    fail expected(&p, "a pattern")
+}
+
+fn parse_match(p &Parser) int ! Failed +mem {
+    start := bump(&p)
+    subject := parse_head(&p)?
+    _ = expect_op(&p, "{{")?
+    was_head := p.in_head
+    p.in_head = false
+    mut arms []ast.Arm = []
+    for {
+        skip_newlines(&p)
+        if at_op(p, "}") { break }
+        span := cur_span(p)
+        pat := parse_pattern(&p)?
+        _ = expect_op(&p, ":")?
+        mut body := -1
+        if at_op(p, "{{") {
+            body = parse_block(&p)?
+        } else {
+            stmt := parse_stmt(&p)?
+            body = ast.new_block(&p.a, [stmt], span)
+        }
+        push(&arms, ast.Arm{pat, span, body})
+        if not at_op(p, "}") and kind_at(p, 0) != lexer.t_newline {
+            fail expected(&p, "a new line after the arm")
+        }
+    }
+    p.in_head = was_head
+    _ = bump(&p)
+    ret ast.new_stmt(&p.a, ast.Match{subject, arms}, start)
+}
+
+type OpPrec { op ast.BinOp, prec int }
+
+fn peek_binop(p Parser) ?OpPrec {
+    if at_kw(p, "or") { ret OpPrec{ast.Or, 1} }
+    if at_kw(p, "and") { ret OpPrec{ast.And, 2} }
+    if kind_at(p, 0) != lexer.t_op { ret none }
+    o := p.toks[p.pos].text
+    if o == "==" { ret OpPrec{ast.Eq, 3} }
+    if o == "!=" { ret OpPrec{ast.Ne, 3} }
+    if o == "<" { ret OpPrec{ast.Lt, 3} }
+    if o == "<=" { ret OpPrec{ast.Le, 3} }
+    if o == ">" { ret OpPrec{ast.Gt, 3} }
+    if o == ">=" { ret OpPrec{ast.Ge, 3} }
+    if o == "+" { ret OpPrec{ast.Add, 4} }
+    if o == "-" { ret OpPrec{ast.Sub, 4} }
+    if o == "|" { ret OpPrec{ast.BitOr, 4} }
+    if o == "^" { ret OpPrec{ast.BitXor, 4} }
+    if o == "*" { ret OpPrec{ast.Mul, 5} }
+    if o == "/" { ret OpPrec{ast.Div, 5} }
+    if o == "%" { ret OpPrec{ast.Rem, 5} }
+    if o == "<<" { ret OpPrec{ast.Shl, 5} }
+    if o == ">>" { ret OpPrec{ast.Shr, 5} }
+    if o == "&" { ret OpPrec{ast.BitAnd, 5} }
+    ret none
+}
+
+fn e_span(p Parser, e int) diag.Span {
+    ret p.a.exprs[e].span
+}
+
+pub fn parse_expr(p &Parser, min_prec int) int ! Failed +mem {
+    mut left := parse_unary(&p)?
+    for {
+        o := peek_binop(p) else { break }
+        if o.prec < min_prec { break }
+        _ = bump(&p)
+        right := parse_expr(&p, o.prec + 1)?
+        span := join_spans(e_span(p, left), e_span(p, right))
+        left = ast.new_expr(&p.a, ast.Binary{o.op, left, right}, span)
+    }
+    if min_prec == 0 and at_kw(p, "else") and not p.in_head { ret parse_else(&p, left)? }
+    ret left
+}
+
+fn parse_else(p &Parser, value int) int ! Failed +mem {
+    start := e_span(p, value)
+    _ = bump(&p)
+    mut binder ?ast.Binding = none
+    mut has_binder := false
+    if ident_at(p, 0) and not is_type_name(p.toks[p.pos].text) and op_at(p, 1, "{{") {
+        binder = expect_ident(&p, "a name")?
+        has_binder = true
+    }
+    if has_binder or at_op(p, "{{") {
+        body := parse_block(&p)?
+        span := join_spans(start, prev_span(p))
+        ret ast.new_expr(&p.a, ast.Else{value, ast.ElseBlock{binder, body}}, span)
+    }
+    v := parse_expr(&p, 1)?
+    span := join_spans(start, prev_span(p))
+    ret ast.new_expr(&p.a, ast.Else{value, ast.ElseValue{v}}, span)
+}
+
+fn prev_span(p Parser) diag.Span {
+    if p.pos == 0 { ret p.toks[0].span }
+    ret p.toks[p.pos - 1].span
+}
+
+fn parse_unary(p &Parser) int ! Failed +mem {
+    start := cur_span(p)
+    if at_kw(p, "not") {
+        _ = bump(&p)
+        // Like Python: `not a == b` means `not (a == b)`.
+        e := parse_expr(&p, 3)?
+        ret ast.new_expr(&p.a, ast.Unary{ast.Not, e}, join_spans(start, e_span(p, e)))
+    }
+    if at_op(p, "-") {
+        _ = bump(&p)
+        if kind_at(p, 0) == lexer.t_int {
+            n := negated(tok_num(p))
+            tok_span := bump(&p)
+            e := ast.new_expr(&p.a, ast.Int{n}, join_spans(start, tok_span))
+            ret parse_postfix(&p, e)?
+        }
+        if kind_at(p, 0) == lexer.t_float {
+            v := -p.toks[p.pos].float
+            tok_span := bump(&p)
+            e := ast.new_expr(&p.a, ast.Float{v}, join_spans(start, tok_span))
+            ret parse_postfix(&p, e)?
+        }
+        e := parse_unary(&p)?
+        ret ast.new_expr(&p.a, ast.Unary{ast.Neg, e}, join_spans(start, e_span(p, e)))
+    }
+    if at_op(p, "~") {
+        _ = bump(&p)
+        e := parse_unary(&p)?
+        ret ast.new_expr(&p.a, ast.Unary{ast.BitNot, e}, join_spans(start, e_span(p, e)))
+    }
+    if at_op(p, "&") {
+        _ = bump(&p)
+        e := parse_unary(&p)?
+        ret ast.new_expr(&p.a, ast.AddrOf{e}, join_spans(start, e_span(p, e)))
+    }
+    if at_op(p, "*") {
+        _ = bump(&p)
+        e := parse_unary(&p)?
+        ret ast.new_expr(&p.a, ast.Deref{e}, join_spans(start, e_span(p, e)))
+    }
+    e := parse_primary(&p)?
+    ret parse_postfix(&p, e)?
+}
+
+fn var_name(p Parser, e int) ?str +mem {
+    match p.a.exprs[e].kind {
+        Var{name}: ret copy(name)
+        _: ret none
+    }
+}
+
+fn parse_postfix(p &Parser, first int) int ! Failed +mem {
+    mut e := first
+    for {
+        if at_op(p, ".") {
+            _ = bump(&p)
+            b := expect_ident(&p, "a field name")?
+            mut targs []int = []
+            if at_op(p, "[") and looks_like_targs(p, b.name) { targs = parse_targs(&p)? }
+            module := var_name(p, e)
+            has_module := is_var(p, e)
+            if at_op(p, "(") {
+                _ = bump(&p)
+                mut args []int = []
+                close := parse_args(&p, ")", &args)?
+                span := join_spans(e_span(p, e), close)
+                field := ast.new_expr(&p.a, ast.Field{e, copy(b.name), b.span}, span)
+                if has_module {
+                    e = ast.new_expr(&p.a, ast.Call{module, copy(b.name), b.span, targs, args, field}, span)
+                } else {
+                    e = ast.new_expr(&p.a, ast.CallValue{field, args}, span)
+                }
+            } else if at_op(p, "{{") and has_module and is_type_name(b.name) and not p.in_head {
+                _ = bump(&p)
+                mut args []int = []
+                close := parse_args(&p, "}", &args)?
+                span := join_spans(e_span(p, e), close)
+                e = ast.new_expr(&p.a, ast.StructLit{module, copy(b.name), b.span, targs, args}, span)
+            } else {
+                span := join_spans(e_span(p, e), b.span)
+                e = ast.new_expr(&p.a, ast.Field{e, copy(b.name), b.span}, span)
+            }
+        } else if at_op(p, "[") {
+            _ = bump(&p)
+            was := p.in_head
+            p.in_head = false
+            e = parse_index_or_slice(&p, e) else {
+                p.in_head = was
+                fail Stop
+            }
+            p.in_head = was
+        } else if at_op(p, "(") {
+            _ = bump(&p)
+            mut args []int = []
+            close := parse_args(&p, ")", &args)?
+            span := join_spans(e_span(p, e), close)
+            e = ast.new_expr(&p.a, ast.CallValue{e, args}, span)
+        } else if at_op(p, "?") {
+            close := bump(&p)
+            span := join_spans(e_span(p, e), close)
+            e = ast.new_expr(&p.a, ast.Try{e}, span)
+        } else {
+            ret e
+        }
+    }
+}
+
+fn is_var(p Parser, e int) bool {
+    match p.a.exprs[e].kind {
+        Var{_}: ret true
+        _: ret false
+    }
+}
+
+fn parse_index_or_slice(p &Parser, e int) int ! Failed +mem {
+    mut lo := -1
+    if not at_op(p, "..") { lo = parse_expr(&p, 0)? }
+    if eat_op(&p, "..") {
+        mut hi := -1
+        if not at_op(p, "]") { hi = parse_expr(&p, 0)? }
+        close := expect_op(&p, "]")?
+        ret ast.new_expr(&p.a, ast.Slice{e, lo, hi}, join_spans(e_span(p, e), close))
+    }
+    close := expect_op(&p, "]")?
+    ret ast.new_expr(&p.a, ast.Index{e, lo}, join_spans(e_span(p, e), close))
+}
+
+// Fills `args`; returns the span of the closing bracket.
+fn parse_args(p &Parser, close str, args &[]int) diag.Span ! Failed +mem {
+    was := p.in_head
+    p.in_head = false
+    span := parse_args_inner(&p, close, &args) else {
+        p.in_head = was
+        fail Stop
+    }
+    p.in_head = was
+    ret span
+}
+
+fn parse_args_inner(p &Parser, close str, args &[]int) diag.Span ! Failed +mem {
+    for {
+        skip_newlines(&p)
+        if at_op(p, close) { ret expect_op(&p, close)? }
+        e := parse_expr(&p, 0)?
+        push(&args, e)
+        skip_newlines(&p)
+        if not eat_op(&p, ",") { ret expect_op(&p, close)? }
+    }
+}
+
+fn parse_interp(p &Parser, text str, span diag.Span) int ! Failed +mem {
+    mut parts []ast.Part = []
+    mut lit []u8 = []
+    n := len(text)
+    mut i := 0
+    for i < n {
+        c := text[i]
+        if c == '{' and i + 1 < n and text[i + 1] == '{' {
+            push(&lit, '{')
+            i += 2
+        } else if c == '}' and i + 1 < n and text[i + 1] == '}' {
+            push(&lit, '}')
+            i += 2
+        } else if c == '{' {
+            mut j := i + 1
+            mut depth := 1
+            for j < n {
+                if text[j] == '{' {
+                    depth += 1
+                } else if text[j] == '}' {
+                    depth -= 1
+                }
+                if depth == 0 { break }
+                j += 1
+            }
+            if depth != 0 {
+                fail error(&p, "E0133", span, "`{{` in this string is not closed; write `{{{{` for a literal brace")
+            }
+            if len(lit) > 0 {
+                push(&parts, ast.PartLit{rt.text(copy(lit))})
+                clear(&lit)
+            }
+            e := parse_embedded(&p, text[i + 1..j], span)?
+            push(&parts, ast.PartExpr{e})
+            i = j + 1
+        } else {
+            push(&lit, c)
+            i += 1
+        }
+    }
+    if len(lit) > 0 { push(&parts, ast.PartLit{rt.text(lit)}) }
+    ret ast.new_expr(&p.a, ast.Interp{parts}, span)
+}
+
+// Parses `{expr}` from a string; errors point at the string itself.
+fn parse_embedded(p &Parser, src str, span diag.Span) int ! Failed +mem {
+    mut sub_diags []diag.Diag = []
+    mut toks := lexer.lex(src, span.file, &sub_diags)
+    for i in 0..len(toks) {
+        toks[i].span = span
+    }
+    mut sub := new(toks)
+    swap(&sub.diags, &sub_diags)
+    swap(&sub.a, &p.a)
+    e := parse_expr(&sub, 0) else -1
+    leftover := e != -1 and kind_at(sub, 0) != lexer.t_eof and kind_at(sub, 0) != lexer.t_newline
+    swap(&sub.a, &p.a)
+    if leftover {
+        push(&sub.diags, diag.new("E0133", span, "cannot read `{src}` inside this string"))
+    }
+    for d in sub.diags {
+        push(&p.diags, diag.new(d.code, span, d.msg))
+    }
+    if len(sub.diags) > 0 or e == -1 { fail Stop }
+    ret e
+}
+
+fn parse_primary(p &Parser) int ! Failed +mem {
+    span := cur_span(p)
+    k := kind_at(p, 0)
+    if k == lexer.t_int {
+        n := tok_num(p)
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.Int{n}, span)
+    }
+    if k == lexer.t_float {
+        v := p.toks[p.pos].float
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.Float{v}, span)
+    }
+    if k == lexer.t_char {
+        v := u8(p.toks[p.pos].value)
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.Char{v}, span)
+    }
+    if k == lexer.t_str {
+        s := copy(p.toks[p.pos].text)
+        _ = bump(&p)
+        if contains(s, "{{") or contains(s, "}}}}") { ret parse_interp(&p, s, span)? }
+        ret ast.new_expr(&p.a, ast.Str{s}, span)
+    }
+    if at_kw(p, "true") {
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.Bool{true}, span)
+    }
+    if at_kw(p, "false") {
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.Bool{false}, span)
+    }
+    if at_kw(p, "none") {
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.None, span)
+    }
+    if at_kw(p, "ret") and p.in_contract {
+        _ = bump(&p)
+        ret ast.new_expr(&p.a, ast.RetVal, span)
+    }
+    if k == lexer.t_ident and p.in_contract and p.toks[p.pos].text == "old" and op_at(p, 1, "(") {
+        _ = bump(&p)
+        _ = bump(&p)
+        inner := parse_expr(&p, 0)?
+        _ = expect_op(&p, ")")?
+        ret ast.new_expr(&p.a, ast.Old{inner}, span)
+    }
+    if k == lexer.t_ident {
+        name := copy(p.toks[p.pos].text)
+        _ = bump(&p)
+        mut targs []int = []
+        if at_op(p, "[") and looks_like_targs(p, name) { targs = parse_targs(&p)? }
+        if at_op(p, "(") {
+            _ = bump(&p)
+            mut args []int = []
+            close := parse_args(&p, ")", &args)?
+            ret ast.new_expr(&p.a, ast.Call{none, name, span, targs, args, -1}, join_spans(span, close))
+        }
+        if at_op(p, "{{") and is_type_name(name) and not p.in_head {
+            _ = bump(&p)
+            mut args []int = []
+            close := parse_args(&p, "}", &args)?
+            ret ast.new_expr(&p.a, ast.StructLit{none, name, span, targs, args}, join_spans(span, close))
+        }
+        ret ast.new_expr(&p.a, ast.Var{name}, span)
+    }
+    if at_op(p, "(") {
+        _ = bump(&p)
+        was := p.in_head
+        p.in_head = false
+        e := parse_expr(&p, 0) else {
+            p.in_head = was
+            fail Stop
+        }
+        p.in_head = was
+        _ = expect_op(&p, ")")?
+        ret e
+    }
+    if at_op(p, "[") {
+        _ = bump(&p)
+        was := p.in_head
+        p.in_head = false
+        e := parse_array(&p, span) else {
+            p.in_head = was
+            fail Stop
+        }
+        p.in_head = was
+        ret e
+    }
+    fail expected(&p, "an expression")
+}
+
+fn parse_array(p &Parser, span diag.Span) int ! Failed +mem {
+    skip_newlines(&p)
+    mut items []int = []
+    for {
+        skip_newlines(&p)
+        if at_op(p, "]") { break }
+        e := parse_expr(&p, 0)?
+        if eat_op(&p, "...") {
+            if len(items) > 0 {
+                s := cur_span(p)
+                fail error(&p, "E0136", s, "`x...` fills a whole array, so it must be the only item")
+            }
+            skip_newlines(&p)
+            close := expect_op(&p, "]")?
+            ret ast.new_expr(&p.a, ast.ArrayFill{e}, join_spans(span, close))
+        }
+        push(&items, e)
+        skip_newlines(&p)
+        if not eat_op(&p, ",") { break }
+    }
+    close := expect_op(&p, "]")?
+    ret ast.new_expr(&p.a, ast.ArrayLit{items}, join_spans(span, close))
+}
+
+fn is_assign(op str) bool {
+    ret op == "=" or op == "+=" or op == "-=" or op == "*=" or op == "/=" or op == "%=" or op == "&=" or op == "|=" or op == "^=" or op == "<<=" or op == ">>="
+}
+
+// `none` is plain `=`.
+fn assign_op(op str) ?ast.BinOp {
+    if op == "+=" { ret ast.Add }
+    if op == "-=" { ret ast.Sub }
+    if op == "*=" { ret ast.Mul }
+    if op == "/=" { ret ast.Div }
+    if op == "%=" { ret ast.Rem }
+    if op == "&=" { ret ast.BitAnd }
+    if op == "|=" { ret ast.BitOr }
+    if op == "^=" { ret ast.BitXor }
+    if op == "<<=" { ret ast.Shl }
+    if op == ">>=" { ret ast.Shr }
+    ret none
+}

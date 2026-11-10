@@ -1,0 +1,2805 @@
+// Turns a checked AST into CIR, the way compiler/src/lower.rs does. Not here: the interpreter's
+// mode (`Line`, `Note`, fuzz filters) and computed `const`s, which end in E0174.
+//
+// A register is an `int` and -1 means "none" (`Option<VReg>` in Rust). `Lower` is `FnLower` and
+// `Env` of Rust together: the per-function part is reset by `new_lower`. `l` and `c` are
+// passed everywhere as read-only parameters, so `match l.a.exprs[e].kind` can stay open while
+// `me` changes. Rust's closures became an `open`/`close` pair around the body.
+
+use ast
+use cir
+use diag
+use effects
+use modules
+use sema
+use types
+
+// What a build is for. `check`: every contract, and the memory checker. `test_mode`: build the
+// `test` blocks of the root file. `fast`: contracts are not compiled at all.
+pub type Opts { check bool, test_mode bool, fast bool }
+
+// Something to do when a scope ends. `CleanDrop`: release the value at `addr` if `flag` is still set.
+type Clean = CleanDefer{body int} | CleanDrop{addr int, ty int, flag int}
+
+type JobKind = JobDrop | JobCopy
+
+type Job { kind JobKind, ty int }
+
+// Where an `ast.Func` lives: `l.units[unit].program.funcs[index]`, or `c.instances[index]`
+// when `unit` is -1.
+type FuncRef { unit int, index int }
+
+type Listed { name str, r FuncRef }
+
+type LoopInfo { cont int, brk int, depth int }
+
+type Pair { a int, b int }
+
+// `a` is -1 when there was no guard.
+type Guard { a int, done int }
+
+type Compared { d int, a int, b int }
+
+type Shown { label str, v int, ty int }
+
+type Cond { v int, shown []Shown }
+
+type Place = PlaceReg{v int} | PlaceMem{a int, o u64}
+
+type Piece = PieceLit{s str} | PieceVal{v int, ty int}
+
+type LoopBlocks { head int, latch int, exit int }
+
+type Lower {
+    ids Map[str, int],
+    funcs Map[str, FuncRef],
+    // Synth of Rust: the functions the compiler writes itself, one per type that needs them.
+    base int,
+    jobs []Job,
+    known Map[int, int],
+    diags []diag.Diag,
+    check bool,
+    fast bool,
+    // Raw memory goes through the checker.
+    instrument bool,
+    is_claw bool,
+    in_contract bool,
+    ret_val int,
+    // `old(e)` values saved on entry, by the id of the `old` expression.
+    olds Map[int, int],
+    sures []ast.Contract,
+    cur_name str,
+    vars Map[str, int],
+    // Is this local still holding its value? Only for values that need dropping.
+    flags Map[str, int],
+    all_flags []int,
+    // Scalars that had their address taken: `vars` holds their memory address.
+    addressed Map[str, bool],
+    nvregs int,
+    objects []cir.Obj,
+    blocks []cir.CirBlock,
+    cur int,
+    // (continue target, break target, defer depth) of each enclosing loop.
+    loops []LoopInfo,
+    // Pending `defer` bodies of each open block, innermost last.
+    defers [][]Clean,
+    ret_ty int,
+    sret int,
+    is_main bool,
+}
+
+// Word 0 of the runtime's state: set while a contract with calls is running.
+const guard_word u64 = 0
+
+fn loc_of(s diag.Span) cir.Loc {
+    ret cir.Loc{s.line, s.col, s.file}
+}
+
+fn no_loc() cir.Loc {
+    ret cir.Loc{0, 0, 0}
+}
+
+fn num_u64() cir.Num {
+    ret cir.Num{64, false, true}
+}
+
+fn num_i64() cir.Num {
+    ret cir.Num{64, true, true}
+}
+
+claw fn as_int(x u64) int {
+    ret cast[int](x)
+}
+
+claw fn f64_bits(v f64) u64 {
+    mut x := v
+    p := cast[*u64](&x)
+    ret *p
+}
+
+claw fn f32_bits(v f32) u32 {
+    mut x := v
+    p := cast[*u32](&x)
+    ret *p
+}
+
+// The value as `i128 as i64` gives it.
+fn num_int(n ast.Num) int {
+    if n.neg { ret as_int(0 - n.value) }
+    ret as_int(n.value)
+}
+
+// The value as `(i128 >> 64) as i64` gives it.
+fn num_hi(n ast.Num) int {
+    if n.neg and n.value != 0 { ret -1 }
+    ret 0
+}
+
+fn num_f64(n ast.Num) f64 {
+    x := f64(n.value)
+    if n.neg { ret -x }
+    ret x
+}
+
+fn is_test_fn(f ast.Func) bool {
+    _ = copy(f.test_name) else { ret false }
+    ret true
+}
+
+fn no_set() Map[str, bool] {
+    ret new_map[str, bool](hash_str)
+}
+
+fn no_regs() Map[str, int] {
+    ret new_map[str, int](hash_str)
+}
+
+fn set_copy(m Map[str, bool]) Map[str, bool] {
+    mut out := no_set()
+    for e in m.items {
+        put(&out, copy(e.key), e.val)
+    }
+    ret out
+}
+
+pub fn lower(l modules.Loaded, c sema.Checked, opts Opts, diags &[]diag.Diag) cir.Module +mem {
+    mut list []Listed = []
+    root := len(l.units) - 1
+    for u, i in l.units {
+        for f, j in u.program.funcs {
+            if len(f.tparams) == 0 and (not is_test_fn(f) or (opts.test_mode and i == root)) {
+                push(&list, Listed{"{u.prefix}{f.name}", FuncRef{i, j}})
+            }
+        }
+    }
+    for f, j in c.instances {
+        push(&list, Listed{copy(f.name), FuncRef{-1, j}})
+    }
+    mut me := Lower{no_regs(), new_map[str, FuncRef](hash_str), len(list), [], new_map[int, int](hash_int), [],
+        opts.check, opts.fast, false, false, false, -1, new_map[int, int](hash_int), [], "", no_regs(), no_regs(),
+        [], no_set(), 0, [], [], 0, [], [], types.t_void, -1, false}
+    for x, i in list {
+        put(&me.ids, copy(x.name), i)
+        put(&me.funcs, copy(x.name), x.r)
+    }
+    mut funcs []cir.CirFunc = []
+    for x in list {
+        if x.r.unit == -1 {
+            push(&funcs, lower_func(l, c, &me, x.name, c.instances[x.r.index]))
+        } else {
+            push(&funcs, lower_func(l, c, &me, x.name, l.units[x.r.unit].program.funcs[x.r.index]))
+        }
+    }
+    // Each generated function may ask for more, so the queue can grow as it runs.
+    mut next := 0
+    for next < len(me.jobs) {
+        job := me.jobs[next]
+        push(&funcs, build_synth(c, &me, job))
+        next += 1
+    }
+    mut check_rt ?cir.CheckRt = none
+    if opts.check {
+        check_rt = cir.CheckRt{id_of(me, "__check.on_alloc"), id_of(me, "__check.on_free"), id_of(me, "__check.finish")}
+    }
+    mut tests []cir.TestFn = []
+    for x in list {
+        if x.r.unit != -1 {
+            name := copy(l.units[x.r.unit].program.funcs[x.r.index].test_name) else ""
+            if len(name) > 0 { push(&tests, cir.TestFn{name, id_of(me, x.name)}) }
+        }
+    }
+    mut const_funcs []int = []
+    for x in c.computed {
+        push(&const_funcs, id_of(me, x.full))
+    }
+    for d in me.diags {
+        push(&diags, copy(d))
+    }
+    main_id := get(me.ids, "main") else 0
+    ret cir.Module{funcs, main_id, check_rt, tests, const_funcs}
+}
+
+fn id_of(me Lower, name str) int {
+    ret get(me.ids, name) else -1
+}
+
+// `ret_ty`, `is_main`: of the function about to be built; everything else starts afresh.
+fn new_lower(me &Lower, ret_ty int, is_main bool) {
+    me.instrument = me.check
+    me.is_claw = false
+    me.in_contract = false
+    me.ret_val = -1
+    me.olds = new_map[int, int](hash_int)
+    me.sures = []
+    me.cur_name = ""
+    me.vars = no_regs()
+    me.flags = no_regs()
+    me.all_flags = []
+    me.addressed = no_set()
+    me.nvregs = 0
+    me.objects = []
+    me.blocks = []
+    me.cur = 0
+    me.loops = []
+    me.defers = []
+    me.ret_ty = ret_ty
+    me.sret = -1
+    me.is_main = is_main
+    _ = new_block(&me)
+}
+
+fn is_void_result(c sema.Checked, ty int) bool {
+    match types.kind(c.types, ty) {
+        Result{ok, _}: ret ok == types.t_void
+        _: ret false
+    }
+}
+
+fn lower_func(l modules.Loaded, c sema.Checked, me &Lower, full str, f ast.Func) cir.CirFunc {
+    at := get(c.sigs, full) else -1
+    sig := c.sig_list[at]
+    new_lower(&me, sig.ret_ty, full == "main" or is_test_fn(f))
+    me.instrument = me.check and not starts_with(full, "__check.")
+    me.is_claw = f.is_claw
+    me.cur_name = copy(full)
+    me.addressed = set_copy(f.addressed)
+    if types.is_aggregate(c.types, sig.ret_ty) {
+        result := vreg(&me)
+        me.sret = result
+    }
+    push(&me.defers, [])
+    // Parameters must take the first registers, in order, before anything else does.
+    mut regs []int = []
+    for _ in f.params {
+        push(&regs, vreg(&me))
+    }
+    for p, i in f.params {
+        ty := sig.params[i]
+        v := regs[i]
+        put(&me.vars, copy(p.name), v)
+        if types.is_ref(c.types, ty) {
+            put(&me.addressed, copy(p.name), true)
+        } else if p.is_own and types.needs_drop(c.types, ty) {
+            flag := new_flag(&me)
+            put(&me.flags, copy(p.name), flag)
+            push(&me.defers[0], CleanDrop{v, ty, flag})
+        }
+    }
+    mut nparams := len(f.params)
+    if me.sret != -1 { nparams += 1 }
+    for x in f.contracts {
+        if x.is_sure and not me.fast and (me.check or not effects.has_call(l, x.e)) {
+            push(&me.sures, copy(x))
+        }
+    }
+    save_olds(l, c, &me)
+    block(l, c, &me, f.body)
+    run_defers(l, c, &me, 0)
+    if sig.ret_ty == types.t_void or is_void_result(c, sig.ret_ty) { check_sures(l, c, &me, -1) }
+    _ = pop(&me.defers)
+    if sig.ret_ty == types.t_void {
+        finish(&me, cir.Ret{-1})
+    } else if is_void_result(c, sig.ret_ty) {
+        return_ok_void(&me)
+    } else {
+        finish(&me, cir.Unreachable)
+    }
+    ret into_func(&me, copy(full), nparams)
+}
+
+fn build_synth(c sema.Checked, me &Lower, job Job) cir.CirFunc {
+    new_lower(&me, types.t_void, false)
+    mut name := ""
+    mut nparams := 0
+    match job.kind {
+        JobDrop: {
+            v := vreg(&me)
+            build_drop(c, &me, v, job.ty)
+            name = "__drop[{types.name(c.types, job.ty)}]"
+            nparams = 1
+        }
+        JobCopy: {
+            dst := vreg(&me)
+            src := vreg(&me)
+            build_copy(c, &me, dst, src, job.ty)
+            name = "__copy[{types.name(c.types, job.ty)}]"
+            nparams = 2
+        }
+    }
+    finish(&me, cir.Ret{-1})
+    ret into_func(&me, name, nparams)
+}
+
+fn synth_id(me &Lower, kind JobKind, ty int) int {
+    mut key := ty * 2
+    match kind {
+        JobDrop: {}
+        JobCopy: key += 1
+    }
+    known := get(me.known, key) else -1
+    if known != -1 { ret known }
+    id := me.base + len(me.jobs)
+    push(&me.jobs, Job{kind, ty})
+    put(&me.known, key, id)
+    ret id
+}
+
+fn place_text(l modules.Loaded, s diag.Span) str {
+    ret "{l.base_names[s.file]}:{s.line}:{s.col}"
+}
+
+// Tells the checker where the next allocation or release comes from.
+fn set_site(l modules.Loaded, me &Lower, s diag.Span) {
+    if me.instrument { emit(&me, cir.SetSite{place_text(l, s)}) }
+}
+
+// In check mode: `size` bytes at `addr` must belong to the program.
+fn guard_mem(l modules.Loaded, me &Lower, addr int, size u64, s diag.Span) {
+    if not me.instrument { ret }
+    site := vreg(&me)
+    emit(&me, cir.StrAddr{site, place_text(l, s)})
+    n := constant(&me, as_int(size))
+    emit(&me, cir.Call{-1, id_of(me, "__check.access"), [addr, n, site]})
+}
+
+// Does this assignment target or read land in memory only a `claw fn` can get wrong?
+fn is_raw(l modules.Loaded, c sema.Checked, me Lower, e int) bool {
+    if through_pointer(l, c, e) { ret true }
+    if not me.is_claw { ret false }
+    match l.a.exprs[e].kind {
+        Index{base, _}: ret is_seq(c, l.a.exprs[base].ty)
+        _: ret false
+    }
+}
+
+fn is_seq(c sema.Checked, ty int) bool {
+    match types.kind(c.types, ty) {
+        Slice{_}: ret true
+        Str: ret true
+        _: ret false
+    }
+}
+
+fn guard_on(me &Lower) Guard {
+    a := vreg(&me)
+    emit(&me, cir.RtState{a})
+    v := vreg(&me)
+    emit(&me, cir.Load{v, a, guard_word, cir.X64})
+    run := new_block(&me)
+    done := new_block(&me)
+    finish(&me, cir.Br{v, done, run})
+    switch(&me, run)
+    one := constant(&me, 1)
+    emit(&me, cir.Store{a, guard_word, one, cir.X64})
+    ret Guard{a, done}
+}
+
+fn guard_off(me &Lower, g Guard) {
+    zero := constant(&me, 0)
+    emit(&me, cir.Store{g.a, guard_word, zero, cir.X64})
+    finish(&me, cir.Jmp{g.done})
+    switch(&me, g.done)
+}
+
+// Records `old(...)` values before the body can change anything.
+fn save_olds(l modules.Loaded, c sema.Checked, me &Lower) {
+    for i in 0..len(me.sures) {
+        mut nodes []int = []
+        sema.walk(l, me.sures[i].e, &nodes)
+        for x in nodes {
+            match l.a.exprs[x].kind {
+                Old{inner}: {
+                    slot := vreg(&me)
+                    push(&me.all_flags, slot)
+                    mut g := Guard{-1, -1}
+                    if effects.has_call(l, inner) { g = guard_on(&me) }
+                    push(&me.defers, [])
+                    v := expr_value(l, c, &me, inner)
+                    emit(&me, cir.Mov{slot, v})
+                    depth := len(me.defers) - 1
+                    run_defers(l, c, &me, depth)
+                    _ = pop(&me.defers)
+                    if g.a != -1 { guard_off(&me, g) }
+                    put(&me.olds, x, slot)
+                }
+                _: {}
+            }
+        }
+    }
+}
+
+// `r` is the scalar result, if any; aggregates are already in the result slot.
+fn check_sures(l modules.Loaded, c sema.Checked, me &Lower, r int) {
+    if len(me.sures) == 0 { ret }
+    mut payload := -1
+    match types.kind(c.types, me.ret_ty) {
+        Option{p}: payload = p
+        Result{ok, _}: {
+            if ok != types.t_void { payload = ok }
+        }
+        _: {}
+    }
+    if payload == -1 {
+        if r != -1 {
+            me.ret_val = r
+        } else {
+            me.ret_val = me.sret
+        }
+        run_sures(l, c, &me)
+        ret
+    }
+    // A `sure` speaks about a value that was returned, not about `none` or `fail`.
+    tag := load_tag(&me, me.sret)
+    want := success_tag(c, me.ret_ty)
+    yes := new_block(&me)
+    after := new_block(&me)
+    eq_branch(&me, tag, want, yes, after)
+    switch(&me, yes)
+    value := load(c, &me, me.sret, types.tag_size, payload)
+    me.ret_val = value
+    run_sures(l, c, &me)
+    finish(&me, cir.Jmp{after})
+    switch(&me, after)
+}
+
+fn run_sures(l modules.Loaded, c sema.Checked, me &Lower) {
+    for i in 0..len(me.sures) {
+        e := me.sures[i].e
+        text := copy(me.sures[i].text)
+        at := place_text(l, l.a.exprs[e].span)
+        name := effects.short_name(me.cur_name)
+        check_cond(l, c, &me, e, "trap: sure failed: `{text}` in {name} at {at}\n")
+    }
+}
+
+// Evaluates the callee's `need` clauses here, so a failure names this call.
+fn check_needs(l modules.Loaded, c sema.Checked, me &Lower, full str, args []int, at diag.Span) {
+    r := get(me.funcs, full) else { ret }
+    if me.fast { ret }
+    if r.unit == -1 {
+        needs_of(l, c, &me, full, c.instances[r.index], args, at)
+    } else {
+        needs_of(l, c, &me, full, l.units[r.unit].program.funcs[r.index], args, at)
+    }
+}
+
+fn needs_of(l modules.Loaded, c sema.Checked, me &Lower, full str, f ast.Func, args []int, at diag.Span) {
+    mut clauses []int = []
+    for x, i in f.contracts {
+        if not x.is_sure and (me.check or not effects.has_call(l, x.e)) { push(&clauses, i) }
+    }
+    if len(clauses) == 0 { ret }
+    where := get(c.sigs, full) else -1
+    sig := c.sig_list[where]
+    mut saved_vars := no_regs()
+    mut saved_addressed := no_set()
+    mut saved_flags := no_regs()
+    swap(&saved_vars, &me.vars)
+    swap(&saved_addressed, &me.addressed)
+    swap(&saved_flags, &me.flags)
+    for p, i in f.params {
+        put(&me.vars, copy(p.name), args[i])
+        if types.is_ref(c.types, sig.params[i]) { put(&me.addressed, copy(p.name), true) }
+    }
+    site := place_text(l, at)
+    for i in clauses {
+        x := f.contracts[i]
+        check_cond(l, c, &me, x.e, "trap: need failed: `{x.text}` in {effects.short_name(full)} at {site}\n")
+    }
+    swap(&saved_vars, &me.vars)
+    swap(&saved_addressed, &me.addressed)
+    swap(&saved_flags, &me.flags)
+}
+
+// Stops the program with a report if `e` is false.
+fn check_cond(l modules.Loaded, c sema.Checked, me &Lower, e int, own header str) {
+    mut g := Guard{-1, -1}
+    if effects.has_call(l, e) { g = guard_on(&me) }
+    was := me.in_contract
+    me.in_contract = true
+    push(&me.defers, [])
+    res := eval_cond(l, c, &me, e)
+    ok := new_block(&me)
+    bad := new_block(&me)
+    finish(&me, cir.Br{res.v, ok, bad})
+
+    switch(&me, bad)
+    emit(&me, cir.BufStr{header})
+    for sh in res.shown {
+        lit(&me, "  {sh.label} = ")
+        print_value(c, &me, sh.v, sh.ty)
+        lit(&me, "\n")
+    }
+    for x in names_in(l, me, e) {
+        ty := l.a.exprs[x].ty
+        mut label := ""
+        mut v := -1
+        match l.a.exprs[x].kind {
+            Var{n}: {
+                label = copy(n)
+                v = var(l, c, &me, x, n, ty)
+            }
+            _: {
+                label = "ret"
+                v = me.ret_val
+            }
+        }
+        lit(&me, "  {label} = ")
+        print_value(c, &me, v, ty)
+        lit(&me, "\n")
+    }
+    emit(&me, cir.Flush{2})
+    emit(&me, cir.Exit{101})
+    finish(&me, cir.Unreachable)
+
+    switch(&me, ok)
+    depth := len(me.defers) - 1
+    run_defers(l, c, &me, depth)
+    _ = pop(&me.defers)
+    me.in_contract = was
+    if g.a != -1 { guard_off(&me, g) }
+}
+
+// Variables a failed condition should show, each once; what `old` saw is not there now.
+fn names_in(l modules.Loaded, me Lower, e int) []int {
+    mut nodes []int = []
+    sema.walk(l, e, &nodes)
+    mut under_old := new_map[int, bool](hash_int)
+    for x in nodes {
+        match l.a.exprs[x].kind {
+            Old{inner}: {
+                mut below []int = []
+                sema.walk(l, inner, &below)
+                for y in below {
+                    put(&under_old, y, true)
+                }
+            }
+            _: {}
+        }
+    }
+    mut out []int = []
+    mut seen := no_set()
+    for x in nodes {
+        mut key := ""
+        match l.a.exprs[x].kind {
+            Var{n}: {
+                if has_key(me.vars, n) { key = copy(n) }
+            }
+            RetVal: key = "ret"
+            _: {}
+        }
+        if len(key) == 0 { continue }
+        if not has_key(under_old, x) and not has_key(seen, key) {
+            put(&seen, key, true)
+            push(&out, x)
+        }
+    }
+    ret out
+}
+
+// The condition, and the values of a comparison worth showing if it fails.
+fn eval_cond(l modules.Loaded, c sema.Checked, me &Lower, e int) Cond {
+    match l.a.exprs[e].kind {
+        Binary{op, lhs, rhs}: {
+            if is_comparison(op) {
+                r := compare_exprs(l, c, &me, op, lhs, rhs)
+                mut shown []Shown = []
+                if r.a != -1 {
+                    if not plain(l, lhs) { push(&shown, Shown{"left", r.a, l.a.exprs[lhs].ty}) }
+                    if not plain(l, rhs) { push(&shown, Shown{"right", r.b, l.a.exprs[rhs].ty}) }
+                }
+                ret Cond{r.d, shown}
+            }
+        }
+        _: {}
+    }
+    ret Cond{expr_value(l, c, &me, e), []}
+}
+
+// Compares; in a contract, integer `+ - *` is exact rather than overflowing.
+fn compare_exprs(l modules.Loaded, c sema.Checked, me &Lower, op ast.BinOp, lhs int, rhs int) Compared {
+    operand := l.a.exprs[lhs].ty
+    if me.in_contract and types.is_int(c.types, operand) and (is_wide(l, c, lhs) or is_wide(l, c, rhs)) {
+        x := wide(l, c, &me, lhs)
+        y := wide(l, c, &me, rhs)
+        d := vreg(&me)
+        emit(&me, cir.WideCmp{cc_of(op), d, x.a, x.b, y.a, y.b})
+        ret Compared{d, -1, -1}
+    }
+    a := expr_value(l, c, &me, lhs)
+    b := expr_value(l, c, &me, rhs)
+    ret Compared{compare(c, &me, op, a, b, operand), a, b}
+}
+
+fn compare(c sema.Checked, me &Lower, op ast.BinOp, a int, b int, operand int) int {
+    if operand == types.t_str { ret compare_str(&me, op, a, b) }
+    d := vreg(&me)
+    bits := float_bits(c, operand)
+    if bits != -1 {
+        emit(&me, cir.FCmp{cc_of(op), d, a, b, bits})
+    } else {
+        unsigned := not num_of(c, operand).signed
+        emit(&me, cir.Cmp{cc_of(op), d, a, b, unsigned})
+    }
+    ret d
+}
+
+fn is_wide(l modules.Loaded, c sema.Checked, e int) bool {
+    mut shape := false
+    match l.a.exprs[e].kind {
+        Binary{op, _, _}: {
+            match op {
+                Add: shape = true
+                Sub: shape = true
+                Mul: shape = true
+                _: {}
+            }
+        }
+        Unary{op, _}: {
+            match op {
+                Neg: shape = true
+                _: {}
+            }
+        }
+        _: {}
+    }
+    ret shape and types.is_int(c.types, l.a.exprs[e].ty)
+}
+
+fn wide(l modules.Loaded, c sema.Checked, me &Lower, e int) Pair {
+    if is_wide(l, c, e) {
+        mut x := Pair{-1, -1}
+        mut y := Pair{-1, -1}
+        mut op := cir.WideSub
+        match l.a.exprs[e].kind {
+            Binary{bop, lhs, rhs}: {
+                x = wide(l, c, &me, lhs)
+                y = wide(l, c, &me, rhs)
+                match bop {
+                    Add: op = cir.WideAdd
+                    Sub: op = cir.WideSub
+                    _: op = cir.WideMul
+                }
+            }
+            Unary{_, inner}: {
+                zero := constant(&me, 0)
+                x = Pair{zero, zero}
+                y = wide(l, c, &me, inner)
+            }
+            _: {}
+        }
+        dlo := vreg(&me)
+        dhi := vreg(&me)
+        emit(&me, cir.WideBin{op, dlo, dhi, x.a, x.b, y.a, y.b, loc_of(l.a.exprs[e].span)})
+        ret Pair{dlo, dhi}
+    }
+    match l.a.exprs[e].kind {
+        Int{n}: {
+            lo := constant(&me, num_int(n))
+            hi := constant(&me, num_hi(n))
+            ret Pair{lo, hi}
+        }
+        _: {}
+    }
+    v := expr_value(l, c, &me, e)
+    mut high := -1
+    if num_of(c, l.a.exprs[e].ty).signed {
+        k := constant(&me, 63)
+        d := vreg(&me)
+        emit(&me, cir.Bin{cir.Shr, d, v, k, num_i64(), loc_of(l.a.exprs[e].span)})
+        high = d
+    } else {
+        high = constant(&me, 0)
+    }
+    ret Pair{v, high}
+}
+
+fn needs(c sema.Checked, ty int) bool {
+    ret types.needs_drop(c.types, ty)
+}
+
+fn into_func(me &Lower, own name str, nparams int) cir.CirFunc {
+    // Every flag starts cleared, on every path, before anything can set it.
+    if len(me.all_flags) > 0 {
+        mut fresh []cir.Inst = []
+        for d in me.all_flags {
+            push(&fresh, cir.Const{d, 0})
+        }
+        for x in me.blocks[0].insts {
+            push(&fresh, copy(x))
+        }
+        me.blocks[0].insts = fresh
+    }
+    mut params []int = []
+    for i in 0..nparams {
+        push(&params, i)
+    }
+    mut objects []cir.Obj = []
+    mut blocks []cir.CirBlock = []
+    swap(&objects, &me.objects)
+    swap(&blocks, &me.blocks)
+    ret cir.CirFunc{name, nparams, params, me.is_claw, false, false, me.nvregs, objects, blocks}
+}
+
+// A new liveness flag, set right away.
+fn new_flag(me &Lower) int {
+    flag := vreg(&me)
+    push(&me.all_flags, flag)
+    emit(&me, cir.Const{flag, 1})
+    ret flag
+}
+
+fn clear_flag(me &Lower, name str) {
+    flag := get(me.flags, name) else -1
+    if flag != -1 { emit(&me, cir.Const{flag, 0}) }
+}
+
+fn drop_now(me &Lower, addr int, ty int) {
+    f := synth_id(&me, JobDrop, ty)
+    emit(&me, cir.Call{-1, f, [addr]})
+}
+
+fn copy_into(me &Lower, dst int, src int, ty int) {
+    f := synth_id(&me, JobCopy, ty)
+    emit(&me, cir.Call{-1, f, [dst, src]})
+}
+
+// A local takes ownership; it goes in the block around the current statement.
+fn register_local(me &Lower, name str, addr int, ty int) {
+    flag := new_flag(&me)
+    put(&me.flags, copy(name), flag)
+    n := len(me.defers)
+    push(&me.defers[n - 2], CleanDrop{addr, ty, flag})
+}
+
+// A temporary lives until the end of the current statement.
+fn register_temp(me &Lower, addr int, ty int) {
+    flag := new_flag(&me)
+    n := len(me.defers)
+    push(&me.defers[n - 1], CleanDrop{addr, ty, flag})
+}
+
+// `(pointer to first item, length)` of an array, slice or string.
+fn seq(c sema.Checked, me &Lower, ty int, addr int) Pair {
+    match types.kind(c.types, ty) {
+        Array{_, n}: ret Pair{addr, constant(&me, n)}
+        _: {}
+    }
+    p := vreg(&me)
+    emit(&me, cir.Load{p, addr, types.seq_ptr, cir.X64})
+    n := vreg(&me)
+    emit(&me, cir.Load{n, addr, types.seq_len, cir.X64})
+    ret Pair{p, n}
+}
+
+fn elem_of(c sema.Checked, ty int) int {
+    match types.kind(c.types, ty) {
+        Array{e, _}: ret e
+        Slice{e}: ret e
+        Str: ret types.t_u8
+        _: {
+            sure false
+            ret -1
+        }
+    }
+}
+
+fn store_seq(me &Lower, a int, p int, n int, cap int) {
+    emit(&me, cir.Store{a, types.seq_ptr, p, cir.X64})
+    emit(&me, cir.Store{a, types.seq_len, n, cir.X64})
+    emit(&me, cir.Store{a, types.seq_cap, cap, cir.X64})
+}
+
+// A loop dropping every item (`for_each` in Rust, whose body was always a drop).
+fn for_each_drop(me &Lower, p int, n int, size u64, elem int) {
+    counter := constant(&me, 0)
+    lim := vreg(&me)
+    emit(&me, cir.Mov{lim, n})
+    lb := counted_open(&me, counter, lim)
+    d := vreg(&me)
+    emit(&me, cir.IndexAddr{d, p, counter, size})
+    drop_now(&me, d, elem)
+    counted_close(&me, lb, counter)
+}
+
+// The first half of `on_tag`. Gives `join`, for `tag_close`.
+fn tag_open(me &Lower, tag int, value int) int {
+    yes := new_block(&me)
+    after := new_block(&me)
+    eq_branch(&me, tag, value, yes, after)
+    switch(&me, yes)
+    ret after
+}
+
+fn tag_close(me &Lower, after int) {
+    finish(&me, cir.Jmp{after})
+    switch(&me, after)
+}
+
+fn load_tag(me &Lower, addr int) int {
+    d := vreg(&me)
+    emit(&me, cir.Load{d, addr, 0, cir.X64})
+    ret d
+}
+
+fn drop_fields(c sema.Checked, me &Lower, v int, fields []types.Field) {
+    for f in fields {
+        if needs(c, f.ty) {
+            a := offset_addr(&me, v, f.offset)
+            drop_now(&me, a, f.ty)
+        }
+    }
+}
+
+fn user_drop_call(c sema.Checked, me &Lower, v int, ty int) {
+    full := get(c.types.user_drop, ty) else ""
+    if len(full) > 0 { emit(&me, cir.Call{-1, id_of(me, full), [v]}) }
+}
+
+fn build_drop(c sema.Checked, me &Lower, v int, ty int) {
+    if is_seq(c, ty) {
+        elem := elem_of(c, ty)
+        cap := vreg(&me)
+        emit(&me, cir.Load{cap, v, types.seq_cap, cir.X64})
+        free_it := new_block(&me)
+        done := new_block(&me)
+        eq_branch(&me, cap, 0, done, free_it)
+        switch(&me, free_it)
+        x := seq(c, &me, ty, v)
+        if needs(c, elem) {
+            size := types.size(c.types, elem)
+            for_each_drop(&me, x.a, x.b, size, elem)
+        }
+        if me.instrument { emit(&me, cir.SetSite{"automatic release"}) }
+        emit(&me, cir.Free{x.a})
+        finish(&me, cir.Jmp{done})
+        switch(&me, done)
+        ret
+    }
+    match types.kind(c.types, ty) {
+        Array{elem, n}: {
+            count := constant(&me, n)
+            size := types.size(c.types, elem)
+            for_each_drop(&me, v, count, size, elem)
+        }
+        Struct{id}: {
+            user_drop_call(c, &me, v, ty)
+            drop_fields(c, &me, v, c.types.structs[id].fields)
+        }
+        Enum{id}: {
+            user_drop_call(c, &me, v, ty)
+            tag := load_tag(&me, v)
+            for vr, i in c.types.enums[id].variants {
+                after := tag_open(&me, tag, i)
+                drop_fields(c, &me, v, vr.fields)
+                tag_close(&me, after)
+            }
+        }
+        Option{p}: {
+            tag := load_tag(&me, v)
+            after := tag_open(&me, tag, 1)
+            a := offset_addr(&me, v, types.tag_size)
+            drop_now(&me, a, p)
+            tag_close(&me, after)
+        }
+        Result{ok, err}: {
+            tag := load_tag(&me, v)
+            a := offset_addr(&me, v, types.tag_size)
+            if needs(c, ok) {
+                after := tag_open(&me, tag, 0)
+                drop_now(&me, a, ok)
+                tag_close(&me, after)
+            }
+            if needs(c, err) {
+                after := tag_open(&me, tag, 1)
+                drop_now(&me, a, err)
+                tag_close(&me, after)
+            }
+        }
+        _: sure false
+    }
+}
+
+fn copy_fields(c sema.Checked, me &Lower, dst int, src int, fields []types.Field) {
+    for f in fields {
+        if needs(c, f.ty) {
+            d := offset_addr(&me, dst, f.offset)
+            s := offset_addr(&me, src, f.offset)
+            copy_into(&me, d, s, f.ty)
+        }
+    }
+}
+
+// Writes a deep copy of `src` into the uninitialized memory at `dst`.
+fn build_copy(c sema.Checked, me &Lower, dst int, src int, ty int) {
+    if is_seq(c, ty) {
+        elem := elem_of(c, ty)
+        size := types.size(c.types, elem)
+        x := seq(c, &me, ty, src)
+        empty := new_block(&me)
+        some := new_block(&me)
+        done := new_block(&me)
+        eq_branch(&me, x.b, 0, empty, some)
+        switch(&me, empty)
+        zero := constant(&me, 0)
+        store_seq(&me, dst, zero, zero, zero)
+        finish(&me, cir.Jmp{done})
+        switch(&me, some)
+        fresh := vreg(&me)
+        emit(&me, cir.Alloc{fresh, x.b, size, no_loc()})
+        if needs(c, elem) {
+            counter := constant(&me, 0)
+            lim := vreg(&me)
+            emit(&me, cir.Mov{lim, x.b})
+            lb := counted_open(&me, counter, lim)
+            to := vreg(&me)
+            from := vreg(&me)
+            emit(&me, cir.IndexAddr{to, fresh, counter, size})
+            emit(&me, cir.IndexAddr{from, x.a, counter, size})
+            copy_into(&me, to, from, elem)
+            counted_close(&me, lb, counter)
+        } else {
+            k := constant(&me, as_int(size))
+            bytes := vreg(&me)
+            emit(&me, cir.Bin{cir.Mul, bytes, x.b, k, num_u64(), no_loc()})
+            emit(&me, cir.MemCopyDyn{fresh, x.a, bytes})
+        }
+        store_seq(&me, dst, fresh, x.b, x.b)
+        finish(&me, cir.Jmp{done})
+        switch(&me, done)
+        ret
+    }
+    emit(&me, cir.MemCopy{dst, src, types.size(c.types, ty)})
+    match types.kind(c.types, ty) {
+        Array{elem, n}: {
+            size := types.size(c.types, elem)
+            counter := constant(&me, 0)
+            lim := constant(&me, n)
+            lb := counted_open(&me, counter, lim)
+            to := vreg(&me)
+            from := vreg(&me)
+            emit(&me, cir.IndexAddr{to, dst, counter, size})
+            emit(&me, cir.IndexAddr{from, src, counter, size})
+            copy_into(&me, to, from, elem)
+            counted_close(&me, lb, counter)
+        }
+        Struct{id}: copy_fields(c, &me, dst, src, c.types.structs[id].fields)
+        Enum{id}: {
+            tag := load_tag(&me, src)
+            for vr, i in c.types.enums[id].variants {
+                after := tag_open(&me, tag, i)
+                copy_fields(c, &me, dst, src, vr.fields)
+                tag_close(&me, after)
+            }
+        }
+        Option{p}: {
+            tag := load_tag(&me, src)
+            after := tag_open(&me, tag, 1)
+            d := offset_addr(&me, dst, types.tag_size)
+            s := offset_addr(&me, src, types.tag_size)
+            copy_into(&me, d, s, p)
+            tag_close(&me, after)
+        }
+        Result{ok, err}: {
+            tag := load_tag(&me, src)
+            d := offset_addr(&me, dst, types.tag_size)
+            s := offset_addr(&me, src, types.tag_size)
+            if needs(c, ok) {
+                after := tag_open(&me, tag, 0)
+                copy_into(&me, d, s, ok)
+                tag_close(&me, after)
+            }
+            if needs(c, err) {
+                after := tag_open(&me, tag, 1)
+                copy_into(&me, d, s, err)
+                tag_close(&me, after)
+            }
+        }
+        _: sure false
+    }
+}
+
+fn vreg(me &Lower) int {
+    me.nvregs += 1
+    ret me.nvregs - 1
+}
+
+fn new_block(me &Lower) int {
+    push(&me.blocks, cir.CirBlock{[], cir.Unreachable})
+    ret len(me.blocks) - 1
+}
+
+fn emit(me &Lower, own i cir.Inst) {
+    push(&me.blocks[me.cur].insts, i)
+}
+
+fn finish(me &Lower, own t cir.Term) {
+    me.blocks[me.cur].term = t
+}
+
+fn switch(me &Lower, b int) {
+    me.cur = b
+}
+
+// Ends the current block with `t` and continues in a fresh dead block,
+// so statements after a jump still have somewhere to go.
+fn finish_dead(me &Lower, own t cir.Term) {
+    finish(&me, t)
+    dead := new_block(&me)
+    switch(&me, dead)
+}
+
+fn constant(me &Lower, v int) int {
+    d := vreg(&me)
+    emit(&me, cir.Const{d, v})
+    ret d
+}
+
+fn temp_obj(c sema.Checked, me &Lower, ty int) int {
+    lay := types.layout(c.types, ty)
+    mut bytes := lay.size
+    if bytes < 1 { bytes = 1 }
+    push(&me.objects, cir.Obj{bytes, lay.align})
+    d := vreg(&me)
+    emit(&me, cir.ObjAddr{d, len(me.objects) - 1})
+    ret d
+}
+
+fn mem_of(c sema.Checked, ty int) cir.Mem {
+    match types.kind(c.types, ty) {
+        Int{bits, signed}: {
+            if signed {
+                if bits == 8 { ret cir.I8 }
+                if bits == 16 { ret cir.I16 }
+                if bits == 32 { ret cir.I32 }
+            } else {
+                if bits == 8 { ret cir.U8 }
+                if bits == 16 { ret cir.U16 }
+                if bits == 32 { ret cir.U32 }
+            }
+            ret cir.X64
+        }
+        Bool: ret cir.U8
+        Float{bits}: {
+            if bits == 32 { ret cir.U32 }
+            ret cir.X64
+        }
+        _: ret cir.X64
+    }
+}
+
+fn num_of(c sema.Checked, ty int) cir.Num {
+    match types.kind(c.types, ty) {
+        Int{bits, signed}: ret cir.Num{bits, signed, true}
+        Pointer{_}: ret num_u64()
+        _: ret num_i64()
+    }
+}
+
+fn float_bits(c sema.Checked, ty int) int {
+    match types.kind(c.types, ty) {
+        Float{bits}: ret bits
+        _: ret -1
+    }
+}
+
+fn offset_addr(me &Lower, base int, off u64) int {
+    if off == 0 { ret base }
+    d := vreg(&me)
+    emit(&me, cir.AddImm{d, base, off})
+    ret d
+}
+
+fn store(c sema.Checked, me &Lower, addr int, off u64, v int, ty int) {
+    if types.is_aggregate(c.types, ty) {
+        dst := offset_addr(&me, addr, off)
+        emit(&me, cir.MemCopy{dst, v, types.size(c.types, ty)})
+    } else {
+        emit(&me, cir.Store{addr, off, v, mem_of(c, ty)})
+    }
+}
+
+fn load(c sema.Checked, me &Lower, addr int, off u64, ty int) int {
+    if types.is_aggregate(c.types, ty) { ret offset_addr(&me, addr, off) }
+    d := vreg(&me)
+    emit(&me, cir.Load{d, addr, off, mem_of(c, ty)})
+    ret d
+}
+
+// A fresh local holding a copy of `v`.
+fn new_local(c sema.Checked, me &Lower, v int, ty int) int {
+    if types.is_aggregate(c.types, ty) {
+        a := temp_obj(c, &me, ty)
+        store(c, &me, a, 0, v, ty)
+        ret a
+    }
+    d := vreg(&me)
+    emit(&me, cir.Mov{d, v})
+    ret d
+}
+
+fn set_tag(me &Lower, addr int, tag int) {
+    t := constant(&me, tag)
+    emit(&me, cir.Store{addr, 0, t, cir.X64})
+}
+
+fn return_ok_void(me &Lower) {
+    set_tag(&me, me.sret, 0)
+    finish(&me, cir.Ret{-1})
+}
+
+fn block(l modules.Loaded, c sema.Checked, me &Lower, b int) {
+    push(&me.defers, [])
+    for s in l.a.blocks[b].stmts {
+        stmt(l, c, &me, s)
+    }
+    depth := len(me.defers) - 1
+    run_defers(l, c, &me, depth)
+    _ = pop(&me.defers)
+}
+
+// Emits the pending `defer` bodies of every block from `from` inward, newest first.
+fn run_defers(l modules.Loaded, c sema.Checked, me &Lower, from int) {
+    mut level := len(me.defers) - 1
+    for level >= from {
+        pending := copy(me.defers[level])
+        mut i := len(pending) - 1
+        for i >= 0 {
+            match pending[i] {
+                CleanDefer{body}: block(l, c, &me, body)
+                CleanDrop{addr, ty, flag}: {
+                    yes := new_block(&me)
+                    after := new_block(&me)
+                    finish(&me, cir.Br{flag, yes, after})
+                    switch(&me, yes)
+                    drop_now(&me, addr, ty)
+                    emit(&me, cir.Const{flag, 0})
+                    finish(&me, cir.Jmp{after})
+                    switch(&me, after)
+                }
+            }
+            i -= 1
+        }
+        level -= 1
+    }
+}
+
+fn place(l modules.Loaded, c sema.Checked, me &Lower, e int) Place {
+    span := l.a.exprs[e].span
+    match l.a.exprs[e].kind {
+        Var{name}: {
+            v := get(me.vars, name) else -1
+            if types.is_aggregate(c.types, l.a.exprs[e].ty) or has_key(me.addressed, name) { ret PlaceMem{v, 0} }
+            ret PlaceReg{v}
+        }
+        Field{base, name, _}: {
+            base_ty := l.a.exprs[base].ty
+            off := field_offset(c, base_ty, name)
+            if types.is_ptr(c.types, base_ty) { ret PlaceMem{expr_value(l, c, &me, base), off} }
+            match place(l, c, &me, base) {
+                PlaceMem{a, o}: ret PlaceMem{a, o + off}
+                PlaceReg{_}: {
+                    sure false
+                    ret PlaceReg{-1}
+                }
+            }
+        }
+        Deref{inner}: ret PlaceMem{expr_value(l, c, &me, inner), 0}
+        Index{base, i}: {
+            base_ty := l.a.exprs[base].ty
+            if types.is_ptr(c.types, base_ty) {
+                a := expr_value(l, c, &me, base)
+                ret PlaceMem{element_addr(l, c, &me, base_ty, a, i, span), 0}
+            }
+            match place(l, c, &me, base) {
+                PlaceMem{a, o}: {
+                    addr := offset_addr(&me, a, o)
+                    ret PlaceMem{element_addr(l, c, &me, base_ty, addr, i, span), 0}
+                }
+                PlaceReg{_}: {
+                    sure false
+                    ret PlaceReg{-1}
+                }
+            }
+        }
+        _: {
+            sure false
+            ret PlaceReg{-1}
+        }
+    }
+}
+
+fn field_offset(c sema.Checked, ty int, name str) u64 {
+    mut at := ty
+    match types.kind(c.types, ty) {
+        Pointer{p}: at = p
+        _: {}
+    }
+    if is_seq(c, at) {
+        if name == "ptr" { ret types.seq_ptr }
+        if name == "len" { ret types.seq_len }
+        ret types.seq_cap
+    }
+    match types.kind(c.types, at) {
+        Struct{id}: {
+            for f in c.types.structs[id].fields {
+                if f.name == name { ret f.offset }
+            }
+        }
+        _: {}
+    }
+    sure false
+    ret 0
+}
+
+fn element_addr(l modules.Loaded, c sema.Checked, me &Lower, array int, addr int, i int, span diag.Span) int {
+    match types.kind(c.types, array) {
+        Pointer{elem}: {
+            // A raw pointer has no length, so there is nothing to check.
+            idx := expr_value(l, c, &me, i)
+            d := vreg(&me)
+            emit(&me, cir.IndexAddr{d, addr, idx, types.size(c.types, elem)})
+            ret d
+        }
+        Array{elem, n}: {
+            idx := expr_value(l, c, &me, i)
+            emit(&me, cir.Bounds{idx, u64(n), loc_of(span)})
+            d := vreg(&me)
+            emit(&me, cir.IndexAddr{d, addr, idx, types.size(c.types, elem)})
+            ret d
+        }
+        _: {}
+    }
+    x := seq(c, &me, array, addr)
+    idx := expr_value(l, c, &me, i)
+    emit(&me, cir.BoundsDyn{idx, x.b, loc_of(span)})
+    d := vreg(&me)
+    emit(&me, cir.IndexAddr{d, x.a, idx, types.size(c.types, elem_of(c, array))})
+    ret d
+}
+
+fn stmt(l modules.Loaded, c sema.Checked, me &Lower, s int) {
+    push(&me.defers, [])
+    stmt_inner(l, c, &me, s)
+    depth := len(me.defers) - 1
+    run_defers(l, c, &me, depth)
+    _ = pop(&me.defers)
+}
+
+fn is_view(x ast.Coerce) bool {
+    match x {
+        CoerceView: ret true
+        _: ret false
+    }
+}
+
+fn is_no_coerce(x ast.Coerce) bool {
+    match x {
+        CoerceNo: ret true
+        _: ret false
+    }
+}
+
+fn is_new_value(l modules.Loaded, e int) bool {
+    match l.a.exprs[e].kind {
+        ArrayLit{_}: ret true
+        ArrayFill{_}: ret true
+        StructLit{_, _, _, _, _}: ret true
+        Call{_, _, _, _, _, _}: ret true
+        None: ret true
+        Str{_}: ret true
+        Interp{_}: ret true
+        _: ret false
+    }
+}
+
+fn stmt_inner(l modules.Loaded, c sema.Checked, me &Lower, s int) {
+    span := l.a.stmts[s].span
+    match l.a.stmts[s].kind {
+        Let{_, name, _, _, init}: {
+            mut ty := l.a.exprs[init].ty
+            if is_view(l.a.exprs[init].coerce) {
+                x := expr_value(l, c, &me, init)
+                put(&me.vars, copy(name), x)
+                ret
+            }
+            match l.a.exprs[init].coerce {
+                CoerceSome{t}: ty = t
+                CoerceOk{t}: ty = t
+                _: {}
+            }
+            v := owned_value(l, c, &me, init)
+            // A value just built in its own temporary needs no second copy.
+            fresh := not is_no_coerce(l.a.exprs[init].coerce) or is_new_value(l, init)
+            mut d := -1
+            if has_key(me.addressed, name) and not types.is_aggregate(c.types, ty) {
+                a := temp_obj(c, &me, ty)
+                store(c, &me, a, 0, v, ty)
+                d = a
+            } else if fresh and types.is_aggregate(c.types, ty) {
+                d = v
+            } else {
+                d = new_local(c, &me, v, ty)
+            }
+            put(&me.vars, copy(name), d)
+            if needs(c, ty) { register_local(&me, name, d, ty) }
+        }
+        Assign{target, op, value}: assign(l, c, &me, target, op, value)
+        Discard{e}: _ = expr(l, c, &me, e)
+        ExprStmt{e}: _ = expr(l, c, &me, e)
+        If{cond, then, els}: if_stmt(l, c, &me, cond, then, els)
+        ForRange{name, _, start, stop, body}: {
+            a := expr_value(l, c, &me, start)
+            limit := expr_value(l, c, &me, stop)
+            // Separate hidden copies: the bounds are evaluated exactly once.
+            counter := vreg(&me)
+            emit(&me, cir.Mov{counter, a})
+            lim := vreg(&me)
+            emit(&me, cir.Mov{lim, limit})
+            lb := counted_open(&me, counter, lim)
+            if name != "_" {
+                v := vreg(&me)
+                emit(&me, cir.Mov{v, counter})
+                put(&me.vars, copy(name), v)
+            }
+            block(l, c, &me, body)
+            counted_close(&me, lb, counter)
+        }
+        ForIn{name, _, index, subject, body}: for_in(l, c, &me, name, index, subject, body)
+        ForCond{cond, body}: {
+            head := new_block(&me)
+            body_b := new_block(&me)
+            exit := new_block(&me)
+            finish(&me, cir.Jmp{head})
+            switch(&me, head)
+            if makes_temporaries(l, c, cond) {
+                // The temporaries must go on every pass, not once at the end.
+                push(&me.defers, [])
+                v := expr_value(l, c, &me, cond)
+                depth := len(me.defers) - 1
+                run_defers(l, c, &me, depth)
+                _ = pop(&me.defers)
+                finish(&me, cir.Br{v, body_b, exit})
+            } else {
+                branch(l, c, &me, cond, body_b, exit)
+            }
+            switch(&me, body_b)
+            push(&me.loops, LoopInfo{head, exit, len(me.defers)})
+            block(l, c, &me, body)
+            _ = pop(&me.loops)
+            finish(&me, cir.Jmp{head})
+            switch(&me, exit)
+        }
+        ForEver{body}: {
+            head := new_block(&me)
+            exit := new_block(&me)
+            finish(&me, cir.Jmp{head})
+            switch(&me, head)
+            push(&me.loops, LoopInfo{head, exit, len(me.defers)})
+            block(l, c, &me, body)
+            _ = pop(&me.loops)
+            finish(&me, cir.Jmp{head})
+            switch(&me, exit)
+        }
+        Match{subject, arms}: match_stmt(l, c, &me, subject, arms)
+        Sure{e, text}: {
+            if not me.fast and (me.check or not effects.has_call(l, e)) {
+                at := place_text(l, span)
+                check_cond(l, c, &me, e, "trap: sure failed: `{text}` at {at}\n")
+            }
+        }
+        Ret{e}: ret_stmt(l, c, &me, e)
+        Fail{e}: {
+            mut err := -1
+            match types.kind(c.types, me.ret_ty) {
+                Result{_, x}: err = x
+                _: sure false
+            }
+            v := owned_value(l, c, &me, e)
+            set_tag(&me, me.sret, 1)
+            store(c, &me, me.sret, types.tag_size, v, err)
+            run_defers(l, c, &me, 0)
+            finish_dead(&me, cir.Ret{-1})
+        }
+        Defer{body}: {
+            n := len(me.defers)
+            push(&me.defers[n - 2], CleanDefer{body})
+        }
+        Break: {
+            x := me.loops[len(me.loops) - 1]
+            run_defers(l, c, &me, x.depth)
+            finish_dead(&me, cir.Jmp{x.brk})
+        }
+        Continue: {
+            x := me.loops[len(me.loops) - 1]
+            run_defers(l, c, &me, x.depth)
+            finish_dead(&me, cir.Jmp{x.cont})
+        }
+    }
+}
+
+// `for` over `counter..lim`: this opens it and leaves code generation in the body.
+// `break` and `continue` find it in `me.loops` until `counted_close`.
+fn counted_open(me &Lower, counter int, lim int) LoopBlocks {
+    head := new_block(&me)
+    body_b := new_block(&me)
+    latch := new_block(&me)
+    exit := new_block(&me)
+    finish(&me, cir.Jmp{head})
+
+    switch(&me, head)
+    x := vreg(&me)
+    emit(&me, cir.Cmp{cir.Lt, x, counter, lim, false})
+    finish(&me, cir.Br{x, body_b, exit})
+
+    switch(&me, body_b)
+    push(&me.loops, LoopInfo{latch, exit, len(me.defers)})
+    ret LoopBlocks{head, latch, exit}
+}
+
+fn counted_close(me &Lower, lb LoopBlocks, counter int) {
+    _ = pop(&me.loops)
+    finish(&me, cir.Jmp{lb.latch})
+
+    switch(&me, lb.latch)
+    emit(&me, cir.AddImm{counter, counter, 1})
+    finish(&me, cir.Jmp{lb.head})
+    switch(&me, lb.exit)
+}
+
+fn for_in(l modules.Loaded, c sema.Checked, me &Lower, elem str, index ?ast.Binding, subject int, body int) {
+    ty := l.a.exprs[subject].ty
+    elem_ty := elem_of(c, ty)
+    v := expr_value(l, c, &me, subject)
+    x := seq(c, &me, ty, v)
+    counter := constant(&me, 0)
+    lim := vreg(&me)
+    emit(&me, cir.Mov{lim, x.b})
+    size := types.size(c.types, elem_ty)
+    lb := counted_open(&me, counter, lim)
+    if elem != "_" {
+        a := vreg(&me)
+        emit(&me, cir.IndexAddr{a, x.a, counter, size})
+        // The sequence cannot change during the loop, so aggregates can be read in place.
+        item := load(c, &me, a, 0, elem_ty)
+        mut d := item
+        if not types.is_aggregate(c.types, elem_ty) { d = new_local(c, &me, item, elem_ty) }
+        put(&me.vars, copy(elem), d)
+    }
+    idx := copy(index) else ast.Binding{"_", no_span()}
+    if idx.name != "_" {
+        y := vreg(&me)
+        emit(&me, cir.Mov{y, counter})
+        put(&me.vars, copy(idx.name), y)
+    }
+    block(l, c, &me, body)
+    counted_close(&me, lb, counter)
+}
+
+fn no_span() diag.Span {
+    ret diag.Span{0, 0, 0, 0, 0}
+}
+
+fn ret_stmt(l modules.Loaded, c sema.Checked, me &Lower, e int) {
+    if e == -1 {
+        run_defers(l, c, &me, 0)
+        check_sures(l, c, &me, -1)
+        if is_void_result(c, me.ret_ty) {
+            return_ok_void(&me)
+            dead := new_block(&me)
+            switch(&me, dead)
+        } else {
+            finish_dead(&me, cir.Ret{-1})
+        }
+        ret
+    }
+    r := owned_value(l, c, &me, e)
+    if types.is_aggregate(c.types, me.ret_ty) {
+        store(c, &me, me.sret, 0, r, me.ret_ty)
+        run_defers(l, c, &me, 0)
+        check_sures(l, c, &me, -1)
+        finish_dead(&me, cir.Ret{-1})
+    } else {
+        // The value is computed first: a `defer` must not change what is returned.
+        run_defers(l, c, &me, 0)
+        check_sures(l, c, &me, r)
+        finish_dead(&me, cir.Ret{r})
+    }
+}
+
+fn is_none_op(op ?ast.BinOp) bool {
+    _ = op else { ret true }
+    ret false
+}
+
+fn assign(l modules.Loaded, c sema.Checked, me &Lower, target int, op ?ast.BinOp, value int) {
+    ty := l.a.exprs[target].ty
+    span := l.a.exprs[target].span
+    p := place(l, c, &me, target)
+    if is_none_op(op) {
+        v := owned_value(l, c, &me, value)
+        guard_target(l, c, &me, p, target, ty)
+        if needs(c, ty) and not through_pointer(l, c, target) {
+            mut prev := -1
+            match p {
+                PlaceMem{a, o}: prev = offset_addr(&me, a, o)
+                PlaceReg{_}: sure false
+            }
+            mut flag := -1
+            match l.a.exprs[target].kind {
+                Var{n}: flag = get(me.flags, n) else -1
+                _: {}
+            }
+            if flag != -1 {
+                // The old value may already have moved away.
+                yes := new_block(&me)
+                after := new_block(&me)
+                finish(&me, cir.Br{flag, yes, after})
+                switch(&me, yes)
+                drop_now(&me, prev, ty)
+                finish(&me, cir.Jmp{after})
+                switch(&me, after)
+                write_place(c, &me, p, v, ty)
+                emit(&me, cir.Const{flag, 1})
+            } else {
+                drop_now(&me, prev, ty)
+                write_place(c, &me, p, v, ty)
+            }
+            ret
+        }
+        write_place(c, &me, p, v, ty)
+        ret
+    }
+    bop := op else ast.Add
+    guard_target(l, c, &me, p, target, ty)
+    mut prev := -1
+    match p {
+        PlaceReg{r}: prev = r
+        PlaceMem{a, o}: prev = load(c, &me, a, o, ty)
+    }
+    v := expr_value(l, c, &me, value)
+    d := arith(c, &me, bop, prev, v, ty, span)
+    write_place(c, &me, p, d, ty)
+}
+
+fn guard_target(l modules.Loaded, c sema.Checked, me &Lower, p Place, target int, ty int) {
+    if me.instrument and is_raw(l, c, me, target) {
+        match p {
+            PlaceMem{a, o}: {
+                addr := offset_addr(&me, a, o)
+                guard_mem(l, &me, addr, types.size(c.types, ty), l.a.exprs[target].span)
+            }
+            PlaceReg{_}: {}
+        }
+    }
+}
+
+fn write_place(c sema.Checked, me &Lower, p Place, v int, ty int) {
+    match p {
+        PlaceReg{r}: emit(&me, cir.Mov{r, v})
+        PlaceMem{a, o}: store(c, &me, a, o, v, ty)
+    }
+}
+
+fn if_stmt(l modules.Loaded, c sema.Checked, me &Lower, cond int, then int, els ?ast.ElseStmt) {
+    t := new_block(&me)
+    after := new_block(&me)
+    mut has_else := true
+    x := els else ast.ElseIf{-1}
+    match x {
+        ElseIf{i}: {
+            if i == -1 { has_else = false }
+        }
+        _: {}
+    }
+    mut f := after
+    if has_else { f = new_block(&me) }
+    branch(l, c, &me, cond, t, f)
+    switch(&me, t)
+    block(l, c, &me, then)
+    finish(&me, cir.Jmp{after})
+    if has_else {
+        switch(&me, f)
+        match x {
+            ElseBlockOf{b}: block(l, c, &me, b)
+            ElseIf{i}: stmt(l, c, &me, i)
+        }
+        finish(&me, cir.Jmp{after})
+    }
+    switch(&me, after)
+}
+
+fn eq_branch(me &Lower, a int, v int, t int, f int) {
+    k := constant(&me, v)
+    x := vreg(&me)
+    emit(&me, cir.Cmp{cir.Eq, x, a, k, false})
+    finish(&me, cir.Br{x, t, f})
+}
+
+fn match_stmt(l modules.Loaded, c sema.Checked, me &Lower, subject int, arms []ast.Arm) {
+    ty := l.a.exprs[subject].ty
+    v := expr_value(l, c, &me, subject)
+    mut enum_id := -1
+    match types.kind(c.types, ty) {
+        Enum{id}: enum_id = id
+        _: {}
+    }
+    mut key := v
+    if enum_id != -1 {
+        d := vreg(&me)
+        emit(&me, cir.Load{d, v, 0, cir.X64})
+        key = d
+    }
+    after := new_block(&me)
+    for arm in arms {
+        body := new_block(&me)
+        next := new_block(&me)
+        match arm.pat {
+            PatWild: finish(&me, cir.Jmp{body})
+            PatBool{b}: {
+                mut n := 0
+                if b { n = 1 }
+                eq_branch(&me, key, n, body, next)
+            }
+            PatInt{n}: eq_branch(&me, key, num_int(n), body, next)
+            PatVariant{name, _}: eq_branch(&me, key, variant_index(c, enum_id, name), body, next)
+        }
+        switch(&me, body)
+        match arm.pat {
+            PatVariant{name, binds}: {
+                idx := variant_index(c, enum_id, name)
+                fields := c.types.enums[enum_id].variants[idx].fields
+                for b, i in binds {
+                    if i >= len(fields) { break }
+                    f := fields[i]
+                    if b.name != "_" {
+                        x := load(c, &me, v, f.offset, f.ty)
+                        // An owning field is only looked at; the subject keeps it.
+                        mut d := x
+                        if not needs(c, f.ty) { d = new_local(c, &me, x, f.ty) }
+                        put(&me.vars, copy(b.name), d)
+                    }
+                }
+            }
+            _: {}
+        }
+        block(l, c, &me, arm.body)
+        finish(&me, cir.Jmp{after})
+        switch(&me, next)
+    }
+    finish(&me, cir.Jmp{after})
+    switch(&me, after)
+}
+
+fn variant_index(c sema.Checked, id int, name str) int {
+    for v, i in c.types.enums[id].variants {
+        if v.name == name { ret i }
+    }
+    sure false
+    ret -1
+}
+
+// Branches on a condition, short-circuiting `and` / `or` / `not`.
+fn branch(l modules.Loaded, c sema.Checked, me &Lower, e int, t int, f int) {
+    match l.a.exprs[e].kind {
+        Binary{op, lhs, rhs}: {
+            match op {
+                And: {
+                    mid := new_block(&me)
+                    branch(l, c, &me, lhs, mid, f)
+                    switch(&me, mid)
+                    branch(l, c, &me, rhs, t, f)
+                    ret
+                }
+                Or: {
+                    mid := new_block(&me)
+                    branch(l, c, &me, lhs, t, mid)
+                    switch(&me, mid)
+                    branch(l, c, &me, rhs, t, f)
+                    ret
+                }
+                _: {}
+            }
+        }
+        Unary{op, inner}: {
+            match op {
+                Not: {
+                    branch(l, c, &me, inner, f, t)
+                    ret
+                }
+                _: {}
+            }
+        }
+        _: {}
+    }
+    x := expr_value(l, c, &me, e)
+    finish(&me, cir.Br{x, t, f})
+}
+
+fn expr_value(l modules.Loaded, c sema.Checked, me &Lower, e int) int {
+    ret expr(l, c, &me, e)
+}
+
+// Evaluates for reading. A temporary that owns memory is released after the statement.
+fn expr(l modules.Loaded, c sema.Checked, me &Lower, e int) int {
+    v := expr_raw(l, c, &me, e)
+    if v != -1 {
+        ty := l.a.exprs[e].ty
+        if needs(c, ty) and is_fresh(l, e) { register_temp(&me, v, ty) }
+    }
+    ret wrap(l, c, &me, e, v)
+}
+
+// Evaluates for taking over: the caller becomes responsible for the value.
+fn owned(l modules.Loaded, c sema.Checked, me &Lower, e int) int {
+    ty := l.a.exprs[e].ty
+    mut v := -1
+    match l.a.exprs[e].kind {
+        Var{n}: {
+            if needs(c, ty) {
+                v = var(l, c, &me, e, n, ty)
+                clear_flag(&me, n)
+            } else {
+                v = expr_raw(l, c, &me, e)
+            }
+        }
+        _: v = expr_raw(l, c, &me, e)
+    }
+    ret wrap(l, c, &me, e, v)
+}
+
+fn owned_value(l modules.Loaded, c sema.Checked, me &Lower, e int) int {
+    ret owned(l, c, &me, e)
+}
+
+fn wrap(l modules.Loaded, c sema.Checked, me &Lower, e int, v int) int {
+    match l.a.exprs[e].coerce {
+        CoerceNo: ret v
+        CoerceView: ret v
+        CoerceSome{t}: {
+            a := temp_obj(c, &me, t)
+            set_tag(&me, a, 1)
+            store(c, &me, a, types.tag_size, v, l.a.exprs[e].ty)
+            ret a
+        }
+        CoerceOk{t}: {
+            a := temp_obj(c, &me, t)
+            set_tag(&me, a, 0)
+            if v != -1 { store(c, &me, a, types.tag_size, v, l.a.exprs[e].ty) }
+            ret a
+        }
+    }
+}
+
+fn float_const(c sema.Checked, me &Lower, v f64, ty int) int {
+    if float_bits(c, ty) == 32 { ret constant(&me, int(f32_bits(f32(v)))) }
+    ret constant(&me, as_int(f64_bits(v)))
+}
+
+fn pointer_step(c sema.Checked, me &Lower, op ast.BinOp, a int, b int, ty int) int {
+    mut elem := -1
+    match types.kind(c.types, ty) {
+        Pointer{p}: elem = p
+        _: sure false
+    }
+    mut idx := b
+    match op {
+        Sub: {
+            zero := constant(&me, 0)
+            n := vreg(&me)
+            emit(&me, cir.Bin{cir.Sub, n, zero, b, num_u64(), no_loc()})
+            idx = n
+        }
+        _: {}
+    }
+    d := vreg(&me)
+    emit(&me, cir.IndexAddr{d, a, idx, types.size(c.types, elem)})
+    ret d
+}
+
+fn pointer_diff(c sema.Checked, me &Lower, a int, b int, ty int, span diag.Span) int {
+    mut elem := -1
+    match types.kind(c.types, ty) {
+        Pointer{p}: elem = p
+        _: sure false
+    }
+    bytes := vreg(&me)
+    emit(&me, cir.Bin{cir.Sub, bytes, a, b, num_u64(), loc_of(span)})
+    mut item := types.size(c.types, elem)
+    if item < 1 { item = 1 }
+    size := constant(&me, as_int(item))
+    d := vreg(&me)
+    emit(&me, cir.Bin{cir.Div, d, bytes, size, num_i64(), loc_of(span)})
+    ret d
+}
+
+fn arith(c sema.Checked, me &Lower, op ast.BinOp, a int, b int, ty int, span diag.Span) int {
+    if types.is_ptr(c.types, ty) { ret pointer_step(c, &me, op, a, b, ty) }
+    d := vreg(&me)
+    bits := float_bits(c, ty)
+    if bits != -1 {
+        mut fop := cir.FAdd
+        match op {
+            Add: fop = cir.FAdd
+            Sub: fop = cir.FSub
+            Mul: fop = cir.FMul
+            Div: fop = cir.FDiv
+            _: sure false
+        }
+        emit(&me, cir.FBin{fop, d, a, b, bits})
+    } else {
+        emit(&me, cir.Bin{arith_of(op), d, a, b, num_of(c, ty), loc_of(span)})
+    }
+    ret d
+}
+
+fn expr_raw(l modules.Loaded, c sema.Checked, me &Lower, e int) int {
+    ty := l.a.exprs[e].ty
+    span := l.a.exprs[e].span
+    match l.a.exprs[e].kind {
+        Int{v}: {
+            if float_bits(c, ty) != -1 { ret float_const(c, &me, num_f64(v), ty) }
+            ret constant(&me, num_int(v))
+        }
+        Float{v}: ret float_const(c, &me, v, ty)
+        Char{v}: ret constant(&me, int(v))
+        Bool{v}: {
+            if v { ret constant(&me, 1) }
+            ret constant(&me, 0)
+        }
+        Str{text}: {
+            d := vreg(&me)
+            emit(&me, cir.StrAddr{d, copy(text)})
+            if types.is_ptr(c.types, ty) { ret d }
+            a := temp_obj(c, &me, types.t_str)
+            n := constant(&me, len(text))
+            zero := constant(&me, 0)
+            store_seq(&me, a, d, n, zero)
+            ret a
+        }
+        Interp{parts}: {
+            ps := pieces(l, c, &me, parts)
+            emit(&me, cir.CaptureStart)
+            emit_pieces(c, &me, ps)
+            set_site(l, &me, span)
+            ptr := vreg(&me)
+            n := vreg(&me)
+            emit(&me, cir.CaptureTake{ptr, n})
+            a := temp_obj(c, &me, types.t_str)
+            store_seq(&me, a, ptr, n, n)
+            ret a
+        }
+        AddrOf{inner}: {
+            match place(l, c, &me, inner) {
+                PlaceMem{a, o}: ret offset_addr(&me, a, o)
+                PlaceReg{_}: {
+                    sure false
+                    ret -1
+                }
+            }
+        }
+        Deref{inner}: {
+            p := expr_value(l, c, &me, inner)
+            guard_mem(l, &me, p, types.size(c.types, ty), span)
+            ret load(c, &me, p, 0, ty)
+        }
+        RetVal: ret me.ret_val
+        Old{_}: ret get(me.olds, e) else -1
+        None: {
+            if types.is_ptr(c.types, ty) { ret constant(&me, 0) }
+            a := temp_obj(c, &me, ty)
+            set_tag(&me, a, 0)
+            ret a
+        }
+        Var{name}: ret var(l, c, &me, e, name, ty)
+        Unary{op, inner}: ret unary(l, c, &me, op, inner, ty, span)
+        Binary{op, lhs, rhs}: {
+            match op {
+                And: ret short_circuit(l, c, &me, e)
+                Or: ret short_circuit(l, c, &me, e)
+                _: {}
+            }
+            if is_comparison(op) { ret compare_exprs(l, c, &me, op, lhs, rhs).d }
+            a := expr_value(l, c, &me, lhs)
+            b := expr_value(l, c, &me, rhs)
+            lt := l.a.exprs[lhs].ty
+            if types.is_ptr(c.types, lt) and types.is_ptr(c.types, l.a.exprs[rhs].ty) { ret pointer_diff(c, &me, a, b, lt, span) }
+            ret arith(c, &me, op, a, b, lt, span)
+        }
+        Call{_, name, _, _, args, via}: ret call(l, c, &me, e, name, args, via)
+        CallValue{f, args}: {
+            callee := expr_value(l, c, &me, f)
+            ret call_through(l, c, &me, callee, l.a.exprs[f].ty, args, ty)
+        }
+        StructLit{_, _, _, _, args}: ret struct_lit(l, c, &me, e, args, ty)
+        ArrayLit{items}: {
+            match types.kind(c.types, ty) {
+                Slice{elem}: {
+                    a := temp_obj(c, &me, ty)
+                    size := types.size(c.types, elem)
+                    at := loc_of(span)
+                    n := constant(&me, len(items))
+                    if len(items) == 0 {
+                        zero := constant(&me, 0)
+                        store_seq(&me, a, zero, zero, zero)
+                    } else {
+                        set_site(l, &me, span)
+                        p := vreg(&me)
+                        emit(&me, cir.Alloc{p, n, size, at})
+                        for it, i in items {
+                            v := owned_value(l, c, &me, it)
+                            store(c, &me, p, u64(i) * size, v, elem)
+                        }
+                        store_seq(&me, a, p, n, n)
+                    }
+                    ret a
+                }
+                Array{elem, _}: {
+                    a := temp_obj(c, &me, ty)
+                    size := types.size(c.types, elem)
+                    for it, i in items {
+                        v := owned_value(l, c, &me, it)
+                        store(c, &me, a, u64(i) * size, v, elem)
+                    }
+                    ret a
+                }
+                _: {
+                    sure false
+                    ret -1
+                }
+            }
+        }
+        ArrayFill{item}: {
+            mut elem := -1
+            mut n := 0
+            match types.kind(c.types, ty) {
+                Array{x, count}: {
+                    elem = x
+                    n = count
+                }
+                _: sure false
+            }
+            a := temp_obj(c, &me, ty)
+            v := expr_value(l, c, &me, item)
+            counter := constant(&me, 0)
+            lim := constant(&me, n)
+            size := types.size(c.types, elem)
+            lb := counted_open(&me, counter, lim)
+            d := vreg(&me)
+            emit(&me, cir.IndexAddr{d, a, counter, size})
+            store(c, &me, d, 0, v, elem)
+            counted_close(&me, lb, counter)
+            ret a
+        }
+        Field{base, name, _}: {
+            match l.a.exprs[e].res {
+                ResNone: {}
+                _: ret resolved(l, c, &me, e, ty)
+            }
+            base_ty := l.a.exprs[base].ty
+            off := field_offset(c, base_ty, name)
+            a := expr_value(l, c, &me, base)
+            if me.instrument and types.is_ptr(c.types, base_ty) {
+                at := offset_addr(&me, a, off)
+                guard_mem(l, &me, at, types.size(c.types, ty), span)
+            }
+            ret load(c, &me, a, off, ty)
+        }
+        Index{base, i}: {
+            base_ty := l.a.exprs[base].ty
+            a := expr_value(l, c, &me, base)
+            d := element_addr(l, c, &me, base_ty, a, i, span)
+            if me.instrument and (types.is_ptr(c.types, base_ty) or is_raw(l, c, me, e)) {
+                guard_mem(l, &me, d, types.size(c.types, ty), span)
+            }
+            ret load(c, &me, d, 0, ty)
+        }
+        Slice{base, lo, hi}: ret slice_expr(l, c, &me, base, lo, hi, ty, span)
+        Try{inner}: ret try_expr(l, c, &me, e, inner)
+        Else{inner, handler}: ret else_expr(l, c, &me, inner, handler, ty)
+    }
+}
+
+fn var(l modules.Loaded, c sema.Checked, me &Lower, e int, name str, ty int) int {
+    if has_key(me.vars, name) {
+        v := get(me.vars, name) else -1
+        if types.is_aggregate(c.types, ty) { ret v }
+        if has_key(me.addressed, name) { ret load(c, &me, v, 0, ty) }
+        // Copy so a later assignment cannot change an operand that was
+        // already evaluated (left-to-right order is guaranteed).
+        d := vreg(&me)
+        emit(&me, cir.Mov{d, v})
+        ret d
+    }
+    ret resolved(l, c, &me, e, ty)
+}
+
+// A constant or a field-less variant, as sema resolved it.
+fn resolved(l modules.Loaded, c sema.Checked, me &Lower, e int, ty int) int {
+    match l.a.exprs[e].res {
+        ResFunc{full}: {
+            d := vreg(&me)
+            emit(&me, cir.FuncAddr{d, id_of(me, full)})
+            ret d
+        }
+        ResConst{val, t}: {
+            match val {
+                ConstInt{n}: ret constant(&me, num_int(n))
+                ConstBool{b}: {
+                    if b { ret constant(&me, 1) }
+                    ret constant(&me, 0)
+                }
+                ConstFloat{x}: ret float_const(c, &me, x, t)
+                ConstComputed{id}: {
+                    // Running code while compiling is the job of the interpreter, which stays in Rust.
+                    name := c.computed[id].name
+                    push(&me.diags, diag.new("E0174", l.a.exprs[e].span, "cannot compute `{name}`: the compiler written in Claw cannot run code while compiling"))
+                    ret constant(&me, 0)
+                }
+            }
+        }
+        ResVariant{_, idx}: {
+            a := temp_obj(c, &me, ty)
+            set_tag(&me, a, idx)
+            ret a
+        }
+        _: {
+            sure false
+            ret -1
+        }
+    }
+}
+
+fn compare_str(me &Lower, op ast.BinOp, a int, b int) int {
+    d := vreg(&me)
+    match op {
+        Eq: {
+            emit(&me, cir.Call{d, id_of(me, "core.str_eq"), [a, b]})
+            ret d
+        }
+        Ne: {
+            emit(&me, cir.Call{d, id_of(me, "core.str_eq"), [a, b]})
+            n := vreg(&me)
+            emit(&me, cir.BoolNot{n, d})
+            ret n
+        }
+        _: {}
+    }
+    emit(&me, cir.Call{d, id_of(me, "core.str_cmp"), [a, b]})
+    zero := constant(&me, 0)
+    r := vreg(&me)
+    emit(&me, cir.Cmp{cc_of(op), r, d, zero, false})
+    ret r
+}
+
+fn slice_expr(l modules.Loaded, c sema.Checked, me &Lower, base int, lo int, hi int, ty int, span diag.Span) int {
+    base_ty := l.a.exprs[base].ty
+    a := expr_value(l, c, &me, base)
+    x := seq(c, &me, base_ty, a)
+    mut start := -1
+    if lo != -1 {
+        start = expr_value(l, c, &me, lo)
+    } else {
+        start = constant(&me, 0)
+    }
+    mut end := x.b
+    if hi != -1 { end = expr_value(l, c, &me, hi) }
+    // 0 <= start <= end <= len, checked as two unsigned comparisons.
+    n_plus := vreg(&me)
+    emit(&me, cir.AddImm{n_plus, x.b, 1})
+    emit(&me, cir.BoundsDyn{end, n_plus, loc_of(span)})
+    end_plus := vreg(&me)
+    emit(&me, cir.AddImm{end_plus, end, 1})
+    emit(&me, cir.BoundsDyn{start, end_plus, loc_of(span)})
+
+    size := types.size(c.types, elem_of(c, base_ty))
+    first := vreg(&me)
+    emit(&me, cir.IndexAddr{first, x.a, start, size})
+    count := vreg(&me)
+    emit(&me, cir.Bin{cir.Sub, count, end, start, num_u64(), loc_of(span)})
+    view := temp_obj(c, &me, ty)
+    zero := constant(&me, 0)
+    store_seq(&me, view, first, count, zero)
+    ret view
+}
+
+fn unary(l modules.Loaded, c sema.Checked, me &Lower, op ast.UnOp, inner int, ty int, span diag.Span) int {
+    s := expr_value(l, c, &me, inner)
+    d := vreg(&me)
+    match op {
+        Not: emit(&me, cir.BoolNot{d, s})
+        BitNot: emit(&me, cir.BitNot{d, s, num_of(c, ty)})
+        Neg: {
+            bits := float_bits(c, ty)
+            if bits != -1 {
+                emit(&me, cir.FNeg{d, s, bits})
+            } else {
+                emit(&me, cir.Neg{d, s, num_of(c, ty), loc_of(span)})
+            }
+        }
+    }
+    ret d
+}
+
+fn argument(l modules.Loaded, c sema.Checked, me &Lower, a int, is_own bool, want int) int {
+    if is_own { ret owned_value(l, c, &me, a) }
+    v := expr_value(l, c, &me, a)
+    have := l.a.exprs[a].ty
+    mut array_to_slice := false
+    match types.kind(c.types, have) {
+        Array{_, _}: {
+            match types.kind(c.types, want) {
+                Slice{_}: array_to_slice = true
+                _: {}
+            }
+        }
+        _: {}
+    }
+    if not array_to_slice { ret v }
+    // A fixed array read as `[]T`: a view that owns nothing.
+    x := seq(c, &me, have, v)
+    view := temp_obj(c, &me, want)
+    zero := constant(&me, 0)
+    store_seq(&me, view, x.a, x.b, zero)
+    ret view
+}
+
+// A call whose target is only known when the program runs.
+fn call_through(l modules.Loaded, c sema.Checked, me &Lower, callee int, callee_ty int, args []int, ty int) int {
+    mut id := -1
+    match types.kind(c.types, callee_ty) {
+        Fn{x}: id = x
+        _: sure false
+    }
+    f := c.types.fns[id]
+    aggregate := types.is_aggregate(c.types, ty)
+    mut vals []int = []
+    mut sret := -1
+    if aggregate {
+        sret = temp_obj(c, &me, ty)
+        push(&vals, sret)
+    }
+    for a, i in args {
+        if i >= len(f.owned) or i >= len(f.params) { break }
+        v := argument(l, c, &me, a, f.owned[i], f.params[i])
+        push(&vals, v)
+    }
+    mut d := -1
+    if ty != types.t_void and not aggregate { d = vreg(&me) }
+    emit(&me, cir.CallInd{d, callee, vals})
+    if aggregate { ret sret }
+    ret d
+}
+
+fn call(l modules.Loaded, c sema.Checked, me &Lower, e int, name str, args []int, via int) int {
+    ty := l.a.exprs[e].ty
+    match l.a.exprs[e].res {
+        ResValue{t}: {
+            mut callee := -1
+            if via != -1 {
+                callee = expr_value(l, c, &me, via)
+            } else {
+                callee = var(l, c, &me, e, name, t)
+            }
+            ret call_through(l, c, &me, callee, t, args, ty)
+        }
+        ResConst{_, _}: ret resolved(l, c, &me, e, ty)
+        ResFunc{full}: ret call_func(l, c, &me, e, full, args, ty)
+        _: ret builtin_call(l, c, &me, e, name, args)
+    }
+}
+
+fn call_func(l modules.Loaded, c sema.Checked, me &Lower, e int, full str, args []int, ty int) int {
+    at := get(c.sigs, full) else -1
+    sig := c.sig_list[at]
+    if len(sig.ext) > 0 { ret call_c(l, c, &me, sig.ext, len(sig.params), sig.variadic, args, ty) }
+    aggregate := types.is_aggregate(c.types, ty)
+    // Results land in a fresh temporary, so `x = f(x)` never overlaps.
+    mut vals []int = []
+    mut sret := -1
+    if aggregate {
+        sret = temp_obj(c, &me, ty)
+        push(&vals, sret)
+    }
+    for a, i in args {
+        if i >= len(sig.owned) or i >= len(sig.params) { break }
+        v := argument(l, c, &me, a, sig.owned[i], sig.params[i])
+        push(&vals, v)
+    }
+    mut first := 0
+    if sret != -1 { first = 1 }
+    check_needs(l, c, &me, full, vals[first..], l.a.exprs[e].span)
+    mut d := -1
+    if ty != types.t_void and not aggregate { d = vreg(&me) }
+    emit(&me, cir.Call{d, id_of(me, full), vals})
+    if aggregate { ret sret }
+    ret d
+}
+
+fn builtin_call(l modules.Loaded, c sema.Checked, me &Lower, e int, name str, args []int) int {
+    ty := l.a.exprs[e].ty
+    span := l.a.exprs[e].span
+    if name == "print" {
+        print_call(l, c, &me, args[0])
+        ret -1
+    }
+    if name == "len" {
+        at := l.a.exprs[args[0]].ty
+        v := expr_value(l, c, &me, args[0])
+        ret seq(c, &me, at, v).b
+    }
+    if name == "copy" {
+        src := expr_value(l, c, &me, args[0])
+        if not types.is_aggregate(c.types, ty) { ret src }
+        dst := temp_obj(c, &me, ty)
+        if needs(c, ty) {
+            copy_into(&me, dst, src, ty)
+        } else {
+            store(c, &me, dst, 0, src, ty)
+        }
+        ret dst
+    }
+    if name == "alloc" {
+        mut elem := -1
+        match types.kind(c.types, ty) {
+            Pointer{p}: elem = p
+            _: sure false
+        }
+        n := expr_value(l, c, &me, args[0])
+        set_site(l, &me, span)
+        d := vreg(&me)
+        emit(&me, cir.Alloc{d, n, types.size(c.types, elem), loc_of(span)})
+        ret d
+    }
+    if name == "free" {
+        p := expr_value(l, c, &me, args[0])
+        set_site(l, &me, span)
+        emit(&me, cir.Free{p})
+        ret -1
+    }
+    if name == "__state" {
+        d := vreg(&me)
+        emit(&me, cir.RtState{d})
+        ret d
+    }
+    if name == "cast" {
+        s := expr_value(l, c, &me, args[0])
+        d := vreg(&me)
+        emit(&me, cir.Mov{d, s})
+        ret d
+    }
+    ret cast_value(l, c, &me, args[0], ty, span)
+}
+
+fn call_c(l modules.Loaded, c sema.Checked, me &Lower, sym str, fixed int, variadic bool, args []int, ty int) int {
+    mut out []cir.CArg = []
+    for a, i in args {
+        mut v := expr_value(l, c, &me, a)
+        mut at := l.a.exprs[a].ty
+        // C's default promotion: a variadic float travels as a double.
+        if variadic and i >= fixed and at == types.t_f32 {
+            d := vreg(&me)
+            emit(&me, cir.FloatCast{d, v, 64})
+            v = d
+            at = types.t_f64
+        }
+        push(&out, cir.CArg{v, float_bits(c, at), int(types.size(c.types, at))})
+    }
+    mut ret_kind := cir.CRetNone
+    match types.kind(c.types, ty) {
+        Void: ret_kind = cir.CRetNone
+        Float{bits}: ret_kind = cir.CRetFloat{bits}
+        _: ret_kind = cir.CRetInt{mem_of(c, ty)}
+    }
+    mut d := -1
+    if ty != types.t_void { d = vreg(&me) }
+    mut fixed_at := -1
+    if variadic { fixed_at = fixed }
+    emit(&me, cir.CallC{d, copy(sym), out, fixed_at, ret_kind})
+    ret d
+}
+
+fn cast_value(l modules.Loaded, c sema.Checked, me &Lower, arg int, to int, span diag.Span) int {
+    from := l.a.exprs[arg].ty
+    s := expr_value(l, c, &me, arg)
+    d := vreg(&me)
+    match types.kind(c.types, from) {
+        Int{_, signed}: {
+            match types.kind(c.types, to) {
+                Int{_, _}: emit(&me, cir.IntCast{d, s, num_of(c, from), num_of(c, to), loc_of(span)})
+                Float{bits}: emit(&me, cir.IntToFloat{d, s, signed, bits})
+                _: emit(&me, cir.Mov{d, s})
+            }
+        }
+        Float{bits}: {
+            match types.kind(c.types, to) {
+                Int{_, _}: emit(&me, cir.FloatToInt{d, s, bits, num_of(c, to), loc_of(span)})
+                Float{b}: {
+                    if bits != b {
+                        emit(&me, cir.FloatCast{d, s, b})
+                    } else {
+                        emit(&me, cir.Mov{d, s})
+                    }
+                }
+                _: emit(&me, cir.Mov{d, s})
+            }
+        }
+        _: emit(&me, cir.Mov{d, s})
+    }
+    ret d
+}
+
+fn fill_fields(l modules.Loaded, c sema.Checked, me &Lower, a int, args []int, fields []types.Field) {
+    for arg, i in args {
+        if i >= len(fields) { break }
+        f := fields[i]
+        v := owned_value(l, c, &me, arg)
+        store(c, &me, a, f.offset, v, f.ty)
+    }
+}
+
+fn struct_lit(l modules.Loaded, c sema.Checked, me &Lower, e int, args []int, ty int) int {
+    a := temp_obj(c, &me, ty)
+    match l.a.exprs[e].res {
+        ResVariant{eid, idx}: {
+            set_tag(&me, a, idx)
+            fill_fields(l, c, &me, a, args, c.types.enums[eid].variants[idx].fields)
+        }
+        _: {
+            match types.kind(c.types, ty) {
+                Struct{id}: fill_fields(l, c, &me, a, args, c.types.structs[id].fields)
+                _: sure false
+            }
+        }
+    }
+    ret a
+}
+
+fn success_tag(c sema.Checked, ty int) int {
+    match types.kind(c.types, ty) {
+        Option{_}: ret 1
+        _: ret 0
+    }
+}
+
+fn payload_of(c sema.Checked, ty int) int {
+    match types.kind(c.types, ty) {
+        Option{p}: ret p
+        Result{ok, _}: ret ok
+        _: {
+            sure false
+            ret -1
+        }
+    }
+}
+
+fn try_expr(l modules.Loaded, c sema.Checked, me &Lower, e int, inner int) int {
+    ty := l.a.exprs[inner].ty
+    span := l.a.exprs[e].span
+    v := owned_value(l, c, &me, inner)
+    tag := vreg(&me)
+    emit(&me, cir.Load{tag, v, 0, cir.X64})
+    ok := new_block(&me)
+    bad := new_block(&me)
+    want := success_tag(c, ty)
+    eq_branch(&me, tag, want, ok, bad)
+
+    switch(&me, bad)
+    if me.is_main {
+        run_defers(l, c, &me, 0)
+        emit(&me, cir.BufStr{"error: "})
+        match types.kind(c.types, ty) {
+            Result{_, err}: {
+                x := load(c, &me, v, types.tag_size, err)
+                print_value(c, &me, x, err)
+            }
+            _: emit(&me, cir.BufStr{"none"})
+        }
+        emit(&me, cir.BufStr{" at {l.base_names[span.file]}:{span.line}:{span.col}\n"})
+        emit(&me, cir.Flush{2})
+        emit(&me, cir.Exit{1})
+        finish(&me, cir.Unreachable)
+    } else {
+        match types.kind(c.types, ty) {
+            Result{_, err}: {
+                set_tag(&me, me.sret, 1)
+                x := load(c, &me, v, types.tag_size, err)
+                store(c, &me, me.sret, types.tag_size, x, err)
+            }
+            _: set_tag(&me, me.sret, 0)
+        }
+        run_defers(l, c, &me, 0)
+        finish(&me, cir.Ret{-1})
+    }
+
+    switch(&me, ok)
+    payload := payload_of(c, ty)
+    if payload == types.t_void { ret -1 }
+    ret load(c, &me, v, types.tag_size, payload)
+}
+
+fn else_expr(l modules.Loaded, c sema.Checked, me &Lower, inner int, handler ast.ElseKind, payload int) int {
+    ty := l.a.exprs[inner].ty
+    v := owned_value(l, c, &me, inner)
+    tag := vreg(&me)
+    emit(&me, cir.Load{tag, v, 0, cir.X64})
+    ok := new_block(&me)
+    bad := new_block(&me)
+    after := new_block(&me)
+    want := success_tag(c, ty)
+    eq_branch(&me, tag, want, ok, bad)
+
+    // One result location, written on whichever path runs.
+    mut result := -1
+    if payload != types.t_void {
+        if types.is_aggregate(c.types, payload) {
+            result = temp_obj(c, &me, payload)
+        } else {
+            result = vreg(&me)
+        }
+    }
+
+    switch(&me, ok)
+    if result != -1 {
+        x := load(c, &me, v, types.tag_size, payload)
+        write_result(c, &me, result, x, payload)
+    }
+    finish(&me, cir.Jmp{after})
+
+    switch(&me, bad)
+    match handler {
+        ElseValue{d}: {
+            drop_unused_error(c, &me, v, ty)
+            x := owned_value(l, c, &me, d)
+            write_result(c, &me, result, x, payload)
+            finish(&me, cir.Jmp{after})
+        }
+        ElseBlock{binder, b}: {
+            push(&me.defers, [])
+            bound := copy(binder) else ast.Binding{"", no_span()}
+            mut used := false
+            if len(bound.name) > 0 {
+                match types.kind(c.types, ty) {
+                    Result{_, err}: {
+                        used = true
+                        x := load(c, &me, v, types.tag_size, err)
+                        d := new_local(c, &me, x, err)
+                        put(&me.vars, copy(bound.name), d)
+                        if needs(c, err) {
+                            flag := new_flag(&me)
+                            put(&me.flags, copy(bound.name), flag)
+                            n := len(me.defers)
+                            push(&me.defers[n - 1], CleanDrop{d, err, flag})
+                        }
+                    }
+                    _: {}
+                }
+            }
+            if not used { drop_unused_error(c, &me, v, ty) }
+            block(l, c, &me, b)
+            _ = pop(&me.defers)
+            finish(&me, cir.Unreachable)
+        }
+    }
+    switch(&me, after)
+    ret result
+}
+
+// Nobody asked for the error in `v`, so it ends here.
+fn drop_unused_error(c sema.Checked, me &Lower, v int, ty int) {
+    match types.kind(c.types, ty) {
+        Result{_, err}: {
+            if needs(c, err) {
+                a := offset_addr(&me, v, types.tag_size)
+                drop_now(&me, a, err)
+            }
+        }
+        _: {}
+    }
+}
+
+fn write_result(c sema.Checked, me &Lower, r int, x int, ty int) {
+    if types.is_aggregate(c.types, ty) {
+        store(c, &me, r, 0, x, ty)
+    } else {
+        emit(&me, cir.Mov{r, x})
+    }
+}
+
+fn pieces(l modules.Loaded, c sema.Checked, me &Lower, parts []ast.Part) []Piece {
+    mut out []Piece = []
+    for p in parts {
+        match p {
+            PartLit{s}: push(&out, PieceLit{copy(s)})
+            PartExpr{e}: {
+                v := expr_value(l, c, &me, e)
+                push(&out, PieceVal{v, l.a.exprs[e].ty})
+            }
+        }
+    }
+    ret out
+}
+
+fn emit_pieces(c sema.Checked, me &Lower, ps []Piece) {
+    for p in ps {
+        match p {
+            PieceLit{s}: emit(&me, cir.BufStr{copy(s)})
+            PieceVal{v, t}: print_value(c, &me, v, t)
+        }
+    }
+}
+
+fn print_call(l modules.Loaded, c sema.Checked, me &Lower, a int) {
+    // Evaluate first: a trap in an argument must not leave half a line.
+    mut ps []Piece = []
+    match l.a.exprs[a].kind {
+        Str{s}: push(&ps, PieceLit{copy(s)})
+        Interp{parts}: ps = pieces(l, c, &me, parts)
+        _: {
+            v := expr_value(l, c, &me, a)
+            push(&ps, PieceVal{v, l.a.exprs[a].ty})
+        }
+    }
+    emit_pieces(c, &me, ps)
+    emit(&me, cir.BufStr{"\n"})
+    emit(&me, cir.Flush{1})
+}
+
+fn lit(me &Lower, s str) {
+    emit(&me, cir.BufStr{copy(s)})
+}
+
+fn print_fields(c sema.Checked, me &Lower, name str, addr int, fields []types.Field) {
+    lit(&me, name)
+    if len(fields) == 0 { ret }
+    lit(&me, "{{")
+    for f, i in fields {
+        if i > 0 { lit(&me, ", ") }
+        x := load(c, &me, addr, f.offset, f.ty)
+        print_value(c, &me, x, f.ty)
+    }
+    lit(&me, "}")
+}
+
+fn print_value(c sema.Checked, me &Lower, v int, ty int) {
+    match types.kind(c.types, ty) {
+        Int{_, signed}: emit(&me, cir.BufInt{v, signed})
+        Pointer{_}: emit(&me, cir.BufInt{v, false})
+        Bool: emit(&me, cir.BufBool{v})
+        Float{bits}: emit(&me, cir.BufFloat{v, bits})
+        Struct{id}: print_fields(c, &me, c.types.structs[id].name, v, c.types.structs[id].fields)
+        Enum{id}: {
+            def := c.types.enums[id]
+            tag := vreg(&me)
+            emit(&me, cir.Load{tag, v, 0, cir.X64})
+            after := new_block(&me)
+            for vr, i in def.variants {
+                body := new_block(&me)
+                next := new_block(&me)
+                eq_branch(&me, tag, i, body, next)
+                switch(&me, body)
+                print_fields(c, &me, vr.name, v, vr.fields)
+                finish(&me, cir.Jmp{after})
+                switch(&me, next)
+            }
+            finish(&me, cir.Jmp{after})
+            switch(&me, after)
+        }
+        Str: {
+            x := seq(c, &me, ty, v)
+            emit(&me, cir.BufPtr{x.a, x.b})
+        }
+        Array{_, _}: print_list(c, &me, v, ty)
+        Slice{_}: print_list(c, &me, v, ty)
+        Option{p}: {
+            some := new_block(&me)
+            nothing := new_block(&me)
+            after := new_block(&me)
+            tag := vreg(&me)
+            emit(&me, cir.Load{tag, v, 0, cir.X64})
+            eq_branch(&me, tag, 1, some, nothing)
+            switch(&me, some)
+            x := load(c, &me, v, types.tag_size, p)
+            print_value(c, &me, x, p)
+            finish(&me, cir.Jmp{after})
+            switch(&me, nothing)
+            lit(&me, "none")
+            finish(&me, cir.Jmp{after})
+            switch(&me, after)
+        }
+        Result{ok, err}: {
+            good := new_block(&me)
+            bad := new_block(&me)
+            after := new_block(&me)
+            tag := vreg(&me)
+            emit(&me, cir.Load{tag, v, 0, cir.X64})
+            eq_branch(&me, tag, 0, good, bad)
+            switch(&me, good)
+            if ok == types.t_void {
+                lit(&me, "ok")
+            } else {
+                x := load(c, &me, v, types.tag_size, ok)
+                print_value(c, &me, x, ok)
+            }
+            finish(&me, cir.Jmp{after})
+            switch(&me, bad)
+            lit(&me, "fail(")
+            y := load(c, &me, v, types.tag_size, err)
+            print_value(c, &me, y, err)
+            lit(&me, ")")
+            finish(&me, cir.Jmp{after})
+            switch(&me, after)
+        }
+        Fn{_}: lit(&me, "<fn>")
+        _: sure false
+    }
+}
+
+fn print_list(c sema.Checked, me &Lower, v int, ty int) {
+    elem := elem_of(c, ty)
+    lit(&me, "[")
+    x := seq(c, &me, ty, v)
+    counter := constant(&me, 0)
+    size := types.size(c.types, elem)
+    lb := counted_open(&me, counter, x.b)
+    first := new_block(&me)
+    sep := new_block(&me)
+    item := new_block(&me)
+    eq_branch(&me, counter, 0, first, sep)
+    switch(&me, sep)
+    lit(&me, ", ")
+    finish(&me, cir.Jmp{item})
+    switch(&me, first)
+    finish(&me, cir.Jmp{item})
+    switch(&me, item)
+    d := vreg(&me)
+    emit(&me, cir.IndexAddr{d, x.a, counter, size})
+    y := load(c, &me, d, 0, elem)
+    print_value(c, &me, y, elem)
+    counted_close(&me, lb, counter)
+    lit(&me, "]")
+}
+
+fn short_circuit(l modules.Loaded, c sema.Checked, me &Lower, e int) int {
+    d := vreg(&me)
+    t := new_block(&me)
+    f := new_block(&me)
+    after := new_block(&me)
+    branch(l, c, &me, e, t, f)
+    switch(&me, t)
+    emit(&me, cir.Const{d, 1})
+    finish(&me, cir.Jmp{after})
+    switch(&me, f)
+    emit(&me, cir.Const{d, 0})
+    finish(&me, cir.Jmp{after})
+    switch(&me, after)
+    ret d
+}
+
+fn is_comparison(op ast.BinOp) bool {
+    match op {
+        Eq: ret true
+        Ne: ret true
+        Lt: ret true
+        Le: ret true
+        Gt: ret true
+        Ge: ret true
+        _: ret false
+    }
+}
+
+// Its value is already on the page or shown under its own name.
+fn plain(l modules.Loaded, e int) bool {
+    match l.a.exprs[e].kind {
+        Int{_}: ret true
+        Float{_}: ret true
+        Char{_}: ret true
+        Bool{_}: ret true
+        Str{_}: ret true
+        Var{_}: ret true
+        RetVal: ret true
+        _: ret false
+    }
+}
+
+// Produces a value nobody owns yet.
+fn is_fresh(l modules.Loaded, e int) bool {
+    match l.a.exprs[e].kind {
+        Call{_, _, _, _, _, _}: ret true
+        StructLit{_, _, _, _, _}: ret true
+        ArrayLit{_}: ret true
+        Interp{_}: ret true
+        Try{_}: ret true
+        Else{_, _}: ret true
+        _: ret false
+    }
+}
+
+fn through_pointer(l modules.Loaded, c sema.Checked, e int) bool {
+    match l.a.exprs[e].kind {
+        Deref{_}: ret true
+        Field{b, _, _}: ret types.is_ptr(c.types, l.a.exprs[b].ty) or through_pointer(l, c, b)
+        Index{b, _}: ret types.is_ptr(c.types, l.a.exprs[b].ty) or through_pointer(l, c, b)
+        _: ret false
+    }
+}
+
+fn any_temporaries(l modules.Loaded, c sema.Checked, list []int) bool {
+    for x in list {
+        if makes_temporaries(l, c, x) { ret true }
+    }
+    ret false
+}
+
+fn makes_temporaries(l modules.Loaded, c sema.Checked, e int) bool {
+    if types.needs_drop(c.types, l.a.exprs[e].ty) and is_fresh(l, e) { ret true }
+    match l.a.exprs[e].kind {
+        Unary{_, x}: ret makes_temporaries(l, c, x)
+        Deref{x}: ret makes_temporaries(l, c, x)
+        AddrOf{x}: ret makes_temporaries(l, c, x)
+        Field{x, _, _}: ret makes_temporaries(l, c, x)
+        Try{x}: ret makes_temporaries(l, c, x)
+        Binary{_, a, b}: ret makes_temporaries(l, c, a) or makes_temporaries(l, c, b)
+        Index{x, i}: ret makes_temporaries(l, c, x) or makes_temporaries(l, c, i)
+        Slice{x, _, _}: ret makes_temporaries(l, c, x)
+        Call{_, _, _, _, args, _}: ret any_temporaries(l, c, args)
+        StructLit{_, _, _, _, args}: ret any_temporaries(l, c, args)
+        ArrayLit{items}: ret any_temporaries(l, c, items)
+        Else{x, _}: ret makes_temporaries(l, c, x)
+        _: ret false
+    }
+}
+
+fn arith_of(op ast.BinOp) cir.Arith {
+    match op {
+        Add: ret cir.Add
+        Sub: ret cir.Sub
+        Mul: ret cir.Mul
+        Div: ret cir.Div
+        Rem: ret cir.Rem
+        BitAnd: ret cir.And
+        BitOr: ret cir.Or
+        BitXor: ret cir.Xor
+        Shl: ret cir.Shl
+        Shr: ret cir.Shr
+        _: {
+            sure false
+            ret cir.Add
+        }
+    }
+}
+
+fn cc_of(op ast.BinOp) cir.Cc {
+    match op {
+        Eq: ret cir.Eq
+        Ne: ret cir.Ne
+        Lt: ret cir.Lt
+        Le: ret cir.Le
+        Gt: ret cir.Gt
+        Ge: ret cir.Ge
+        _: {
+            sure false
+            ret cir.Eq
+        }
+    }
+}

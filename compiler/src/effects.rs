@@ -246,7 +246,7 @@ fn count_stmt(s: &Stmt, n: &mut usize) {
 pub struct Report {
     /// How many checks only run in check mode.
     pub slow: usize,
-    known: HashMap<String, u8>,
+    pub known: HashMap<String, u8>,
 }
 
 impl Report {
@@ -295,8 +295,10 @@ pub fn check(units: &[Unit], c: &Checked, diags: &mut Vec<Diag>) -> Report {
                 }
                 Some(d) => d,
             };
-            if known[&n.full] != now {
-                known.insert(n.full.clone(), now);
+            // Only ever adds, so two functions with one name cannot flip it back and forth forever.
+            let had = known[&n.full];
+            if had | now != had {
+                known.insert(n.full.clone(), had | now);
                 changed = true;
             }
         }

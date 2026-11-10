@@ -67,6 +67,20 @@ def main():
             tmp_link.symlink_to(bin_dir / name)
             os.replace(tmp_link, link)
 
+    # The compiler written in Claw, built by itself: `clawc`.
+    clawc = ROOT / "selfhost/build/s3/clawc"
+    if clawc.exists():
+        shutil.copy2(clawc, version_dir / "clawc.tmp")
+        os.replace(version_dir / "clawc.tmp", version_dir / "clawc")
+        for name in (f"clawc-{short}", "clawc"):
+            link = bin_dir / name
+            tmp_link = bin_dir / (name + ".tmp")
+            if tmp_link.is_symlink() or tmp_link.exists():
+                tmp_link.unlink()
+            tmp_link.symlink_to(version_dir / "clawc")
+            os.replace(tmp_link, link)
+        print(f"installed clawc (the compiler written in Claw) as clawc-{short}")
+
     installed = sorted(p.name for p in (HOME / "versions").iterdir())
     print(f"installed claw {full} as claw-{short}; versions on disk: {', '.join(installed)}")
 

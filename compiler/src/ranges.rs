@@ -500,6 +500,18 @@ pub fn run(f: &mut Func) {
     for p in &f.params {
         s.r[*p as usize] = Some(FULL);
     }
+    // An instruction with several results (`CaptureTake`) is not evaluated below: anything goes.
+    for b in &f.blocks {
+        for i in &b.insts {
+            if i.def().is_none() {
+                i.each(&mut |v, def| {
+                    if def {
+                        s.r[v as usize] = Some(FULL);
+                    }
+                });
+            }
+        }
+    }
     // Rise to a fixed point, giving up on bounds that keep moving...
     let mut changes = vec![0u8; f.nvregs as usize];
     for _ in 0..24 {

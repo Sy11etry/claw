@@ -1,0 +1,1554 @@
+// CIR to ARM64, the way compiler/src/codegen.rs does it for code the optimizer has not touched:
+// every virtual register is a stack slot, each instruction loads its operands, computes, stores
+// back. That is `regalloc::naive`: register `v` lives at `spill_base + v * 8`, and the paths for
+// registers from `allocate` are gone.
+//
+// Internal calling convention: every value (floats as raw bits, aggregates as addresses) goes in
+// x0-x7, then on the stack. The result comes back in x0; an aggregate result is written through a
+// hidden first argument.
+
+use arm64
+use cir
+
+// Names the code below uses more than a hundred times each.
+const x0 u32 = 0
+const x1 u32 = 1
+const x2 u32 = 2
+const x9 u32 = 9
+const x10 u32 = 10
+const x11 u32 = 11
+const x12 u32 = 12
+const x13 u32 = 13
+const x14 u32 = 14
+const x16 u32 = 16
+const x19 u32 = 19
+const x20 u32 = 20
+const x21 u32 = 21
+const d0 u32 = 0
+const d1 u32 = 1
+const fp u32 = 29
+const lr u32 = 30
+const sp u32 = 31
+const xzr u32 = 31
+const b_op u32 = 0x1400_0000
+const bl_op u32 = 0x9400_0000
+
+const imp_write int = 0
+const imp_exit int = 1
+const imp_snprintf int = 2
+const imp_memcpy int = 3
+const imp_malloc int = 4
+const imp_free int = 5
+
+// Output buffer: 8 bytes of length, then the bytes.
+const buf_cap u64 = 65536
+// Stay well inside the default 8 MB main-thread stack.
+const max_frame u64 = 7340032
+// Set while the buffer is collecting a string rather than output.
+const capture_flag u64 = 65544
+// Counters for `--alloc-stats`, the leak check used by the test suite.
+const alloc_count u64 = 65552
+const free_count u64 = 65560
+// Words shared with the contract guard and the memory checker.
+const state_at u64 = 65568
+const state_size u64 = 128
+const site_word u64 = 8
+
+type Target = TgUser{f int} | TgTrap | TgRtAlloc | TgRtFree | TgRtTake | TgFlush | TgBufStr |
+    TgBufInt | TgBufUint | TgBufBool | TgBufFloat | TgImport{i int}
+
+// (index of an instruction, value) pairs.
+pub type Ref { at int, x int }
+
+pub type Sym { name str, pos int }
+
+type CallSite { at int, t Target }
+
+// `data_refs`: (index of `adrp`, followed by `add`; offset into rodata).
+// `bss_refs`: index of `adrp`, followed by `add`.
+// `code_refs`: (index of `adrp`, followed by `add`; position in `code`).
+// `got_refs`: (index of `adrp`, followed by `ldr`; GOT slot).
+// `symbols`: name and code position in instructions.
+pub type Object {
+    code []u32,
+    rodata []u8,
+    data_refs []Ref,
+    bss_refs []int,
+    code_refs []Ref,
+    got_refs []Ref,
+    imports []str,
+    symbols []Sym,
+    entry int,
+    bss_size u64,
+}
+
+pub type GenErr { msg str }
+
+type Gen {
+    code []u32,
+    rodata []u8,
+    data_refs []Ref,
+    bss_refs []int,
+    got_refs []Ref,
+    // Instructions waiting for a `b`/`bl` displacement.
+    calls []CallSite,
+    // `FuncAddr`: (index of `adrp`, the function).
+    func_refs []Ref,
+    files []str,
+    imports []str,
+    // The function that did not fit; empty when none.
+    too_large str,
+}
+
+// Where one C argument travels.
+type Slot = SlotX{r u32} | SlotD{r u32} | SlotStack{off u32}
+
+type Assigned { slots []Slot, stack u32 }
+
+// Apple's ARM64 rules: 8 integer and 8 float registers, then the stack with each
+// value at its natural size. Everything variadic goes on the stack in 8-byte slots.
+fn assign_c(args []cir.CArg, variadic int) Assigned +mem {
+    mut x u32 = 0
+    mut d u32 = 0
+    mut stack u32 = 0
+    mut out []Slot = []
+    for a, i in args {
+        if variadic != -1 and i >= variadic {
+            stack = (stack + 7) & ~7
+            push(&out, SlotStack{stack})
+            stack += 8
+        } else if a.float != -1 and d < 8 {
+            push(&out, SlotD{d})
+            d += 1
+        } else if a.float == -1 and x < 8 {
+            push(&out, SlotX{x})
+            x += 1
+        } else {
+            mut size := u32(a.size)
+            if size < 1 { size = 1 }
+            stack = (stack + size - 1) & ~(size - 1)
+            push(&out, SlotStack{stack})
+            stack += size
+        }
+    }
+    ret Assigned{out, stack}
+}
+
+fn int_cond(cc cir.Cc, unsigned bool) arm64.Cond {
+    match cc {
+        Eq: ret arm64.Eq
+        Ne: ret arm64.Ne
+        Lt: {
+            if unsigned { ret arm64.Lo }
+            ret arm64.Lt
+        }
+        Le: {
+            if unsigned { ret arm64.Ls }
+            ret arm64.Le
+        }
+        Gt: {
+            if unsigned { ret arm64.Hi }
+            ret arm64.Gt
+        }
+        Ge: {
+            if unsigned { ret arm64.Hs }
+            ret arm64.Ge
+        }
+    }
+}
+
+// These conditions are all false for NaN, except `!=`.
+fn float_cond(cc cir.Cc) arm64.Cond {
+    match cc {
+        Eq: ret arm64.Eq
+        Ne: ret arm64.Ne
+        Lt: ret arm64.Mi
+        Le: ret arm64.Ls
+        Gt: ret arm64.Gt
+        Ge: ret arm64.Ge
+    }
+}
+
+type Trap = Overflow | DivZero | Shift | Bounds | Convert | AllocSize | OutOfMemory | ContractMath
+
+fn trap_text(t Trap) str {
+    match t {
+        Overflow: ret "integer overflow"
+        DivZero: ret "division by zero"
+        Shift: ret "shift out of range"
+        Bounds: ret "index out of bounds"
+        Convert: ret "value does not fit the target type"
+        AllocSize: ret "invalid allocation size"
+        OutOfMemory: ret "out of memory"
+        ContractMath: ret "a number in a contract is too large even for exact arithmetic"
+    }
+}
+
+type Pending { at int, block int, is_cond bool }
+
+type TrapAt { at int, kind Trap, loc cir.Loc }
+
+// `objects`: where each stack object starts. `spill_base`: where the slots start.
+type Frame { objects []u64, spill_base u32 }
+
+// The `%.15g` and `%.7g` format strings in rodata.
+type Fmts { fmt64 int, fmt32 int }
+
+fn emit(g &Gen, w u32) {
+    push(&g.code, w)
+}
+
+fn here(g Gen) int {
+    ret len(g.code)
+}
+
+fn call(g &Gen, base u32, t Target) {
+    at := here(g)
+    push(&g.calls, CallSite{at, t})
+    emit(&g, base)
+}
+
+// Every bit pattern is an unsigned number here; Rust's `i64` argument became `u64`.
+fn mov_imm(g &Gen, rd u32, u u64) {
+    if u <= 0xFFFF {
+        emit(&g, arm64.movz(rd, u32(u), 0))
+        ret
+    }
+    if (u >> 63) == 1 and ~u <= 0xFFFF {
+        emit(&g, arm64.movn(rd, u32(~u), 0))
+        ret
+    }
+    mut first := true
+    for hw in 0..4 {
+        part := u32((u >> u64(hw * 16)) & 0xFFFF)
+        if part == 0 { continue }
+        if first {
+            emit(&g, arm64.movz(rd, part, u32(hw)))
+            first = false
+        } else {
+            emit(&g, arm64.movk(rd, part, u32(hw)))
+        }
+    }
+}
+
+fn slot_off(fr Frame, v int) u32 {
+    ret fr.spill_base + u32(v) * 8
+}
+
+fn load(g &Gen, fr Frame, r u32, v int) {
+    off := slot_off(fr, v)
+    if off <= 32760 {
+        emit(&g, arm64.ldr(r, sp, off))
+    } else {
+        mov_imm(&g, x16, u64(off))
+        emit(&g, arm64.ldr_reg(r, sp, x16))
+    }
+}
+
+fn store(g &Gen, fr Frame, r u32, v int) {
+    off := slot_off(fr, v)
+    if off <= 32760 {
+        emit(&g, arm64.str_x(r, sp, off))
+    } else {
+        mov_imm(&g, x16, u64(off))
+        emit(&g, arm64.str_reg(r, sp, x16))
+    }
+}
+
+type BaseOff { base u32, off u32 }
+
+// Far slots are reached through x16.
+fn float_slot(g &Gen, off u32) BaseOff {
+    if off <= 16380 { ret BaseOff{sp, off} }
+    mov_imm(&g, x16, u64(off))
+    emit(&g, arm64.add_ext(x16, sp, x16))
+    ret BaseOff{x16, 0}
+}
+
+fn fload(g &Gen, fr Frame, r u32, v int, bits int) {
+    at := float_slot(&g, slot_off(fr, v))
+    if bits == 64 {
+        emit(&g, arm64.ldr_d(r, at.base, at.off))
+    } else {
+        emit(&g, arm64.ldr_s(r, at.base, at.off))
+    }
+}
+
+fn fstore(g &Gen, fr Frame, r u32, v int, bits int) {
+    at := float_slot(&g, slot_off(fr, v))
+    if bits == 64 {
+        emit(&g, arm64.str_d(r, at.base, at.off))
+    } else {
+        emit(&g, arm64.str_s(r, at.base, at.off))
+    }
+}
+
+fn compare(g &Gen, fr Frame, a int, b int) {
+    load(&g, fr, x9, a)
+    load(&g, fr, x10, b)
+    emit(&g, arm64.cmp(x9, x10))
+}
+
+fn fcompare(g &Gen, fr Frame, a int, b int, bits int) {
+    fload(&g, fr, d0, a, bits)
+    fload(&g, fr, d1, b, bits)
+    emit(&g, arm64.fcmp(d0, d1, bits))
+}
+
+fn obj_addr(g &Gen, fr Frame, r u32, obj int) {
+    off := fr.objects[obj]
+    if off < 4096 {
+        emit(&g, arm64.add_imm(r, sp, u32(off)))
+    } else {
+        mov_imm(&g, x16, off)
+        emit(&g, arm64.add_ext(r, sp, x16))
+    }
+}
+
+fn data_addr(g &Gen, r u32, off int) {
+    at := here(g)
+    push(&g.data_refs, Ref{at, off})
+    emit(&g, arm64.adrp(r, 0))
+    emit(&g, arm64.add_imm(r, r, 0))
+}
+
+fn bss_addr(g &Gen, r u32) {
+    at := here(g)
+    push(&g.bss_refs, at)
+    emit(&g, arm64.adrp(r, 0))
+    emit(&g, arm64.add_imm(r, r, 0))
+}
+
+fn add_str(g &Gen, s str) int {
+    off := len(g.rodata)
+    for c in s {
+        push(&g.rodata, c)
+    }
+    ret off
+}
+
+// The same bytes followed by a NUL.
+fn add_cstr(g &Gen, s str) int {
+    off := add_str(&g, s)
+    push(&g.rodata, 0)
+    ret off
+}
+
+fn import_stub(g &Gen, slot int) int {
+    pos := here(g)
+    push(&g.got_refs, Ref{pos, slot})
+    emit(&g, arm64.adrp(x16, 0))
+    emit(&g, arm64.ldr(x16, x16, 0))
+    emit(&g, arm64.br(x16))
+    ret pos
+}
+
+// `__claw_flush(x0 = fd)` writes out the buffer, retrying short writes.
+fn rt_flush(g &Gen) int {
+    pos := here(g)
+    // Filling up while building a string: there is nowhere to flush to.
+    msg := "trap: interpolated string is too long (64 KB)\n"
+    off := add_str(&g, msg)
+    bss_addr(&g, x9)
+    mov_imm(&g, x16, capture_flag)
+    emit(&g, arm64.add(x9, x9, x16))
+    emit(&g, arm64.ldr(x10, x9, 0))
+    emit(&g, arm64.cbz(x10, 5))
+    data_addr(&g, x0, off)
+    emit(&g, arm64.movz(x1, u32(len(msg)), 0))
+    call(&g, b_op, TgTrap)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -48))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.stp(x19, x20, sp, 16))
+    emit(&g, arm64.str_x(x21, sp, 32))
+    emit(&g, arm64.mov(x21, x0))
+    bss_addr(&g, x9)
+    emit(&g, arm64.ldr(x20, x9, 0))
+    emit(&g, arm64.str_x(xzr, x9, 0))
+    emit(&g, arm64.add_imm(x19, x9, 8))
+    emit(&g, arm64.cbz(x20, 10))
+    emit(&g, arm64.mov(x0, x21))
+    emit(&g, arm64.mov(x1, x19))
+    emit(&g, arm64.mov(x2, x20))
+    call(&g, bl_op, TgImport{imp_write})
+    emit(&g, arm64.cmp_imm(x0, 0))
+    emit(&g, arm64.b_cond(arm64.Le, 4))
+    emit(&g, arm64.add(x19, x19, x0))
+    emit(&g, arm64.sub(x20, x20, x0))
+    emit(&g, arm64.b_at(b_op, -9))
+    emit(&g, arm64.ldp(x19, x20, sp, 16))
+    emit(&g, arm64.ldr(x21, sp, 32))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 48))
+    emit(&g, arm64.ret_x())
+    ret pos
+}
+
+// `__claw_buf_str(x0 = ptr, x1 = len)` appends to the output buffer.
+fn rt_buf_str(g &Gen) int {
+    pos := here(g)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -32))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.stp(x19, x20, sp, 16))
+    emit(&g, arm64.mov(x19, x0))
+    emit(&g, arm64.add(x20, x0, x1))
+    // loop:
+    emit(&g, arm64.cmp(x19, x20))
+    emit(&g, arm64.b_cond(arm64.Eq, 17))
+    bss_addr(&g, x9)
+    emit(&g, arm64.ldr(x10, x9, 0))
+    emit(&g, arm64.movz(x11, u32(buf_cap >> 16), 1))
+    emit(&g, arm64.cmp(x10, x11))
+    emit(&g, arm64.b_cond(arm64.Ne, 4))
+    emit(&g, arm64.movz(x0, 1, 0))
+    call(&g, bl_op, TgFlush)
+    emit(&g, arm64.b_at(b_op, -10))
+    emit(&g, arm64.add_imm(x12, x9, 8))
+    emit(&g, arm64.ldrb(x13, x19, 0))
+    emit(&g, arm64.add_imm(x19, x19, 1))
+    emit(&g, arm64.strb_reg(x13, x12, x10))
+    emit(&g, arm64.add_imm(x10, x10, 1))
+    emit(&g, arm64.str_x(x10, x9, 0))
+    emit(&g, arm64.b_at(b_op, -17))
+    // done:
+    emit(&g, arm64.ldp(x19, x20, sp, 16))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 32))
+    emit(&g, arm64.ret_x())
+    ret pos
+}
+
+// Adds 1 to a counter; touches only x9, x10 and x16.
+fn bump_counter(g &Gen, off u64) {
+    bss_addr(&g, x9)
+    mov_imm(&g, x16, off)
+    emit(&g, arm64.add(x9, x9, x16))
+    emit(&g, arm64.ldr(x10, x9, 0))
+    emit(&g, arm64.add_imm(x10, x10, 1))
+    emit(&g, arm64.str_x(x10, x9, 0))
+}
+
+fn stat_line(g &Gen, text str, off u64) {
+    s := add_str(&g, text)
+    data_addr(&g, x0, s)
+    emit(&g, arm64.movz(x1, u32(len(text)), 0))
+    call(&g, bl_op, TgBufStr)
+    bss_addr(&g, x9)
+    mov_imm(&g, x16, off)
+    emit(&g, arm64.add(x9, x9, x16))
+    emit(&g, arm64.ldr(x0, x9, 0))
+    call(&g, bl_op, TgBufInt)
+}
+
+fn report_alloc_stats(g &Gen) {
+    stat_line(&g, "allocs=", alloc_count)
+    stat_line(&g, " frees=", free_count)
+    s := add_str(&g, "\n")
+    data_addr(&g, x0, s)
+    emit(&g, arm64.movz(x1, 1, 0))
+    call(&g, bl_op, TgBufStr)
+    emit(&g, arm64.movz(x0, 2, 0))
+    call(&g, bl_op, TgFlush)
+}
+
+// `__claw_take()` hands back the buffer as heap bytes: x0 = pointer, x1 = length.
+fn rt_take(g &Gen) int {
+    pos := here(g)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -32))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.stp(x19, x20, sp, 16))
+    bss_addr(&g, x19)
+    mov_imm(&g, x16, capture_flag)
+    emit(&g, arm64.add(x9, x19, x16))
+    emit(&g, arm64.str_x(xzr, x9, 0))
+    emit(&g, arm64.ldr(x20, x19, 0))
+    emit(&g, arm64.str_x(xzr, x19, 0))
+    emit(&g, arm64.cbz(x20, 9))
+    emit(&g, arm64.mov(x0, x20))
+    call(&g, bl_op, TgRtAlloc)
+    emit(&g, arm64.cbnz(x0, 2))
+    emit(&g, arm64.brk(3))
+    emit(&g, arm64.add_imm(x1, x19, 8))
+    emit(&g, arm64.mov(x2, x20))
+    call(&g, bl_op, TgImport{imp_memcpy})
+    emit(&g, arm64.b_at(b_op, 2))
+    // Empty: no allocation at all.
+    emit(&g, arm64.movz(x0, 0, 0))
+    emit(&g, arm64.mov(x1, x20))
+    emit(&g, arm64.ldp(x19, x20, sp, 16))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 32))
+    emit(&g, arm64.ret_x())
+    ret pos
+}
+
+// `__claw_buf_int(x0)`; digits are built backwards on the stack.
+fn rt_buf_num(g &Gen, signed bool) int {
+    pos := here(g)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -48))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.add_imm(x9, sp, 48))
+    emit(&g, arm64.movz(x10, 10, 0))
+    emit(&g, arm64.mov(x11, x0))
+    if signed {
+        emit(&g, arm64.cmp_imm(x0, 0))
+        emit(&g, arm64.b_cond(arm64.Ge, 2))
+        // The magnitude of i64::MIN wraps to 2^63, correct when read unsigned.
+        emit(&g, arm64.neg(x11, x0))
+    }
+    emit(&g, arm64.udiv(x12, x11, x10))
+    emit(&g, arm64.msub(x13, x12, x10, x11))
+    emit(&g, arm64.add_imm(x13, x13, 48))
+    emit(&g, arm64.sub_imm(x9, x9, 1))
+    emit(&g, arm64.strb(x13, x9, 0))
+    emit(&g, arm64.mov(x11, x12))
+    emit(&g, arm64.cbnz(x11, -6))
+    if signed {
+        emit(&g, arm64.cmp_imm(x0, 0))
+        emit(&g, arm64.b_cond(arm64.Ge, 4))
+        emit(&g, arm64.movz(x13, 45, 0))
+        emit(&g, arm64.sub_imm(x9, x9, 1))
+        emit(&g, arm64.strb(x13, x9, 0))
+    }
+    emit(&g, arm64.mov(x0, x9))
+    emit(&g, arm64.add_imm(x1, sp, 48))
+    emit(&g, arm64.sub(x1, x1, x9))
+    call(&g, bl_op, TgBufStr)
+    emit(&g, arm64.ldp_post(fp, lr, sp, 48))
+    emit(&g, arm64.ret_x())
+    ret pos
+}
+
+// `__claw_buf_bool(x0 = 0 or 1)`
+fn rt_buf_bool(g &Gen) int {
+    pos := here(g)
+    f := add_str(&g, "false")
+    t := add_str(&g, "true")
+    emit(&g, arm64.cbnz(x0, 5))
+    data_addr(&g, x0, f)
+    emit(&g, arm64.movz(x1, 5, 0))
+    emit(&g, arm64.b_at(b_op, 4))
+    data_addr(&g, x0, t)
+    emit(&g, arm64.movz(x1, 4, 0))
+    call(&g, b_op, TgBufStr)
+    ret pos
+}
+
+// `__claw_buf_float(d0 = value, x2 = format)`, via libSystem's snprintf.
+// On Apple ARM64 the variadic double is passed on the stack.
+fn rt_buf_float(g &Gen) int {
+    pos := here(g)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -16))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.sub_imm(sp, sp, 80))
+    emit(&g, arm64.str_d(d0, sp, 0))
+    emit(&g, arm64.add_imm(x0, sp, 16))
+    emit(&g, arm64.movz(x1, 64, 0))
+    call(&g, bl_op, TgImport{imp_snprintf})
+    emit(&g, arm64.mov(x1, x0))
+    emit(&g, arm64.add_imm(x0, sp, 16))
+    call(&g, bl_op, TgBufStr)
+    emit(&g, arm64.mov_sp(sp, fp))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 16))
+    emit(&g, arm64.ret_x())
+    ret pos
+}
+
+// `__claw_trap(x0 = ptr, x1 = len)` reports to stderr and exits with 101.
+fn rt_trap(g &Gen) int {
+    pos := here(g)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -16))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.mov(x2, x1))
+    emit(&g, arm64.mov(x1, x0))
+    emit(&g, arm64.movz(x0, 2, 0))
+    call(&g, bl_op, TgImport{imp_write})
+    emit(&g, arm64.movz(x0, 101, 0))
+    call(&g, bl_op, TgImport{imp_exit})
+    emit(&g, arm64.brk(1))
+    ret pos
+}
+
+fn func(g &Gen, f cir.CirFunc, fmts Fmts) {
+    mut outgoing u32 = 0
+    for blk in f.blocks {
+        for x in blk.insts {
+            match x {
+                Call{_, _, args}: outgoing = more(outgoing, args)
+                CallInd{_, _, args}: outgoing = more(outgoing, args)
+                CallC{_, _, args, variadic, _}: {
+                    need_stack := (assign_c(args, variadic).stack + 7) & ~7
+                    if need_stack > outgoing { outgoing = need_stack }
+                }
+                _: {}
+            }
+        }
+    }
+    // `naive`: no saved registers, and one slot for every register.
+    spill_base := outgoing
+    mut off := u64(spill_base + u32(f.nvregs) * 8)
+    mut objects []u64 = []
+    for o in f.objects {
+        off = (off + o.align - 1) & ~(o.align - 1)
+        push(&objects, off)
+        off += o.size
+    }
+    full := (off + 15) & ~15
+    if full >= max_frame {
+        g.too_large = copy(f.name)
+        ret
+    }
+    size := u32(full)
+    fr := Frame{objects, spill_base}
+
+    emit(&g, arm64.stp_pre(fp, lr, sp, -16))
+    emit(&g, arm64.mov_sp(fp, sp))
+    if size >= 4096 {
+        emit(&g, arm64.sub_imm_lsl12(sp, sp, size >> 12))
+    }
+    if size & 0xFFF != 0 {
+        emit(&g, arm64.sub_imm(sp, sp, size & 0xFFF))
+    }
+    for p, i in f.params {
+        n := u32(i)
+        if n < 8 {
+            store(&g, fr, n, p)
+        } else {
+            emit(&g, arm64.ldr(x9, fp, 16 + (n - 8) * 8))
+            store(&g, fr, x9, p)
+        }
+    }
+
+    mut block_pos []int = []
+    for _ in f.blocks {
+        push(&block_pos, 0)
+    }
+    mut pending []Pending = []
+    mut traps []TrapAt = []
+
+    for blk, idx in f.blocks {
+        block_pos[idx] = here(g)
+        for x in blk.insts {
+            inst(&g, fr, x, &traps, fmts)
+        }
+        next := idx + 1
+        match blk.term {
+            Jmp{t}: {
+                if t != next {
+                    at := here(g)
+                    push(&pending, Pending{at, t, false})
+                    emit(&g, b_op)
+                }
+            }
+            Br{c, t, fb}: {
+                load(&g, fr, x9, c)
+                if t == next {
+                    at := here(g)
+                    push(&pending, Pending{at, fb, true})
+                    emit(&g, arm64.cbz(x9, 0))
+                } else {
+                    at := here(g)
+                    push(&pending, Pending{at, t, true})
+                    emit(&g, arm64.cbnz(x9, 0))
+                    if fb != next {
+                        at2 := here(g)
+                        push(&pending, Pending{at2, fb, false})
+                        emit(&g, b_op)
+                    }
+                }
+            }
+            Ret{v}: {
+                if v != -1 {
+                    load(&g, fr, x0, v)
+                }
+                emit(&g, arm64.mov_sp(sp, fp))
+                emit(&g, arm64.ldp_post(fp, lr, sp, 16))
+                emit(&g, arm64.ret_x())
+            }
+            Unreachable: emit(&g, arm64.brk(2))
+        }
+    }
+
+    for p in pending {
+        disp := block_pos[p.block] - p.at
+        if p.is_cond {
+            patch_cond(&g, p.at, disp, f.name)
+        } else {
+            g.code[p.at] = arm64.b_at(g.code[p.at], i32(disp))
+        }
+    }
+
+    // Cold paths go after the function so the hot path falls straight through.
+    for t in traps {
+        disp := here(g) - t.at
+        patch_cond(&g, t.at, disp, f.name)
+        msg := "trap: {trap_text(t.kind)} at {g.files[t.loc.file]}:{t.loc.line}:{t.loc.col}\n"
+        s := add_str(&g, msg)
+        data_addr(&g, x0, s)
+        emit(&g, arm64.movz(x1, u32(len(msg)), 0))
+        call(&g, bl_op, TgTrap)
+    }
+}
+
+fn more(outgoing u32, args []int) u32 {
+    if len(args) > 8 {
+        need_stack := u32(len(args) - 8) * 8
+        if need_stack > outgoing { ret need_stack }
+    }
+    ret outgoing
+}
+
+fn patch_cond(g &Gen, at int, disp int, name str) {
+    if disp < -262144 or disp >= 262144 {
+        g.too_large = copy(name)
+        ret
+    }
+    g.code[at] |= (u32(disp) & 0x7FFFF) << 5
+}
+
+fn trap_if(g &Gen, c arm64.Cond, kind Trap, loc cir.Loc, traps &[]TrapAt) {
+    at := here(g)
+    push(&traps, TrapAt{at, kind, loc})
+    emit(&g, arm64.b_cond(c, 0))
+}
+
+// Computes `p + off` into x9.
+fn addr_x9(g &Gen, fr Frame, p int, off u64) {
+    load(&g, fr, x9, p)
+    if off == 0 { ret }
+    if off < 4096 {
+        emit(&g, arm64.add_imm(x9, x9, u32(off)))
+    } else {
+        mov_imm(&g, x16, off)
+        emit(&g, arm64.add(x9, x9, x16))
+    }
+}
+
+fn inst(g &Gen, fr Frame, i cir.Inst, traps &[]TrapAt, fmts Fmts) {
+    match i {
+        Const{d, v}: {
+            mov_imm(&g, x9, u64(v))
+            store(&g, fr, x9, d)
+        }
+        Mov{d, s}: {
+            load(&g, fr, x9, s)
+            store(&g, fr, x9, d)
+        }
+        Bin{op, d, a, b, num, loc}: {
+            load(&g, fr, x9, a)
+            load(&g, fr, x10, b)
+            bin(&g, op, num, loc, &traps, x11, x9, x10)
+            store(&g, fr, x11, d)
+        }
+        Neg{d, s, num, loc}: {
+            load(&g, fr, x9, s)
+            if not num.checked {
+                emit(&g, arm64.neg(x11, x9))
+            } else if num.bits == 64 {
+                emit(&g, arm64.negs(x11, x9))
+                trap_if(&g, arm64.Vs, Overflow, loc, &traps)
+            } else {
+                emit(&g, arm64.neg(x11, x9))
+                fit_check(&g, num, loc, &traps)
+            }
+            store(&g, fr, x11, d)
+        }
+        BitNot{d, s, num}: {
+            load(&g, fr, x9, s)
+            emit(&g, arm64.mvn(x11, x9))
+            mask_unsigned(&g, num)
+            store(&g, fr, x11, d)
+        }
+        BoolNot{d, s}: {
+            load(&g, fr, x9, s)
+            emit(&g, arm64.eor_1(x11, x9))
+            store(&g, fr, x11, d)
+        }
+        Cmp{cc, d, a, b, unsigned}: {
+            compare(&g, fr, a, b)
+            emit(&g, arm64.cset(x11, arm64.cond_code(int_cond(cc, unsigned))))
+            store(&g, fr, x11, d)
+        }
+        FBin{op, d, a, b, bits}: {
+            fload(&g, fr, d0, a, bits)
+            fload(&g, fr, d1, b, bits)
+            match op {
+                FAdd: emit(&g, arm64.fadd(d0, d0, d1, bits))
+                FSub: emit(&g, arm64.fsub(d0, d0, d1, bits))
+                FMul: emit(&g, arm64.fmul(d0, d0, d1, bits))
+                FDiv: emit(&g, arm64.fdiv(d0, d0, d1, bits))
+            }
+            fstore(&g, fr, d0, d, bits)
+        }
+        FNeg{d, s, bits}: {
+            fload(&g, fr, d0, s, bits)
+            emit(&g, arm64.fneg(d0, d0, bits))
+            fstore(&g, fr, d0, d, bits)
+        }
+        FCmp{cc, d, a, b, bits}: {
+            fcompare(&g, fr, a, b, bits)
+            emit(&g, arm64.cset(x11, arm64.cond_code(float_cond(cc))))
+            store(&g, fr, x11, d)
+        }
+        IntCast{d, s, from, to, loc}: {
+            load(&g, fr, x9, s)
+            int_cast(&g, from, to, loc, &traps)
+            store(&g, fr, x11, d)
+        }
+        IntToFloat{d, s, signed, bits}: {
+            load(&g, fr, x9, s)
+            if signed {
+                emit(&g, arm64.scvtf(d0, x9, bits))
+            } else {
+                emit(&g, arm64.ucvtf(d0, x9, bits))
+            }
+            fstore(&g, fr, d0, d, bits)
+        }
+        FloatToInt{d, s, bits, to, loc}: {
+            fload(&g, fr, d0, s, bits)
+            if bits == 32 {
+                emit(&g, arm64.fcvt_s_to_d(d0, d0))
+            }
+            if to.checked {
+                float_range_check(&g, to, loc, &traps)
+            }
+            if to.signed {
+                emit(&g, arm64.fcvtzs(x11, d0))
+            } else {
+                emit(&g, arm64.fcvtzu(x11, d0))
+            }
+            store(&g, fr, x11, d)
+        }
+        FloatCast{d, s, to_bits}: {
+            mut from := 64
+            if to_bits == 64 { from = 32 }
+            fload(&g, fr, d0, s, from)
+            if to_bits == 64 {
+                emit(&g, arm64.fcvt_s_to_d(d0, d0))
+            } else {
+                emit(&g, arm64.fcvt_d_to_s(d0, d0))
+            }
+            fstore(&g, fr, d0, d, to_bits)
+        }
+        Call{d, f, args}: {
+            stack_args(&g, fr, args)
+            reg_args(&g, fr, args)
+            call(&g, bl_op, TgUser{f})
+            if d != -1 { store(&g, fr, x0, d) }
+        }
+        CallInd{d, callee, args}: {
+            stack_args(&g, fr, args)
+            load(&g, fr, x16, callee)
+            reg_args(&g, fr, args)
+            emit(&g, arm64.blr(x16))
+            if d != -1 { store(&g, fr, x0, d) }
+        }
+        FuncAddr{d, f}: {
+            at := here(g)
+            push(&g.func_refs, Ref{at, f})
+            emit(&g, arm64.adrp(x9, 0))
+            emit(&g, arm64.add_imm(x9, x9, 0))
+            store(&g, fr, x9, d)
+        }
+        ObjAddr{d, obj}: {
+            obj_addr(&g, fr, x9, obj)
+            store(&g, fr, x9, d)
+        }
+        AddImm{d, s, imm}: {
+            if imm < 4096 {
+                load(&g, fr, x9, s)
+                emit(&g, arm64.add_imm(x9, x9, u32(imm)))
+            } else {
+                addr_x9(&g, fr, s, imm)
+            }
+            store(&g, fr, x9, d)
+        }
+        Load{d, p, off, mem}: {
+            if is_x64(mem) and off <= 32760 and off % 8 == 0 {
+                load(&g, fr, x9, p)
+                emit(&g, arm64.ldr(x10, x9, u32(off)))
+                store(&g, fr, x10, d)
+                ret
+            }
+            addr_x9(&g, fr, p, off)
+            match mem {
+                I8: emit(&g, arm64.ldrsb(x10, x9))
+                I16: emit(&g, arm64.ldrsh(x10, x9))
+                I32: emit(&g, arm64.ldrsw(x10, x9))
+                U8: emit(&g, arm64.ldrb(x10, x9, 0))
+                U16: emit(&g, arm64.ldrh(x10, x9))
+                U32: emit(&g, arm64.ldr_w(x10, x9))
+                X64: emit(&g, arm64.ldr(x10, x9, 0))
+            }
+            store(&g, fr, x10, d)
+        }
+        Store{p, off, s, mem}: {
+            if is_x64(mem) and off <= 32760 and off % 8 == 0 {
+                load(&g, fr, x9, p)
+                load(&g, fr, x10, s)
+                emit(&g, arm64.str_x(x10, x9, u32(off)))
+                ret
+            }
+            addr_x9(&g, fr, p, off)
+            load(&g, fr, x10, s)
+            match mem {
+                I8: emit(&g, arm64.strb(x10, x9, 0))
+                U8: emit(&g, arm64.strb(x10, x9, 0))
+                I16: emit(&g, arm64.strh(x10, x9))
+                U16: emit(&g, arm64.strh(x10, x9))
+                I32: emit(&g, arm64.str_w(x10, x9))
+                U32: emit(&g, arm64.str_w(x10, x9))
+                X64: emit(&g, arm64.str_x(x10, x9, 0))
+            }
+        }
+        MemCopy{dst, src, size}: mem_copy(&g, fr, dst, src, size)
+        MemCopyDyn{dst, src, n}: {
+            load(&g, fr, x0, dst)
+            load(&g, fr, x1, src)
+            load(&g, fr, x2, n)
+            call(&g, bl_op, TgImport{imp_memcpy})
+        }
+        BoundsDyn{idx, n, loc}: {
+            compare(&g, fr, idx, n)
+            trap_if(&g, arm64.Hs, Bounds, loc, &traps)
+        }
+        BufPtr{p, n}: {
+            load(&g, fr, x0, p)
+            load(&g, fr, x1, n)
+            call(&g, bl_op, TgBufStr)
+        }
+        CaptureStart: {
+            bss_addr(&g, x9)
+            mov_imm(&g, x16, capture_flag)
+            emit(&g, arm64.add(x9, x9, x16))
+            emit(&g, arm64.movz(x10, 1, 0))
+            emit(&g, arm64.str_x(x10, x9, 0))
+        }
+        CaptureTake{ptr, n}: {
+            call(&g, bl_op, TgRtTake)
+            store(&g, fr, x0, ptr)
+            store(&g, fr, x1, n)
+        }
+        IndexAddr{d, base, idx, size}: {
+            load(&g, fr, x9, base)
+            load(&g, fr, x10, idx)
+            if size != 0 and size & (size - 1) == 0 and size <= 16 {
+                emit(&g, arm64.add_lsl(x11, x9, x10, trailing_zeros(size)))
+            } else {
+                mov_imm(&g, x12, size)
+                emit(&g, arm64.mul(x12, x10, x12))
+                emit(&g, arm64.add(x11, x9, x12))
+            }
+            store(&g, fr, x11, d)
+        }
+        Bounds{idx, n, loc}: {
+            load(&g, fr, x9, idx)
+            if n < 4096 {
+                emit(&g, arm64.cmp_imm(x9, u32(n)))
+            } else {
+                mov_imm(&g, x10, n)
+                emit(&g, arm64.cmp(x9, x10))
+            }
+            // Unsigned compare: a negative index looks huge.
+            trap_if(&g, arm64.Hs, Bounds, loc, &traps)
+        }
+        Alloc{d, n, elem, loc}: {
+            load(&g, fr, x9, n)
+            emit(&g, arm64.cmp_imm(x9, 0))
+            trap_if(&g, arm64.Lt, AllocSize, loc, &traps)
+            mov_imm(&g, x10, elem)
+            emit(&g, arm64.umulh(x12, x9, x10))
+            emit(&g, arm64.cmp_imm(x12, 0))
+            trap_if(&g, arm64.Ne, AllocSize, loc, &traps)
+            emit(&g, arm64.mul(x0, x9, x10))
+            call(&g, bl_op, TgRtAlloc)
+            emit(&g, arm64.cmp_imm(x0, 0))
+            trap_if(&g, arm64.Eq, OutOfMemory, loc, &traps)
+            store(&g, fr, x0, d)
+        }
+        Free{p}: {
+            load(&g, fr, x0, p)
+            call(&g, bl_op, TgRtFree)
+        }
+        StrAddr{d, text}: {
+            off := add_cstr(&g, text)
+            data_addr(&g, x9, off)
+            store(&g, fr, x9, d)
+        }
+        CallC{d, sym, args, variadic, ret_kind}: call_c(&g, fr, d, sym, args, variadic, ret_kind)
+        BufStr{text}: {
+            off := add_str(&g, text)
+            data_addr(&g, x0, off)
+            mov_imm(&g, x1, u64(len(text)))
+            call(&g, bl_op, TgBufStr)
+        }
+        BufInt{s, signed}: {
+            load(&g, fr, x0, s)
+            if signed {
+                call(&g, bl_op, TgBufInt)
+            } else {
+                call(&g, bl_op, TgBufUint)
+            }
+        }
+        BufBool{s}: {
+            load(&g, fr, x0, s)
+            call(&g, bl_op, TgBufBool)
+        }
+        BufFloat{s, bits}: {
+            fload(&g, fr, d0, s, bits)
+            if bits == 32 {
+                emit(&g, arm64.fcvt_s_to_d(d0, d0))
+                data_addr(&g, x2, fmts.fmt32)
+            } else {
+                data_addr(&g, x2, fmts.fmt64)
+            }
+            call(&g, bl_op, TgBufFloat)
+        }
+        WideBin{op, dlo, dhi, alo, ahi, blo, bhi, loc}: {
+            load(&g, fr, x9, alo)
+            load(&g, fr, x10, ahi)
+            load(&g, fr, x11, blo)
+            load(&g, fr, x12, bhi)
+            match op {
+                WideAdd: {
+                    emit(&g, arm64.adds(x13, x9, x11))
+                    emit(&g, arm64.adcs(x14, x10, x12))
+                    trap_if(&g, arm64.Vs, ContractMath, loc, &traps)
+                }
+                WideSub: {
+                    emit(&g, arm64.subs(x13, x9, x11))
+                    emit(&g, arm64.sbcs(x14, x10, x12))
+                    trap_if(&g, arm64.Vs, ContractMath, loc, &traps)
+                }
+                WideMul: {
+                    // Exact only while both sides fit in 64 signed bits.
+                    emit(&g, arm64.cmp_asr(x10, x9, 63))
+                    trap_if(&g, arm64.Ne, ContractMath, loc, &traps)
+                    emit(&g, arm64.cmp_asr(x12, x11, 63))
+                    trap_if(&g, arm64.Ne, ContractMath, loc, &traps)
+                    emit(&g, arm64.mul(x13, x9, x11))
+                    emit(&g, arm64.smulh(x14, x9, x11))
+                }
+            }
+            store(&g, fr, x13, dlo)
+            store(&g, fr, x14, dhi)
+        }
+        WideCmp{cc, d, alo, ahi, blo, bhi}: {
+            // `a > b` is `b < a`: only LT and GE are valid after subs + sbcs.
+            if swaps(cc) {
+                load(&g, fr, x9, blo)
+                load(&g, fr, x10, bhi)
+                load(&g, fr, x11, alo)
+                load(&g, fr, x12, ahi)
+            } else {
+                load(&g, fr, x9, alo)
+                load(&g, fr, x10, ahi)
+                load(&g, fr, x11, blo)
+                load(&g, fr, x12, bhi)
+            }
+            mut cond := arm64.Lt
+            match cc {
+                Eq: cond = eq_test(&g, arm64.Eq)
+                Ne: cond = eq_test(&g, arm64.Ne)
+                Lt: cond = order_test(&g, arm64.Lt)
+                Gt: cond = order_test(&g, arm64.Lt)
+                Le: cond = order_test(&g, arm64.Ge)
+                Ge: cond = order_test(&g, arm64.Ge)
+            }
+            emit(&g, arm64.cset(x13, arm64.cond_code(cond)))
+            store(&g, fr, x13, d)
+        }
+        RtState{d}: {
+            bss_addr(&g, x9)
+            mov_imm(&g, x16, state_at)
+            emit(&g, arm64.add(x9, x9, x16))
+            store(&g, fr, x9, d)
+        }
+        SetSite{text}: {
+            off := add_cstr(&g, text)
+            data_addr(&g, x9, off)
+            bss_addr(&g, x10)
+            mov_imm(&g, x16, state_at + site_word)
+            emit(&g, arm64.add(x10, x10, x16))
+            emit(&g, arm64.str_x(x9, x10, 0))
+        }
+        Flush{fd}: {
+            emit(&g, arm64.movz(x0, u32(fd), 0))
+            call(&g, bl_op, TgFlush)
+        }
+        Exit{code}: {
+            emit(&g, arm64.movz(x0, u32(code), 0))
+            call(&g, bl_op, TgImport{imp_exit})
+        }
+    }
+}
+
+fn is_x64(m cir.Mem) bool {
+    match m {
+        X64: ret true
+        _: ret false
+    }
+}
+
+fn swaps(cc cir.Cc) bool {
+    match cc {
+        Gt: ret true
+        Le: ret true
+        _: ret false
+    }
+}
+
+fn eq_test(g &Gen, c arm64.Cond) arm64.Cond {
+    emit(&g, arm64.eor(x13, x9, x11))
+    emit(&g, arm64.eor(x14, x10, x12))
+    emit(&g, arm64.orr(x13, x13, x14))
+    emit(&g, arm64.cmp_imm(x13, 0))
+    ret c
+}
+
+fn order_test(g &Gen, c arm64.Cond) arm64.Cond {
+    emit(&g, arm64.subs(x13, x9, x11))
+    emit(&g, arm64.sbcs(x14, x10, x12))
+    ret c
+}
+
+fn trailing_zeros(v u64) u32 {
+    mut n u32 = 0
+    mut x := v
+    for x & 1 == 0 {
+        x >>= 1
+        n += 1
+    }
+    ret n
+}
+
+// The stack arguments of a call, x9 at a time.
+fn stack_args(g &Gen, fr Frame, args []int) {
+    for a, n in args {
+        if n < 8 { continue }
+        load(&g, fr, x9, a)
+        emit(&g, arm64.str_x(x9, sp, u32(n - 8) * 8))
+    }
+}
+
+fn reg_args(g &Gen, fr Frame, args []int) {
+    for a, n in args {
+        if n >= 8 { break }
+        load(&g, fr, u32(n), a)
+    }
+}
+
+fn call_c(g &Gen, fr Frame, d int, sym str, args []cir.CArg, variadic int, ret_kind cir.CRet) {
+    assigned := assign_c(args, variadic)
+    for a, i in args {
+        match assigned.slots[i] {
+            SlotStack{off}: {
+                load(&g, fr, x9, a.v)
+                emit(&g, arm64.add_imm(x10, sp, off))
+                mut size := a.size
+                if variadic != -1 and i >= variadic { size = 8 }
+                if size == 1 {
+                    emit(&g, arm64.strb(x9, x10, 0))
+                } else if size == 2 {
+                    emit(&g, arm64.strh(x9, x10))
+                } else if size == 4 {
+                    emit(&g, arm64.str_w(x9, x10))
+                } else {
+                    emit(&g, arm64.str_x(x9, x10, 0))
+                }
+            }
+            _: {}
+        }
+    }
+    for a, i in args {
+        match assigned.slots[i] {
+            SlotX{r}: load(&g, fr, r, a.v)
+            SlotD{r}: {
+                mut bits := 64
+                if a.float != -1 { bits = a.float }
+                fload(&g, fr, r, a.v, bits)
+            }
+            SlotStack{_}: {}
+        }
+    }
+    want := "_{sym}"
+    mut index := -1
+    for name, n in g.imports {
+        if name == want {
+            index = n
+            break
+        }
+    }
+    sure index != -1
+    call(&g, bl_op, TgImport{index})
+    // C leaves the upper bits of a narrow result undefined.
+    match ret_kind {
+        CRetNone: {}
+        CRetFloat{bits}: {
+            if d != -1 { fstore(&g, fr, d0, d, bits) }
+        }
+        CRetInt{m}: {
+            match m {
+                I8: emit(&g, arm64.sbfx(x0, x0, 8))
+                I16: emit(&g, arm64.sbfx(x0, x0, 16))
+                I32: emit(&g, arm64.sbfx(x0, x0, 32))
+                U8: emit(&g, arm64.ubfx(x0, x0, 8))
+                U16: emit(&g, arm64.ubfx(x0, x0, 16))
+                U32: emit(&g, arm64.ubfx(x0, x0, 32))
+                X64: {}
+            }
+            if d != -1 { store(&g, fr, x0, d) }
+        }
+    }
+}
+
+fn mem_copy(g &Gen, fr Frame, dst int, src int, size u64) {
+    if size > 64 {
+        load(&g, fr, x0, dst)
+        load(&g, fr, x1, src)
+        mov_imm(&g, x2, size)
+        call(&g, bl_op, TgImport{imp_memcpy})
+        ret
+    }
+    load(&g, fr, x9, dst)
+    load(&g, fr, x10, src)
+    mut off u32 = 0
+    for (size - u64(off)) >= 8 {
+        emit(&g, arm64.ldr(x11, x10, off))
+        emit(&g, arm64.str_x(x11, x9, off))
+        off += 8
+    }
+    for u64(off) < size {
+        emit(&g, arm64.ldrb(x11, x10, off))
+        emit(&g, arm64.strb(x11, x9, off))
+        off += 1
+    }
+}
+
+// Traps if x11 is outside the signed range of `num`, which is narrower than 64 bits.
+fn fit_check(g &Gen, num cir.Num, loc cir.Loc, traps &[]TrapAt) {
+    emit(&g, arm64.sbfx(x12, x11, u32(num.bits)))
+    emit(&g, arm64.cmp(x12, x11))
+    trap_if(&g, arm64.Ne, Overflow, loc, &traps)
+}
+
+fn mask_unsigned(g &Gen, num cir.Num) {
+    if not num.signed and num.bits < 64 {
+        emit(&g, arm64.ubfx(x11, x11, u32(num.bits)))
+    }
+}
+
+// `normalize`, for a result that is not in x11.
+fn normalize_in(g &Gen, num cir.Num, loc cir.Loc, traps &[]TrapAt, r u32) {
+    if r != x11 {
+        emit(&g, arm64.mov(x11, r))
+    }
+    normalize(&g, num, loc, &traps)
+    if r != x11 {
+        emit(&g, arm64.mov(r, x11))
+    }
+}
+
+// After an operation on 64-bit registers: narrow signed types trap, unsigned wrap.
+fn normalize(g &Gen, num cir.Num, loc cir.Loc, traps &[]TrapAt) {
+    if num.signed {
+        if num.bits < 64 and num.checked {
+            fit_check(&g, num, loc, &traps)
+        }
+    } else {
+        mask_unsigned(&g, num)
+    }
+}
+
+fn int_cast(g &Gen, from cir.Num, to cir.Num, loc cir.Loc, traps &[]TrapAt) {
+    if to.signed and not to.checked {
+        emit(&g, arm64.mov(x11, x9))
+    } else if to.signed {
+        if not from.signed and from.bits == 64 {
+            // A u64 with the top bit set is negative when read as signed.
+            emit(&g, arm64.cmp_imm(x9, 0))
+            trap_if(&g, arm64.Lt, Convert, loc, &traps)
+        }
+        if to.bits < 64 {
+            emit(&g, arm64.sbfx(x12, x9, u32(to.bits)))
+            emit(&g, arm64.cmp(x12, x9))
+            trap_if(&g, arm64.Ne, Convert, loc, &traps)
+        }
+        emit(&g, arm64.mov(x11, x9))
+    } else if to.bits < 64 {
+        emit(&g, arm64.ubfx(x11, x9, u32(to.bits)))
+    } else {
+        emit(&g, arm64.mov(x11, x9))
+    }
+}
+
+// 2.0^k as a bit pattern.
+fn pow2_bits(k int) u64 {
+    ret u64(1023 + k) << 52
+}
+
+// Traps unless d0 converts to `to`: not NaN and within range after truncation.
+fn float_range_check(g &Gen, to cir.Num, loc cir.Loc, traps &[]TrapAt) {
+    emit(&g, arm64.fcmp(d0, d0, 64))
+    trap_if(&g, arm64.Vs, Convert, loc, &traps)
+    bits := to.bits
+    sign u64 = 0x8000_0000_0000_0000
+    mut hi u64 = 0
+    mut lo u64 = 0
+    mut lo_inclusive := false
+    if to.signed {
+        hi = pow2_bits(bits - 1)
+        if bits == 64 {
+            lo = hi | sign
+            lo_inclusive = true
+        } else {
+            // -hi - 1: one more than the magnitude of the smallest value.
+            lo = hi | sign | (u64(1) << u64(52 - (bits - 1)))
+        }
+    } else {
+        hi = pow2_bits(bits)
+        lo = 0xBFF0_0000_0000_0000 // -1.0
+    }
+    mov_imm(&g, x16, hi)
+    emit(&g, arm64.fmov_d_x(d1, x16))
+    emit(&g, arm64.fcmp(d0, d1, 64))
+    trap_if(&g, arm64.Ge, Convert, loc, &traps)
+    mov_imm(&g, x16, lo)
+    emit(&g, arm64.fmov_d_x(d1, x16))
+    emit(&g, arm64.fcmp(d0, d1, 64))
+    if lo_inclusive {
+        trap_if(&g, arm64.Lt, Convert, loc, &traps)
+    } else {
+        trap_if(&g, arm64.Le, Convert, loc, &traps)
+    }
+}
+
+// The registers may coincide; x11 and x12 are free to use.
+fn bin(g &Gen, op cir.Arith, num cir.Num, loc cir.Loc, traps &[]TrapAt, rd u32, ra u32, rb u32) {
+    wide_signed := num.signed and num.bits == 64 and num.checked
+    match op {
+        Add: {
+            if wide_signed {
+                emit(&g, arm64.adds(rd, ra, rb))
+                trap_if(&g, arm64.Vs, Overflow, loc, &traps)
+            } else {
+                emit(&g, arm64.add(rd, ra, rb))
+                normalize_in(&g, num, loc, &traps, rd)
+            }
+        }
+        Sub: {
+            if wide_signed {
+                emit(&g, arm64.subs(rd, ra, rb))
+                trap_if(&g, arm64.Vs, Overflow, loc, &traps)
+            } else {
+                emit(&g, arm64.sub(rd, ra, rb))
+                normalize_in(&g, num, loc, &traps, rd)
+            }
+        }
+        Mul: {
+            if wide_signed {
+                emit(&g, arm64.smulh(x12, ra, rb))
+                emit(&g, arm64.mul(rd, ra, rb))
+                emit(&g, arm64.cmp_asr(x12, rd, 63))
+                trap_if(&g, arm64.Ne, Overflow, loc, &traps)
+            } else {
+                emit(&g, arm64.mul(rd, ra, rb))
+                normalize_in(&g, num, loc, &traps, rd)
+            }
+        }
+        Div: {
+            if num.checked {
+                emit(&g, arm64.cmp_imm(rb, 0))
+                trap_if(&g, arm64.Eq, DivZero, loc, &traps)
+            }
+            if num.signed {
+                if num.bits == 64 and num.checked {
+                    // MIN / -1 is the only quotient that does not fit in 64 bits.
+                    // Negating the dividend overflows exactly when it is MIN.
+                    emit(&g, arm64.cmn_imm(rb, 1))
+                    emit(&g, arm64.b_cond(arm64.Ne, 3))
+                    emit(&g, arm64.negs(x12, ra))
+                    trap_if(&g, arm64.Vs, Overflow, loc, &traps)
+                }
+                emit(&g, arm64.sdiv(rd, ra, rb))
+                normalize_in(&g, num, loc, &traps, rd)
+            } else {
+                emit(&g, arm64.udiv(rd, ra, rb))
+            }
+        }
+        Rem: {
+            if num.checked {
+                emit(&g, arm64.cmp_imm(rb, 0))
+                trap_if(&g, arm64.Eq, DivZero, loc, &traps)
+            }
+            if num.signed {
+                emit(&g, arm64.sdiv(x12, ra, rb))
+            } else {
+                emit(&g, arm64.udiv(x12, ra, rb))
+            }
+            emit(&g, arm64.msub(rd, x12, rb, ra))
+        }
+        And: emit(&g, arm64.and_x(rd, ra, rb))
+        Or: emit(&g, arm64.orr(rd, ra, rb))
+        Xor: emit(&g, arm64.eor(rd, ra, rb))
+        Shl: {
+            if num.checked {
+                emit(&g, arm64.cmp_imm(rb, u32(num.bits)))
+                trap_if(&g, arm64.Hs, Shift, loc, &traps)
+            }
+            if wide_signed {
+                emit(&g, arm64.lsl(x11, ra, rb))
+                emit(&g, arm64.asr(x12, x11, rb))
+                emit(&g, arm64.cmp(x12, ra))
+                trap_if(&g, arm64.Ne, Overflow, loc, &traps)
+                emit(&g, arm64.mov(rd, x11))
+            } else {
+                emit(&g, arm64.lsl(rd, ra, rb))
+                normalize_in(&g, num, loc, &traps, rd)
+            }
+        }
+        Shr: {
+            if num.checked {
+                emit(&g, arm64.cmp_imm(rb, u32(num.bits)))
+                trap_if(&g, arm64.Hs, Shift, loc, &traps)
+            }
+            if num.signed {
+                emit(&g, arm64.asr(rd, ra, rb))
+            } else {
+                emit(&g, arm64.lsr(rd, ra, rb))
+            }
+        }
+    }
+}
+
+fn add_symbol(symbols &[]Sym, name str, pos int) {
+    push(&symbols, Sym{copy(name), pos})
+}
+
+pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +mem {
+    mut imports []str = []
+    for name in ["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"] {
+        push(&imports, copy(name))
+    }
+    for f in m.funcs {
+        if f.dead { continue }
+        for blk in f.blocks {
+            for x in blk.insts {
+                match x {
+                    CallC{_, sym, _, _, _}: {
+                        name := "_{sym}"
+                        if not has(imports, name) {
+                            push(&imports, name)
+                        }
+                    }
+                    _: {}
+                }
+            }
+        }
+    }
+    mut g := Gen{[], [], [], [], [], [], [], copy(files), copy(imports), ""}
+    mut symbols []Sym = []
+
+    fmts := Fmts{add_str(&g, "%.15g\0"), add_str(&g, "%.7g\0")}
+
+    mut stubs []int = []
+    for s in 0..len(imports) {
+        push(&stubs, import_stub(&g, s))
+    }
+    no_check := cir.CheckRt{-1, -1, -1}
+    rtc := m.check else no_check
+    // Every allocation passes through these two, so a later version can record them.
+    rt_alloc := here(g)
+    if alloc_stats { bump_counter(&g, alloc_count) }
+    if rtc.alloc != -1 {
+        call(&g, b_op, TgUser{rtc.alloc})
+    } else {
+        call(&g, b_op, TgImport{imp_malloc})
+    }
+    rt_free := here(g)
+    if alloc_stats { bump_counter(&g, free_count) }
+    if rtc.alloc != -1 {
+        call(&g, b_op, TgUser{rtc.free})
+    } else {
+        call(&g, b_op, TgImport{imp_free})
+    }
+    trap := rt_trap(&g)
+    flush := rt_flush(&g)
+    take := rt_take(&g)
+    buf_str := rt_buf_str(&g)
+    buf_int := rt_buf_num(&g, true)
+    buf_uint := rt_buf_num(&g, false)
+    buf_bool := rt_buf_bool(&g)
+    buf_float := rt_buf_float(&g)
+    add_symbol(&symbols, "___claw_alloc", rt_alloc)
+    add_symbol(&symbols, "___claw_free", rt_free)
+    add_symbol(&symbols, "___claw_trap", trap)
+    add_symbol(&symbols, "___claw_flush", flush)
+    add_symbol(&symbols, "___claw_take", take)
+    add_symbol(&symbols, "___claw_buf_str", buf_str)
+    add_symbol(&symbols, "___claw_buf_int", buf_int)
+    add_symbol(&symbols, "___claw_buf_uint", buf_uint)
+    add_symbol(&symbols, "___claw_buf_bool", buf_bool)
+    add_symbol(&symbols, "___claw_buf_float", buf_float)
+
+    entry := here(g)
+    add_symbol(&symbols, "___claw_entry", entry)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -16))
+    emit(&g, arm64.mov_sp(fp, sp))
+    call(&g, bl_op, TgUser{m.main})
+    if rtc.alloc != -1 {
+        call(&g, bl_op, TgUser{rtc.finish})
+    }
+    if alloc_stats { report_alloc_stats(&g) }
+    emit(&g, arm64.movz(x0, 0, 0))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 16))
+    emit(&g, arm64.ret_x())
+
+    mut func_pos []int = []
+    for f in m.funcs {
+        pos := here(g)
+        push(&func_pos, pos)
+        if f.dead { continue }
+        add_symbol(&symbols, "_{f.name}", pos)
+        func(&g, f, fmts)
+    }
+
+    mut sites []CallSite = []
+    swap(&sites, &g.calls)
+    for c in sites {
+        mut dest := 0
+        match c.t {
+            TgUser{f}: dest = func_pos[f]
+            TgTrap: dest = trap
+            TgRtAlloc: dest = rt_alloc
+            TgRtFree: dest = rt_free
+            TgRtTake: dest = take
+            TgFlush: dest = flush
+            TgBufStr: dest = buf_str
+            TgBufInt: dest = buf_int
+            TgBufUint: dest = buf_uint
+            TgBufBool: dest = buf_bool
+            TgBufFloat: dest = buf_float
+            TgImport{i}: dest = stubs[i]
+        }
+        g.code[c.at] = arm64.b_at(g.code[c.at], i32(dest - c.at))
+    }
+
+    mut code_refs []Ref = []
+    for r in g.func_refs {
+        push(&code_refs, Ref{r.at, func_pos[r.x]})
+    }
+
+    if len(g.too_large) > 0 {
+        fail GenErr{"E0901 function `{g.too_large}` is too large for this version: at most 1 MB of code and 7 MB of local data"}
+    }
+
+    mut code []u32 = []
+    swap(&code, &g.code)
+    mut rodata []u8 = []
+    swap(&rodata, &g.rodata)
+    mut data_refs []Ref = []
+    swap(&data_refs, &g.data_refs)
+    mut bss_refs []int = []
+    swap(&bss_refs, &g.bss_refs)
+    mut got_refs []Ref = []
+    swap(&got_refs, &g.got_refs)
+    ret Object{code, rodata, data_refs, bss_refs, code_refs, got_refs, imports, symbols, entry, state_at + state_size}
+}

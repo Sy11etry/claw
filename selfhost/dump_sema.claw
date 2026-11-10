@@ -1,0 +1,382 @@
+// `dump_sema [--check] [--tests] file`: what sema and the effect check worked out, or their
+// errors, in the same words as `claw __sema`.
+
+use ast
+use diag
+use effects
+use modules
+use rt
+use sema
+use types
+
+fn write(o &[]u8, s str) {
+    for c in s {
+        push(&o, c)
+    }
+}
+
+claw fn f64_bits(v f64) u64 {
+    mut x := v
+    p := cast[*u64](&x)
+    ret *p
+}
+
+fn ty_text(t types.Types, ty int) str {
+    ret "{ty} {types.name(t, ty)}"
+}
+
+fn number(n ast.Num) str {
+    if n.big {
+        if n.neg { ret "-big" }
+        ret "big"
+    }
+    if n.neg { ret "-{n.value}" }
+    ret "{n.value}"
+}
+
+fn kind_text(k types.Kind) str {
+    match k {
+        Int{bits, signed}: ret "int {bits} {signed}"
+        Float{bits}: ret "float {bits}"
+        Bool: ret "bool"
+        Void: ret "void"
+        StrLit: ret "strlit"
+        Err: ret "err"
+        Struct{id}: ret "struct {id}"
+        Enum{id}: ret "enum {id}"
+        Array{e, n}: ret "array {e} {n}"
+        Pointer{p}: ret "ptr {p}"
+        Slice{e}: ret "slice {e}"
+        Str: ret "str"
+        Ref{p}: ret "ref {p}"
+        Option{p}: ret "opt {p}"
+        Result{a, b}: ret "result {a} {b}"
+        Fn{id}: ret "fn {id}"
+    }
+}
+
+fn expr_tag(k ast.ExprKind) str {
+    match k {
+        Int{_}: ret "int"
+        Float{_}: ret "float"
+        Char{_}: ret "char"
+        Bool{_}: ret "bool"
+        Str{_}: ret "str"
+        Interp{_}: ret "interp"
+        None: ret "none"
+        RetVal: ret "retval"
+        Old{_}: ret "old"
+        Var{_}: ret "var"
+        Unary{_, _}: ret "unary"
+        Binary{_, _, _}: ret "binary"
+        Call{_, _, _, _, _, _}: ret "call"
+        CallValue{_, _}: ret "callvalue"
+        StructLit{_, _, _, _, _}: ret "structlit"
+        AddrOf{_}: ret "addrof"
+        Deref{_}: ret "deref"
+        ArrayLit{_}: ret "arraylit"
+        ArrayFill{_}: ret "arrayfill"
+        Field{_, _, _}: ret "field"
+        Index{_, _}: ret "index"
+        Slice{_, _, _}: ret "slice"
+        Try{_}: ret "try"
+        Else{_, _}: ret "else"
+    }
+}
+
+fn coerce_text(c sema.Checked, x ast.Coerce) str {
+    match x {
+        CoerceNo: ret "no"
+        CoerceSome{t}: ret "some {ty_text(c.types, t)}"
+        CoerceOk{t}: ret "ok {ty_text(c.types, t)}"
+        CoerceView: ret "view"
+    }
+}
+
+fn res_text(c sema.Checked, r ast.Res) str {
+    match r {
+        ResNone: ret "-"
+        ResFunc{name}: ret "func {name}"
+        ResValue{t}: ret "value {ty_text(c.types, t)}"
+        ResConst{v, t}: {
+            mut val := ""
+            match v {
+                ConstInt{n}: val = "int {number(n)}"
+                ConstFloat{x}: val = "float {f64_bits(x)}"
+                ConstBool{b}: val = "bool {b}"
+                ConstComputed{i}: val = "computed {i}"
+            }
+            ret "const {val} {ty_text(c.types, t)}"
+        }
+        ResVariant{a, b}: ret "variant {a} {b}"
+    }
+}
+
+fn sema_expr(o &[]u8, l modules.Loaded, c sema.Checked, e int) {
+    x := l.a.exprs[e]
+    write(&o, "e {x.span.line}:{x.span.col} {expr_tag(x.kind)} | {ty_text(c.types, x.ty)} | {coerce_text(c, x.coerce)} | {res_text(c, x.res)}\n")
+    match x.kind {
+        Interp{parts}: {
+            for p in parts {
+                match p {
+                    PartExpr{v}: sema_expr(&o, l, c, v)
+                    PartLit{_}: {}
+                }
+            }
+        }
+        Old{v}: sema_expr(&o, l, c, v)
+        AddrOf{v}: sema_expr(&o, l, c, v)
+        Deref{v}: sema_expr(&o, l, c, v)
+        ArrayFill{v}: sema_expr(&o, l, c, v)
+        Try{v}: sema_expr(&o, l, c, v)
+        Field{v, _, _}: sema_expr(&o, l, c, v)
+        Unary{_, v}: sema_expr(&o, l, c, v)
+        Binary{_, a, b}: {
+            sema_expr(&o, l, c, a)
+            sema_expr(&o, l, c, b)
+        }
+        Call{_, _, _, _, args, via}: {
+            for a in args {
+                sema_expr(&o, l, c, a)
+            }
+            if via != -1 { sema_expr(&o, l, c, via) }
+        }
+        CallValue{f, args}: {
+            sema_expr(&o, l, c, f)
+            for a in args {
+                sema_expr(&o, l, c, a)
+            }
+        }
+        StructLit{_, _, _, _, args}: {
+            for a in args {
+                sema_expr(&o, l, c, a)
+            }
+        }
+        ArrayLit{items}: {
+            for a in items {
+                sema_expr(&o, l, c, a)
+            }
+        }
+        Index{a, b}: {
+            sema_expr(&o, l, c, a)
+            sema_expr(&o, l, c, b)
+        }
+        Slice{v, lo, hi}: {
+            sema_expr(&o, l, c, v)
+            if lo != -1 { sema_expr(&o, l, c, lo) }
+            if hi != -1 { sema_expr(&o, l, c, hi) }
+        }
+        Else{v, handler}: {
+            sema_expr(&o, l, c, v)
+            match handler {
+                ElseValue{w}: sema_expr(&o, l, c, w)
+                ElseBlock{_, b}: sema_block(&o, l, c, b)
+            }
+        }
+        _: {}
+    }
+}
+
+fn sema_block(o &[]u8, l modules.Loaded, c sema.Checked, b int) {
+    for s in l.a.blocks[b].stmts {
+        sema_stmt(&o, l, c, s)
+    }
+}
+
+fn sema_stmt(o &[]u8, l modules.Loaded, c sema.Checked, s int) {
+    match l.a.stmts[s].kind {
+        Let{_, _, _, _, init}: sema_expr(&o, l, c, init)
+        Assign{target, _, value}: {
+            sema_expr(&o, l, c, target)
+            sema_expr(&o, l, c, value)
+        }
+        Discard{e}: sema_expr(&o, l, c, e)
+        ExprStmt{e}: sema_expr(&o, l, c, e)
+        Fail{e}: sema_expr(&o, l, c, e)
+        Sure{e, _}: sema_expr(&o, l, c, e)
+        If{cond, then, els}: {
+            sema_expr(&o, l, c, cond)
+            sema_block(&o, l, c, then)
+            x := els else ast.ElseIf{-1}
+            match x {
+                ElseBlockOf{b}: sema_block(&o, l, c, b)
+                ElseIf{i}: {
+                    if i != -1 { sema_stmt(&o, l, c, i) }
+                }
+            }
+        }
+        ForRange{_, _, start, end, body}: {
+            sema_expr(&o, l, c, start)
+            sema_expr(&o, l, c, end)
+            sema_block(&o, l, c, body)
+        }
+        ForIn{_, _, _, subject, body}: {
+            sema_expr(&o, l, c, subject)
+            sema_block(&o, l, c, body)
+        }
+        ForCond{cond, body}: {
+            sema_expr(&o, l, c, cond)
+            sema_block(&o, l, c, body)
+        }
+        ForEver{body}: sema_block(&o, l, c, body)
+        Defer{body}: sema_block(&o, l, c, body)
+        Match{subject, arms}: {
+            sema_expr(&o, l, c, subject)
+            for a in arms {
+                sema_block(&o, l, c, a.body)
+            }
+        }
+        Ret{e}: {
+            if e != -1 { sema_expr(&o, l, c, e) }
+        }
+        Break: {}
+        Continue: {}
+    }
+}
+
+fn sema_func(o &[]u8, l modules.Loaded, c sema.Checked, full str, f ast.Func) {
+    write(&o, "func {full}\n")
+    mut addressed []str = []
+    for e in f.addressed.items {
+        push(&addressed, copy(e.key))
+    }
+    sort(&addressed)
+    for a in addressed {
+        write(&o, "addressed {a}\n")
+    }
+    for x in f.contracts {
+        write(&o, "contract {x.is_sure}\n")
+        sema_expr(&o, l, c, x.e)
+    }
+    sema_block(&o, l, c, f.body)
+}
+
+fn fields_text(o &[]u8, fields []types.Field) {
+    for f in fields {
+        write(&o, "  field {f.name} {f.ty} {f.offset}\n")
+    }
+}
+
+fn sig_text(o &[]u8, name str, s sema.FnSig) {
+    write(&o, "sig {name} params")
+    for p in s.params {
+        write(&o, " {p}")
+    }
+    write(&o, " own")
+    for x in s.owned {
+        write(&o, " {x}")
+    }
+    mut ext := "-"
+    if len(s.ext) > 0 { ext = copy(s.ext) }
+    write(&o, " ret {s.ret_ty} ext {ext} variadic {s.variadic} need {s.has_need}\n")
+}
+
+fn checked(o &[]u8, l modules.Loaded, c sema.Checked, report effects.Report) {
+    t := c.types
+    n := types.count(t)
+    write(&o, "types {n}\n")
+    for i in 0..n {
+        write(&o, "t {i} | {types.name(t, i)} | {kind_text(types.kind(t, i))}\n")
+    }
+    for s, i in t.structs {
+        write(&o, "struct {i} {s.name} size {s.size} align {s.align} module {s.module} state {s.state}\n")
+        fields_text(&o, s.fields)
+    }
+    for e, i in t.enums {
+        write(&o, "enum {i} {e.name} size {e.size} module {e.module} state {e.state}\n")
+        for v in e.variants {
+            write(&o, " variant {v.name}\n")
+            fields_text(&o, v.fields)
+        }
+    }
+    for f, i in t.fns {
+        write(&o, "fntype {i} params")
+        for p in f.params {
+            write(&o, " {p}")
+        }
+        write(&o, " own")
+        for x in f.owned {
+            write(&o, " {x}")
+        }
+        write(&o, " ret {f.ret_ty} effects {f.effects}\n")
+    }
+    mut drops []int = []
+    for e in t.user_drop.items {
+        push(&drops, e.key)
+    }
+    sort(&drops)
+    for d in drops {
+        name := get(t.user_drop, d) else ""
+        write(&o, "drop {d} {name}\n")
+    }
+    mut names []str = []
+    for e in c.sigs.items {
+        push(&names, copy(e.key))
+    }
+    sort(&names)
+    for name in names {
+        at := get(c.sigs, name) else 0
+        sig_text(&o, name, c.sig_list[at])
+    }
+    for x in c.computed {
+        write(&o, "computed {x.name} {x.full} {x.ty}\n")
+    }
+    for u in l.units {
+        for f in u.program.funcs {
+            if len(f.tparams) != 0 { continue }
+            sema_func(&o, l, c, "{u.prefix}{f.name}", f)
+        }
+    }
+    for f in c.instances {
+        sema_func(&o, l, c, f.name, f)
+    }
+    write(&o, "slow {report.slow}\n")
+    mut known []str = []
+    for e in report.known.items {
+        push(&known, copy(e.key))
+    }
+    sort(&known)
+    for name in known {
+        v := get(report.known, name) else 0
+        write(&o, "known {name} {v}\n")
+    }
+}
+
+fn all_diagnostics(o &[]u8, ds []diag.Diag, files []str) {
+    mut sorted := copy(ds)
+    diag.sort(&sorted)
+    write(&o, diag.render(files, sorted))
+}
+
+fn main() {
+    rt.ensure_stack()
+    args := rt.args()
+    mut memory_checker := false
+    mut tests_only := false
+    mut path := ""
+    for a, i in args {
+        if i == 0 { continue }
+        if a == "--check" {
+            memory_checker = true
+        } else if a == "--tests" {
+            tests_only = true
+        } else if len(path) == 0 {
+            path = copy(a)
+        }
+    }
+    mut o []u8 = []
+    mut l := modules.load(path, memory_checker) else err {
+        all_diagnostics(&o, err.diags, err.files)
+        print(rt.text(o))
+        ret
+    }
+    mut diags []diag.Diag = []
+    c := sema.check(&l, tests_only, &diags)
+    report := effects.check(l, c, &diags)
+    if len(diags) == 0 {
+        checked(&o, l, c, report)
+    } else {
+        all_diagnostics(&o, diags, l.files)
+    }
+    print(rt.text(o))
+}

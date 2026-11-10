@@ -1,0 +1,179 @@
+// The Claw compiler, written in Claw. `main file.claw [-o out] [--fast]` does what
+// `claw build --no-opt` does; `main run file.claw` and `main check file.claw` are `claw run` and
+// `claw check`. The optimizer, `why`, the fuzzer and `fmt` stay in compiler/src.
+
+use cir
+use codegen
+use diag
+use effects
+use lower
+use macho
+use modules
+use rt
+use sema
+
+type Options { file str, out str, has_out bool, fast bool, alloc_stats bool }
+
+type Mode = Build | Run
+
+// What a step gives back after it has reported an error and ended the process.
+type Halted { code int }
+
+fn usage() str {
+    ret "main <file.claw> [-o out] [--fast]    what `claw build --no-opt` does\nmain run <file.claw>                compile with all checks and run\nmain check <file.claw>              report errors only\n"
+}
+
+fn die(msg str) +io +mem {
+    rt.eprint("claw: {msg}\n{usage()}")
+    rt.exit(2)
+}
+
+fn parse_options(args []str) Options +io +mem {
+    mut o := Options{"", "", false, false, false}
+    mut i := 0
+    for i < len(args) {
+        a := args[i]
+        if a == "--fast" {
+            o.fast = true
+        } else if a == "--alloc-stats" {
+            o.alloc_stats = true
+        } else if a == "-o" {
+            i += 1
+            if i >= len(args) { die("`-o` needs a path") }
+            o.out = copy(args[i])
+            o.has_out = true
+        } else if len(a) > 0 and a[0] == '-' {
+            die("unknown flag `{a}`")
+        } else if len(o.file) == 0 {
+            o.file = copy(a)
+        } else {
+            die("unexpected argument `{a}`")
+        }
+        i += 1
+    }
+    if len(o.file) == 0 { die("no input file") }
+    ret o
+}
+
+fn report(diags []diag.Diag, files []str) +io +mem {
+    mut sorted := copy(diags)
+    diag.sort(&sorted)
+    // Rust's `render_text` shows the first 20.
+    mut shown []diag.Diag = []
+    for d, i in sorted {
+        if i >= 20 { break }
+        push(&shown, copy(d))
+    }
+    mut text := diag.render(files, shown)
+    if len(sorted) > 20 { text = "{text}{len(sorted) - 20} more errors not shown\n" }
+    rt.eprint(text)
+    rt.exit(1)
+}
+
+fn say_note(slow int) +io +mem {
+    rt.eprint("claw: note: {slow} checks that call functions are left out of this build; `claw run` and `claw test` do them\n")
+}
+
+fn is_build(mode Mode) bool {
+    match mode {
+        Build: ret true
+        _: ret false
+    }
+}
+
+fn compile_to_cir(o Options, mode Mode, base &[]str) cir.Module ! Halted +io +mem {
+    build := is_build(mode)
+    mut l := modules.load(o.file, not build) else err {
+        report(err.diags, err.files)
+        fail Halted{1}
+    }
+    mut diags []diag.Diag = []
+    c := sema.check(&l, false, &diags)
+    fx := effects.check(l, c, &diags)
+    if len(diags) > 0 { report(diags, l.files) }
+    if build and fx.slow > 0 { say_note(fx.slow) }
+    m := lower.lower(l, c, lower.Opts{not build, false, o.fast and build}, &diags)
+    if len(diags) > 0 { report(diags, l.files) }
+    swap(&base, &l.base_names)
+    ret m
+}
+
+fn default_out(file str) str +mem {
+    name := modules.file_name(file)
+    if len(name) == 0 { ret "a.out" }
+    mut dot := -1
+    for c, i in name {
+        if c == '.' { dot = i }
+    }
+    if dot <= 0 { ret name }
+    ret copy(name[..dot])
+}
+
+fn out_name(path str) str +mem {
+    name := modules.file_name(path)
+    if len(name) == 0 { ret "a.out" }
+    ret name
+}
+
+// Writes through a temporary file and renames: replacing a binary that already ran in place
+// can get the new one killed by the kernel's signature cache.
+fn write_executable(path str, bytes []u8) +io +mem {
+    if not rt.write_exec(path, bytes) {
+        rt.eprint("claw: cannot write {path}: {rt.last_error()}\n")
+        rt.exit(2)
+    }
+}
+
+fn compile(o Options, out str, mode Mode) +io +mem {
+    mut base []str = []
+    m := compile_to_cir(o, mode, &base) else { ret }
+    object := codegen.generate(m, base, o.alloc_stats) else err {
+        rt.eprint("{o.file}:1:1 {err.msg}\n")
+        rt.exit(1)
+        ret
+    }
+    write_executable(out, macho.write_macho(object, out_name(out)))
+}
+
+fn run_file(o Options) +io +mem {
+    dir := "{rt.temp_dir()}/claw-run-{rt.pid()}"
+    if not rt.make_dir(dir) {
+        rt.eprint("claw: cannot create {dir}: {rt.last_error()}\n")
+        rt.exit(2)
+    }
+    exe := "{dir}/{default_out(o.file)}"
+    compile(o, exe, Run)
+    code := rt.run_program(exe)
+    rt.remove_file(exe)
+    rt.remove_dir(dir)
+    if code < 0 {
+        rt.eprint("claw: cannot run the program: {rt.last_error()}\n")
+        rt.exit(2)
+    }
+    if code == 101 and rt.stderr_is_terminal() {
+        rt.eprint("claw: `claw why {o.file}` finds the cause\n")
+    }
+    rt.exit(code)
+}
+
+fn main() {
+    rt.ensure_stack()
+    all := rt.args()
+    if len(all) < 2 {
+        die("no input file")
+        ret
+    }
+    rest := all[1..]
+    if rest[0] == "run" {
+        run_file(parse_options(rest[1..]))
+    } else if rest[0] == "check" {
+        o := parse_options(rest[1..])
+        mut base []str = []
+        _ = compile_to_cir(o, Build, &base) else { ret }
+    } else {
+        o := parse_options(rest)
+        mut out := copy(o.out)
+        if not o.has_out { out = default_out(o.file) }
+        compile(o, out, Build)
+    }
+}

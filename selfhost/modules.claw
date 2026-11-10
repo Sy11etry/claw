@@ -1,0 +1,304 @@
+// Finds and parses every file a program needs. One file is one module.
+
+use ast
+use diag
+use lexer
+use parser
+use rt
+
+// `prefix`: prepended to names to make them unique: "" for the root, "geo." for `use geo`.
+// `imports`: local name of each import, and which unit it is.
+// `is_std`: part of the standard library rather than the user's program.
+pub type Unit { prefix str, program ast.Program, imports Map[str, int], import_spans Map[str, diag.Span], is_std bool }
+
+// `units`: dependencies come before the modules that use them; the root is last.
+// `core`: the always-available `core` module.
+// `files`: full paths, for error messages. `base_names`: for messages printed at run time.
+// `a`: the arena every unit's syntax tree lives in.
+pub type Loaded { units []Unit, core int, files []str, base_names []str, a ast.Ast }
+
+// What `load` gives instead when something is wrong.
+pub type LoadErr { diags []diag.Diag, files []str }
+
+// `std_root`: empty when there is no standard library.
+// `check`: also load the memory checker written in Claw.
+type Loader {
+    std_root str,
+    units []Unit,
+    files []str,
+    base_names []str,
+    done Map[str, int],
+    in_progress []str,
+    diags []diag.Diag,
+    core int,
+    check bool,
+    a ast.Ast,
+}
+
+fn no_span() diag.Span {
+    ret diag.Span{0, 0, 0, 0, 0}
+}
+
+// Rust's `a.join(b)` for a relative `b`.
+fn path_join(dir str, rel str) str +mem {
+    if len(dir) == 0 { ret copy(rel) }
+    if ends_with(dir, "/") { ret "{dir}{rel}" }
+    ret "{dir}/{rel}"
+}
+
+// The end of `path` once separators and `.` components at its end are gone.
+fn trimmed_end(path str) int {
+    mut end := len(path)
+    for {
+        if end > 1 and path[end - 1] == '/' {
+            end -= 1
+        } else if end > 2 and path[end - 1] == '.' and path[end - 2] == '/' {
+            end -= 2
+        } else {
+            ret end
+        }
+    }
+}
+
+fn last_slash(path str, end int) int {
+    mut i := end - 1
+    for i >= 0 {
+        if path[i] == '/' { ret i }
+        i -= 1
+    }
+    ret -1
+}
+
+// Rust's `path.parent()`, "" when there is none.
+pub fn parent(path str) str +mem {
+    end := trimmed_end(path)
+    i := last_slash(path, end)
+    if i < 0 or end <= 1 and path[0] == '/' { ret "" }
+    if i == 0 { ret "/" }
+    ret copy(path[..trimmed_end(path[..i])])
+}
+
+// Rust's `path.file_name()`, "" when there is none.
+pub fn file_name(path str) str +mem {
+    end := trimmed_end(path)
+    i := last_slash(path, end)
+    name := path[i + 1..end]
+    if name == ".." or name == "/" { ret "" }
+    ret copy(name)
+}
+
+fn in_range(s str, i int, lo u8, hi u8) bool {
+    ret i < len(s) and s[i] >= lo and s[i] <= hi
+}
+
+// What Rust's `read_to_string` accepts.
+pub fn valid_utf8(s str) bool {
+    mut i := 0
+    for i < len(s) {
+        c := s[i]
+        mut size := 1
+        if c >= 0x80 {
+            mut low u8 = 0x80
+            mut high u8 = 0xBF
+            if c >= 0xC2 and c <= 0xDF {
+                size = 2
+            } else if c >= 0xE0 and c <= 0xEF {
+                size = 3
+                if c == 0xE0 { low = 0xA0 }
+                if c == 0xED { high = 0x9F }
+            } else if c >= 0xF0 and c <= 0xF4 {
+                size = 4
+                if c == 0xF0 { low = 0x90 }
+                if c == 0xF4 { high = 0x8F }
+            } else {
+                ret false
+            }
+            if not in_range(s, i + 1, low, high) { ret false }
+            for j in 2..size {
+                if not in_range(s, i + j, 0x80, 0xBF) { ret false }
+            }
+        }
+        i += size
+    }
+    ret true
+}
+
+// `msg`: what Rust's io::Error prints.
+pub type ReadErr { msg str }
+
+pub fn read_source(path str) str ! ReadErr +mem +io {
+    src := rt.read_file(path) else { fail ReadErr{rt.last_error()} }
+    if not valid_utf8(src) { fail ReadErr{"stream did not contain valid UTF-8"} }
+    ret src
+}
+
+fn locate(l Loader, dir str, path []str) ?str +mem +io {
+    joined := join(path, "/")
+    rel := "{joined}.claw"
+    local := path_join(dir, rel)
+    if rt.is_file(local) { ret local }
+    if len(l.std_root) == 0 { ret none }
+    in_std := path_join(l.std_root, rel)
+    if rt.is_file(in_std) { ret in_std }
+    ret none
+}
+
+fn load_core(l &Loader) +mem +io {
+    mut path := path_join(l.std_root, "core.claw")
+    if len(l.std_root) == 0 or not rt.is_file(path) {
+        rt.eprint("claw: cannot find std/core.claw next to the compiler\n")
+        rt.exit(2)
+    }
+    core := load_file(&l, path, path, "core.", false, no_span())
+    l.core = core
+    if l.check {
+        path = path_join(l.std_root, "check_rt.claw")
+        if len(l.std_root) == 0 or not rt.is_file(path) {
+            rt.eprint("claw: cannot find std/check_rt.claw next to the compiler\n")
+            rt.exit(2)
+        }
+        _ = load_file(&l, path, path, "__check.", false, no_span())
+    }
+}
+
+// Returns the unit index, or -1 if the file could not be used.
+// `is_root`: the file named on the command line; `at`: the `use` that asked for this file.
+fn load_file(l &Loader, display str, path str, prefix str, is_root bool, at diag.Span) int +mem +io {
+    key := rt.canonicalize(path) else copy(path)
+    if has_key(l.done, key) { ret get(l.done, key) else -1 }
+    if has(l.in_progress, key) {
+        push(&l.diags, diag.new("E0146", at, "module `{prefix}` is part of an import cycle"))
+        ret -1
+    }
+    src := read_source(path) else err {
+        if is_root {
+            rt.eprint("claw: cannot read {display}: {err.msg}\n")
+            rt.exit(2)
+        }
+        push(&l.diags, diag.new("E0146", at, "cannot read {display}: {err.msg}"))
+        ret -1
+    }
+    file := len(l.files)
+    push(&l.files, copy(display))
+    push(&l.base_names, file_name(path))
+
+    before := len(l.diags)
+    toks := lexer.lex(src, file, &l.diags)
+    if len(l.diags) > before { ret -1 }
+    mut program := parser.parse_file(toks, src, &l.a, &l.diags)
+    if len(l.diags) > before { ret -1 }
+    computed_consts(&program, &l.a)
+
+    push(&l.in_progress, copy(key))
+    if is_root { load_core(&l) }
+    dir := parent(path)
+    mut imports := new_map[str, int](hash_str)
+    mut import_spans := new_map[str, diag.Span](hash_str)
+    for u in program.uses {
+        alias := u.path[len(u.path) - 1]
+        if has_key(imports, alias) {
+            push(&l.diags, diag.new("E0110", u.span, "module `{alias}` is imported twice"))
+            continue
+        }
+        dotted := join(u.path, ".")
+        found := locate(l, dir, u.path) else {
+            push(&l.diags, diag.new("E0146", u.span, "cannot find module `{dotted}`"))
+            continue
+        }
+        i := load_file(&l, found, found, "{dotted}.", false, u.span)
+        if i != -1 {
+            put(&imports, copy(alias), i)
+            put(&import_spans, copy(alias), u.span)
+        }
+    }
+    _ = pop(&l.in_progress)
+
+    mut is_std := false
+    if len(l.std_root) > 0 {
+        root := rt.canonicalize(l.std_root) else ""
+        is_std = len(root) > 0 and (key == root or starts_with(key, "{root}/"))
+    }
+    push(&l.units, Unit{copy(prefix), program, imports, import_spans, is_std})
+    idx := len(l.units) - 1
+    put(&l.done, key, idx)
+    ret idx
+}
+
+// Literals and arithmetic on earlier simple constants: sema can do these by itself.
+fn is_simple(a ast.Ast, e int, computed Map[str, bool]) bool {
+    match a.exprs[e].kind {
+        Int{_}: ret true
+        Float{_}: ret true
+        Char{_}: ret true
+        Bool{_}: ret true
+        Var{name}: ret not has_key(computed, name)
+        Unary{_, x}: ret is_simple(a, x, computed)
+        Binary{_, l, r}: ret is_simple(a, l, computed) and is_simple(a, r, computed)
+        _: ret false
+    }
+}
+
+// `const x int = f(3)` becomes a hidden `fn const x() int { ret f(3) }`, run while compiling.
+fn computed_consts(p &ast.Program, a &ast.Ast) +mem {
+    // Constants can refer to later ones, so repeat until the set stops growing.
+    mut computed := new_map[str, bool](hash_str)
+    for {
+        before := len(computed.items)
+        mut more []str = []
+        for c in p.consts {
+            if c.ty != -1 and not is_simple(a, c.value, computed) { push(&more, copy(c.name)) }
+        }
+        for name in more {
+            put(&computed, copy(name), true)
+        }
+        if len(computed.items) == before { break }
+    }
+    for i in 0..len(p.consts) {
+        if not has_key(computed, p.consts[i].name) { continue }
+        ty := p.consts[i].ty
+        if ty == -1 { continue }
+        p.consts[i].computed = true
+        span := p.consts[i].span
+        value := p.consts[i].value
+        p.consts[i].value = ast.new_expr(&a, ast.Int{ast.Num{0, false, false}}, span)
+        value_span := a.exprs[value].span
+        stmt := ast.new_stmt(&a, ast.Ret{value}, value_span)
+        body := ast.new_block(&a, [stmt], span)
+        name := "const {p.consts[i].name}"
+        push(&p.funcs, ast.Func{name, span, false, false, [], new_map[str, bool](hash_str), [], ty, [], [], span, none, body})
+    }
+}
+
+// Where the standard library lives: next to the compiler, or in a directory above it,
+// which is how a compiler built inside the repository finds the repository's std/.
+fn find_std() str +mem +io {
+    found := rt.current_exe() else { ret "" }
+    exe := rt.canonicalize(found) else { ret "" }
+    mut dir := parent(exe)
+    for len(dir) > 0 {
+        std := path_join(dir, "std")
+        if rt.is_dir(std) { ret std }
+        if dir == "/" { break }
+        up := parent(dir)
+        dir = up
+    }
+    ret ""
+}
+
+pub fn load(root str, check bool) Loaded ! LoadErr +mem +io {
+    mut l := Loader{find_std(), [], [], [], new_map[str, int](hash_str), [], [], -1, check, ast.new_ast()}
+    _ = load_file(&l, root, root, "", true, no_span())
+    if len(l.diags) > 0 {
+        mut diags []diag.Diag = []
+        mut files []str = []
+        swap(&diags, &l.diags)
+        swap(&files, &l.files)
+        fail LoadErr{diags, files}
+    }
+    mut out := Loaded{[], l.core, [], [], ast.new_ast()}
+    swap(&out.units, &l.units)
+    swap(&out.files, &l.files)
+    swap(&out.base_names, &l.base_names)
+    swap(&out.a, &l.a)
+    ret out
+}

@@ -6,6 +6,7 @@ mod cir;
 mod codegen;
 mod ctfe;
 mod diag;
+mod dump;
 mod effects;
 mod fmt;
 mod fuzz;
@@ -63,6 +64,8 @@ struct Options {
     stats: bool,
     /// `claw test --blocks`: no generated inputs, no explanations.
     blocks: bool,
+    /// `claw build --no-opt`: what the compiler written in Claw produces, for comparing.
+    no_opt: bool,
     /// `claw sig --pub`.
     public: bool,
     /// `claw ctx file name`: the function asked about.
@@ -76,7 +79,7 @@ fn parse_options(args: &[String]) -> Options {
 }
 
 fn options(args: &[String], ctx: bool) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, test_name: None };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, test_name: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -87,6 +90,7 @@ fn options(args: &[String], ctx: bool) -> Options {
             "--fast" => o.fast = true,
             "--stats" => o.stats = true,
             "--blocks" => o.blocks = true,
+            "--no-opt" => o.no_opt = true,
             "--pub" => o.public = true,
             "--test" => {
                 i += 1;
@@ -177,7 +181,7 @@ fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
         eprintln!("claw: note: {} checks that call functions are left out of this build; `claw run` and `claw test` do them", f.effects.slow);
     }
     let mut module = lower::lower(&f.loaded.units, &f.checked, &f.loaded.base_names, opts);
-    if mode == Mode::Build {
+    if mode == Mode::Build && !o.no_opt {
         let stats = opt::optimize(&mut module, o.fast);
         if o.stats {
             let gone = stats.checks_before.saturating_sub(stats.checks_after);
@@ -538,6 +542,29 @@ fn main() {
     }
 }
 
+/// Every token of a file, to compare with the lexer written in Claw.
+fn dump_tokens(path: &str) {
+    let src = std::fs::read_to_string(path).unwrap_or_default();
+    let mut diags = Vec::new();
+    for t in lexer::lex(&src, 0, &mut diags) {
+        let (kind, text, value, big) = match &t.tok {
+            lexer::Tok::Int(v) => (0, String::new(), if *v > u64::MAX as i128 { 0 } else { *v as u64 }, *v > u64::MAX as i128),
+            lexer::Tok::Float(_) => (1, String::new(), 0, false),
+            lexer::Tok::Char(c) => (2, String::new(), *c as u64, false),
+            lexer::Tok::Str(x) => (3, x.clone(), 0, false),
+            lexer::Tok::Ident(x) => (4, x.clone(), 0, false),
+            lexer::Tok::Kw(x) => (5, x.to_string(), 0, false),
+            lexer::Tok::Op(x) => (6, x.to_string(), 0, false),
+            lexer::Tok::Newline => (7, String::new(), 0, false),
+            lexer::Tok::Eof => (8, String::new(), 0, false),
+        };
+        println!("{kind} {text} {value} {big} {} {} {} {}", t.span.start, t.span.end, t.span.line, t.span.col);
+    }
+    for d in diags {
+        println!("{} {}:{}", d.code, d.span.line, d.span.col);
+    }
+}
+
 fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
@@ -575,6 +602,10 @@ fn real_main() {
             let f = front(&o, false, false);
             print!("{}", info::audit(&f.loaded.units, &f.checked, &f.loaded.base_names));
         }
+        Some("__tokens") => dump_tokens(&args[1]),
+        Some("__ast") => dump::run(&args[1..]),
+        Some("__sema") => dump::sema_dump(&args[1..]),
+        Some("__cir") => dump::cir_dump(&args[1..]),
         Some("__interp") => interpret(&parse_options(&args[1..])),
         Some("fmt") => format_file(&parse_options(&args[1..])),
         Some("check") => {

@@ -1,0 +1,4253 @@
+// Name resolution, type checking and the strictness rules.
+//
+// `modules.Loaded` is the read-only input, everywhere the parameter `l`. While bodies are
+// checked, `Global` holds what each expression turned out to be in side tables (`ty`, `coerce`,
+// `res`); `check` writes them into the arena at the end. A template instance is a copy of the
+// function's tree with new ids, so each copy keeps its own answers.
+
+use ast
+use diag
+use modules
+use types
+use wide
+
+// `ext`: the C symbol, for `extern fn`; "" when not. `owned`: which parameters take the value over.
+// `has_need`: has a `need`, which only a direct call can check.
+pub type FnSig { params []int, owned []bool, ret_ty int, ext str, variadic bool, has_need bool }
+
+// A `const` whose value needs a function call. `full`: the hidden function that returns it.
+pub type ComputedConst { name str, full str, ty int, span diag.Span }
+
+pub type NameDef = NameType{ty int} | NameVariant{eid int, idx int, ty int}
+
+// `instances`: one checked copy of a template per set of type arguments.
+// `sigs`: the name of each function, and its place in `sig_list`.
+pub type Checked { types types.Types, sigs Map[str, int], sig_list []FnSig, instances []ast.Func, computed []ComputedConst }
+
+// `index`: the function in its module's program, when `generic`.
+type FuncEntry { generic bool, index int, public bool }
+
+// A template type: `index` in its module's program.
+type GType { index int, public bool }
+
+// A variant of a template type.
+type GVariant { index int, vidx int, public bool }
+
+type NameEntry { def NameDef, public bool }
+
+type ConstEntry { val ast.ConstVal, ty int, public bool }
+
+type Mod {
+    prefix str,
+    used Map[str, bool],
+    names Map[str, NameEntry],
+    consts Map[str, ConstEntry],
+    funcs Map[str, FuncEntry],
+    gtypes Map[str, GType],
+    gvariants Map[str, GVariant],
+}
+
+// A type variable and what it stands for.
+type Bind { name str, ty int }
+
+type InstOf { ty int, m int, name str, targs []int }
+
+type Work { m int, index int, targs []int, full str }
+
+// Borrowed from elsewhere (`view`), a `&` parameter (`by_ref`), and what happened to it.
+type Var { name str, ty int, view bool, by_ref bool, mutable bool, read bool, written bool, span diag.Span, decl diag.Span }
+
+// A variable whose value has left, and where it left.
+type Moved { name str, span diag.Span }
+
+// What `moved` looked like at each jump out of a loop body.
+type LoopFlow { breaks [][]Moved, conts [][]Moved }
+
+// A lock held until a block ends: the scope depth, and how many locks there were then.
+type ScopeLock { depth int, count int }
+
+// One step of a path like `a.b[i]`, for spotting overlapping uses.
+type Comp = CompField{name str} | CompIndex
+
+type Path { root str, comps []Comp }
+
+type Root = RootVar{name str} | RootThrough | RootOther
+
+// The state of the whole check; the part below `ty` belongs to the function body being checked.
+pub type Global {
+    computed []ComputedConst,
+    types types.Types,
+    mods []Mod,
+    cur int,
+    tenv []Bind,
+    sigs Map[str, int],
+    sig_list []FnSig,
+    struct_insts Map[str, int],
+    insts []InstOf,
+    inst_at Map[int, int],
+    spans Map[int, diag.Span],
+    layout_ready bool,
+    funcs_ready bool,
+    core int,
+    too_many bool,
+    depth int,
+    work []Work,
+    diags []diag.Diag,
+
+    ty []int,
+    coerce []ast.Coerce,
+    res []ast.Res,
+
+    func_name str,
+    func_claw bool,
+    addressed []str,
+    vars []Var,
+    scope_start []int,
+    ret_ty int,
+    loops int,
+    is_main bool,
+    locks []str,
+    scope_locks []ScopeLock,
+    in_text bool,
+    in_defer bool,
+    moved []Moved,
+    flows []LoopFlow,
+    in_contract bool,
+    sure_clause bool,
+    in_old bool,
+}
+
+const max_instance_depth = 32
+const max_instances = 20000
+
+fn is_builtin(name str) bool {
+    ret name == "print" or name == "len" or name == "copy" or name == "alloc" or name == "free" or name == "cast" or
+        name == "sizeof" or name == "int" or name == "i8" or name == "i16" or name == "i32" or name == "i64" or
+        name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "f32" or name == "f64" or name == "bool"
+}
+
+// A built-in type name, or -1.
+fn prim(name str) int {
+    if name == "int" or name == "i64" { ret types.t_int }
+    if name == "i8" { ret types.t_i8 }
+    if name == "i16" { ret types.t_i16 }
+    if name == "i32" { ret types.t_i32 }
+    if name == "u8" { ret types.t_u8 }
+    if name == "u16" { ret types.t_u16 }
+    if name == "u32" { ret types.t_u32 }
+    if name == "u64" { ret types.t_u64 }
+    if name == "f32" { ret types.t_f32 }
+    if name == "f64" { ret types.t_f64 }
+    if name == "bool" { ret types.t_bool }
+    ret -1
+}
+
+fn private_msg(name str) str {
+    ret "`{name}` is private to its module; mark it `pub` there"
+}
+
+fn type_list(t types.Types, args []int) str {
+    mut parts []str = []
+    for a in args {
+        push(&parts, types.name(t, a))
+    }
+    ret join(parts, ", ")
+}
+
+fn no_span() diag.Span {
+    ret diag.Span{0, 0, 0, 0, 0}
+}
+
+fn opt_text(o ?str) str {
+    x := copy(o) else { ret "" }
+    ret x
+}
+
+// Rust's `Option<&BinOp>`: is there an operator?
+fn has_op(o ?ast.BinOp) bool {
+    _ = o else { ret false }
+    ret true
+}
+
+// The type a name stands for in the type environment, or -1.
+fn tenv_get(env []Bind, name str) int {
+    mut i := len(env) - 1
+    for i >= 0 {
+        if env[i].name == name { ret env[i].ty }
+        i -= 1
+    }
+    ret -1
+}
+
+fn tenv_of(tparams []ast.Binding, targs []int) []Bind {
+    mut out []Bind = []
+    for p, i in tparams {
+        if i < len(targs) { push(&out, Bind{copy(p.name), targs[i]}) }
+    }
+    ret out
+}
+
+fn kind_is_err(k types.Kind) bool {
+    match k {
+        Err: ret true
+        _: ret false
+    }
+}
+
+fn kind_is_bool(k types.Kind) bool {
+    match k {
+        Bool: ret true
+        _: ret false
+    }
+}
+
+fn is_fn_type(t types.Types, ty int) bool {
+    match types.kind(t, ty) {
+        Fn{_}: ret true
+        _: ret false
+    }
+}
+
+// `T ! E` with no success value?
+fn is_void_result(t types.Types, ty int) bool {
+    match types.kind(t, ty) {
+        Result{ok, _}: ret ok == types.t_void
+        _: ret false
+    }
+}
+
+fn coerce_is_no(c ast.Coerce) bool {
+    match c {
+        CoerceNo: ret true
+        _: ret false
+    }
+}
+
+fn res_is_variant(r ast.Res) bool {
+    match r {
+        ResVariant{_, _}: ret true
+        _: ret false
+    }
+}
+
+fn is_field_or_index(k ast.ExprKind) bool {
+    match k {
+        Field{_, _, _}: ret true
+        Index{_, _}: ret true
+        Slice{_, _, _}: ret true
+        _: ret false
+    }
+}
+
+fn fix(code str, span diag.Span, msg str, label str) diag.Diag {
+    ret diag.fixed(code, span, msg, label)
+}
+
+// ---- numbers ----
+
+fn num_wide(n ast.Num) wide.Wide {
+    ret wide.of(n.value, n.neg, n.big)
+}
+
+fn num_eq(a ast.Num, b ast.Num) bool {
+    if a.big != b.big { ret false }
+    if a.big { ret a.neg == b.neg }
+    if a.value != b.value { ret false }
+    ret a.neg == b.neg or a.value == 0
+}
+
+fn num_fits(n ast.Num, bits int, signed bool) bool {
+    ret wide.fits(num_wide(n), bits, signed)
+}
+
+fn num_int(n ast.Num) int {
+    if n.neg { ret -int(n.value) }
+    ret int(n.value)
+}
+
+fn num_text(n ast.Num) str {
+    if n.big {
+        if n.neg { ret "-big" }
+        ret "big"
+    }
+    if n.neg { ret "-{n.value}" }
+    ret "{n.value}"
+}
+
+// Does the literal lie in `0..limit`, as `index_type` wants it?
+fn num_in_range(n ast.Num, limit int) bool {
+    if n.big { ret false }
+    if n.neg and n.value != 0 { ret false }
+    ret n.value < u64(limit)
+}
+
+// ---- the name tables ----
+
+fn import(l modules.Loaded, g &Global, alias str, span diag.Span) int {
+    m := get(l.units[g.cur].imports, alias) else {
+        push(&g.diags, diag.new("E0146", span, "no imported module named `{alias}`; add `use {alias}`"))
+        ret -1
+    }
+    put(&g.mods[g.cur].used, copy(alias), true)
+    ret m
+}
+
+fn resolve_inner(l modules.Loaded, g &Global, inner int, make fn(int, types.Types) int) int {
+    p := resolve(l, &g, inner)
+    if p == types.t_err { ret types.t_err }
+    ret make(p, g.types)
+}
+
+fn intern_ptr(g &Global, p int) int {
+    ret types.intern(&g.types, types.Pointer{p})
+}
+
+fn intern_ref(g &Global, p int) int {
+    ret types.intern(&g.types, types.Ref{p})
+}
+
+fn resolve(l modules.Loaded, g &Global, t int) int {
+    span := l.a.tys[t].span
+    match l.a.tys[t].kind {
+        TName{module, name, targs}: {
+            alias := opt_text(module)
+            ret resolve_name(l, &g, span, alias, name, targs)
+        }
+        TPointer{inner}: {
+            p := resolve(l, &g, inner)
+            if p == types.t_err { ret types.t_err }
+            ret intern_ptr(&g, p)
+        }
+        TRef{inner}: {
+            p := resolve(l, &g, inner)
+            if p == types.t_err { ret types.t_err }
+            ret intern_ref(&g, p)
+        }
+        TSlice{inner}: {
+            p := resolve(l, &g, inner)
+            if p == types.t_err { ret types.t_err }
+            ret types.intern(&g.types, types.Slice{p})
+        }
+        TArray{size, inner}: {
+            mut n := ast.Num{0, false, false}
+            match size {
+                SizeLit{v}: n = v
+                SizeName{sname}: {
+                    entry := get(g.mods[g.cur].consts, sname) else ConstEntry{ast.ConstBool{false}, types.t_err, false}
+                    mut ok := false
+                    match entry.val {
+                        ConstInt{v2}: {
+                            if entry.ty != types.t_err {
+                                n = v2
+                                ok = true
+                            }
+                        }
+                        ConstComputed{_}: {
+                            push(&g.diags, diag.new("E0126", span, "array size `{sname}` comes from a function call, so it is not known while types are checked"))
+                            ret types.t_err
+                        }
+                        _: {}
+                    }
+                    if not ok {
+                        push(&g.diags, diag.new("E0126", span, "array size `{sname}` must be a number or an integer `const`"))
+                        ret types.t_err
+                    }
+                }
+            }
+            if n.big or n.neg or n.value == 0 or n.value > 1 << 40 {
+                push(&g.diags, diag.new("E0126", span, "array size must be at least 1"))
+                ret types.t_err
+            }
+            e := resolve(l, &g, inner)
+            if e == types.t_err { ret types.t_err }
+            ret types.intern(&g.types, types.Array{e, int(n.value)})
+        }
+        TFn{params, ret_ty, effects}: {
+            mut owned []bool = []
+            mut ps []int = []
+            for p in params {
+                push(&owned, p.is_own)
+            }
+            for p in params {
+                push(&ps, resolve(l, &g, p.ty))
+            }
+            mut r := types.t_void
+            if ret_ty != -1 { r = resolve(l, &g, ret_ty) }
+            if r == types.t_err or has(ps, types.t_err) { ret types.t_err }
+            mut mask := 0
+            for name in effects {
+                if name == "mem" {
+                    mask = mask | types.mem_effect
+                } else {
+                    mask = mask | types.io_effect
+                }
+            }
+            ret types.fn_type(&g.types, types.FnType{ps, owned, r, mask})
+        }
+        TOption{inner}: {
+            p := resolve(l, &g, inner)
+            if p == types.t_err { ret types.t_err }
+            ret types.intern(&g.types, types.Option{p})
+        }
+        TResult{ok, er}: {
+            mut o := types.t_void
+            if ok != -1 { o = resolve(l, &g, ok) }
+            e := resolve(l, &g, er)
+            if o == types.t_err or e == types.t_err { ret types.t_err }
+            ret types.intern(&g.types, types.Result{o, e})
+        }
+    }
+}
+
+// `alias`: the module written before the name, "" for none.
+fn resolve_name(l modules.Loaded, g &Global, span diag.Span, alias str, name str, targs []int) int {
+    if len(alias) == 0 and len(targs) == 0 {
+        t := tenv_get(g.tenv, name)
+        if t != -1 { ret t }
+        p := prim(name)
+        if p != -1 { ret p }
+        if name == "str" { ret types.t_str }
+    }
+    mut m := g.cur
+    if len(alias) > 0 {
+        m = import(l, &g, alias, span)
+        if m == -1 { ret types.t_err }
+    }
+    local := m == g.cur
+    if has_key(g.mods[m].gtypes, name) {
+        d := get(g.mods[m].gtypes, name) else GType{-1, false}
+        if not d.public and not local {
+            push(&g.diags, diag.new("E0147", span, private_msg(name)))
+            ret types.t_err
+        }
+        tparams := len(l.units[m].program.types[d.index].tparams)
+        if len(targs) != tparams {
+            push(&g.diags, diag.new("E0144", span, "`{name}` takes {tparams} type arguments, found {len(targs)}"))
+            ret types.t_err
+        }
+        mut args []int = []
+        for a in targs {
+            t := resolve(l, &g, a)
+            if t == types.t_err { ret types.t_err }
+            push(&args, t)
+        }
+        ret instantiate_type(l, &g, m, d.index, args)
+    }
+    // A template from the always-available module, when nothing nearer has this name.
+    if len(alias) == 0 and not has_key(g.mods[m].names, name) and has_key(g.mods[g.core].gtypes, name) {
+        d := get(g.mods[g.core].gtypes, name) else GType{-1, false}
+        if d.public {
+            core := g.core
+            tparams := len(l.units[core].program.types[d.index].tparams)
+            if len(targs) != tparams {
+                push(&g.diags, diag.new("E0144", span, "`{name}` takes {tparams} type arguments, found {len(targs)}"))
+                ret types.t_err
+            }
+            mut args []int = []
+            for a in targs {
+                push(&args, resolve(l, &g, a))
+            }
+            if has(args, types.t_err) { ret types.t_err }
+            ret instantiate_type(l, &g, core, d.index, args)
+        }
+    }
+    if has_key(g.mods[m].names, name) {
+        entry := get(g.mods[m].names, name) else NameEntry{NameType{types.t_err}, false}
+        match entry.def {
+            NameType{ty}: {
+                if not entry.public and not local {
+                    push(&g.diags, diag.new("E0147", span, private_msg(name)))
+                    ret types.t_err
+                }
+                if len(targs) != 0 {
+                    push(&g.diags, diag.new("E0144", span, "`{name}` takes no type arguments"))
+                    ret types.t_err
+                }
+                ret ty
+            }
+            NameVariant{_, _, _}: {
+                push(&g.diags, diag.new("E0112", span, "`{name}` is a variant, not a type"))
+                ret types.t_err
+            }
+        }
+    }
+    // The always-available module, when nothing nearer has this name.
+    core := g.core
+    if len(alias) == 0 and m != core and has_key(g.mods[core].names, name) {
+        entry := get(g.mods[core].names, name) else NameEntry{NameType{types.t_err}, false}
+        match entry.def {
+            NameType{ty}: {
+                if entry.public { ret ty }
+            }
+            _: {}
+        }
+    }
+    push(&g.diags, diag.new("E0112", span, "unknown type `{name}`"))
+    ret types.t_err
+}
+
+// Hooks up a template's `drop` for one instance of its type.
+fn attach_generic_drop(l modules.Loaded, g &Global, ty int, m int, type_name str, targs []int) {
+    if not has_key(g.mods[m].funcs, "drop") { ret }
+    entry := get(g.mods[m].funcs, "drop") else FuncEntry{false, -1, false}
+    if not entry.generic { ret }
+    f := l.units[m].program.funcs[entry.index]
+    mut matches := false
+    if len(f.params) > 0 {
+        match l.a.tys[f.params[0].ty].kind {
+            TRef{inner}: {
+                match l.a.tys[inner].kind {
+                    TName{_, name, _}: matches = name == type_name
+                    _: {}
+                }
+            }
+            _: {}
+        }
+    }
+    if matches and len(f.tparams) == len(targs) {
+        full := instantiate_fn(l, &g, m, entry.index, targs)
+        put(&g.types.user_drop, ty, full)
+    }
+}
+
+fn inst_key(m int, name str, targs []int) str {
+    mut parts []str = []
+    for t in targs {
+        push(&parts, "{t}")
+    }
+    list := join(parts, ",")
+    ret "{m}|{name}|{list}"
+}
+
+fn instantiate_type(l modules.Loaded, g &Global, m int, index int, targs []int) int {
+    d := l.units[m].program.types[index]
+    key := inst_key(m, d.name, targs)
+    known := get(g.struct_insts, key) else -1
+    if known != -1 { ret known }
+    if g.depth >= max_instance_depth {
+        push(&g.diags, diag.new("E0145", d.span, "`{d.name}` keeps instantiating itself with new types"))
+        ret types.t_err
+    }
+    name := "{d.name}[{type_list(g.types, targs)}]"
+    mut ty := types.t_err
+    match d.body {
+        Struct{_}: {
+            push(&g.types.structs, types.StructDef{name, [], 0, 1, m, 0})
+            ty = types.intern(&g.types, types.Struct{len(g.types.structs) - 1})
+        }
+        Variants{vars}: {
+            mut variants []types.Variant = []
+            for v in vars {
+                push(&variants, types.Variant{copy(v.name), []})
+            }
+            push(&g.types.enums, types.EnumDef{name, variants, types.tag_size, m, 0})
+            ty = types.intern(&g.types, types.Enum{len(g.types.enums) - 1})
+        }
+    }
+    put(&g.struct_insts, key, ty)
+    push(&g.insts, InstOf{ty, m, copy(d.name), copy(targs)})
+    put(&g.inst_at, ty, len(g.insts) - 1)
+    put(&g.spans, ty, d.span)
+
+    mut tenv := tenv_of(d.tparams, targs)
+    swap(&g.tenv, &tenv)
+    saved_cur := g.cur
+    g.cur = m
+    g.depth += 1
+    match d.body {
+        Struct{fields}: {
+            mut resolved []types.Field = []
+            for f in fields {
+                push(&resolved, types.Field{copy(f.name), resolve(l, &g, f.ty), 0})
+            }
+            match types.kind(g.types, ty) {
+                Struct{id}: g.types.structs[id].fields = resolved
+                _: {}
+            }
+        }
+        Variants{vars}: {
+            match types.kind(g.types, ty) {
+                Enum{id}: {
+                    for v, i in vars {
+                        mut resolved []types.Field = []
+                        for f in v.fields {
+                            push(&resolved, types.Field{copy(f.name), resolve(l, &g, f.ty), 0})
+                        }
+                        g.types.enums[id].variants[i].fields = resolved
+                    }
+                }
+                _: {}
+            }
+        }
+    }
+    g.depth -= 1
+    swap(&g.tenv, &tenv)
+    g.cur = saved_cur
+    if g.layout_ready { ensure_layout(&g, ty) }
+    if g.funcs_ready {
+        attach_generic_drop(l, &g, ty, m, d.name, targs)
+    }
+    ret ty
+}
+
+fn report_cycle(g &Global, t int) {
+    span := get(g.spans, t) else no_span()
+    push(&g.diags, diag.new("E0127", span, "type `{types.name(g.types, t)}` contains itself, so it would be infinitely large; use a pointer"))
+}
+
+// Lays out `t` after everything it contains by value.
+fn ensure_layout(g &Global, t int) {
+    match types.kind(g.types, t) {
+        Struct{id}: {
+            if g.types.structs[id].state == 2 { ret }
+            if g.types.structs[id].state == 1 {
+                report_cycle(&g, t)
+                ret
+            }
+            g.types.structs[id].state = 1
+            fields := copy(g.types.structs[id].fields)
+            for f in fields {
+                ensure_layout(&g, f.ty)
+            }
+            placed := place_fields(g, fields, 0)
+            g.types.structs[id].fields = copy(placed.fields)
+            g.types.structs[id].size = types.align_up(placed.end, placed.al)
+            g.types.structs[id].align = placed.al
+            g.types.structs[id].state = 2
+        }
+        Enum{id}: {
+            if g.types.enums[id].state == 2 { ret }
+            if g.types.enums[id].state == 1 {
+                report_cycle(&g, t)
+                ret
+            }
+            g.types.enums[id].state = 1
+            vars := copy(g.types.enums[id].variants)
+            for v in vars {
+                for f in v.fields {
+                    ensure_layout(&g, f.ty)
+                }
+            }
+            mut size := types.tag_size
+            mut built []types.Variant = []
+            for v in vars {
+                placed := place_fields(g, v.fields, types.tag_size)
+                if placed.end > size { size = placed.end }
+                push(&built, types.Variant{copy(v.name), copy(placed.fields)})
+            }
+            g.types.enums[id].variants = built
+            g.types.enums[id].size = types.align_up(size, 8)
+            g.types.enums[id].state = 2
+        }
+        Array{elem, _}: ensure_layout(&g, elem)
+        Option{inner}: ensure_layout(&g, inner)
+        Result{a, b}: {
+            ensure_layout(&g, a)
+            ensure_layout(&g, b)
+        }
+        _: {}
+    }
+}
+
+type Placed { fields []types.Field, end u64, al u64 }
+
+fn place_fields(g Global, fields []types.Field, start u64) Placed {
+    mut off := start
+    mut al u64 = 1
+    mut out []types.Field = []
+    for f in fields {
+        lay := types.layout(g.types, f.ty)
+        off = types.align_up(off, lay.align)
+        push(&out, types.Field{copy(f.name), f.ty, off})
+        off += lay.size
+        if lay.align > al { al = lay.align }
+    }
+    ret Placed{out, off, al}
+}
+
+fn instantiate_fn(l modules.Loaded, g &Global, m int, index int, targs []int) str {
+    f := l.units[m].program.funcs[index]
+    full := "{g.mods[m].prefix}{f.name}[{type_list(g.types, targs)}]"
+    if has_key(g.sigs, full) { ret full }
+    if len(g.work) >= max_instances or len(g.sigs.items) >= max_instances {
+        if not g.too_many {
+            g.too_many = true
+            push(&g.diags, diag.new("E0145", f.name_span, "`{f.name}` keeps instantiating itself with new types"))
+        }
+        ret full
+    }
+    mut tenv := tenv_of(f.tparams, targs)
+    swap(&g.tenv, &tenv)
+    saved_cur := g.cur
+    g.cur = m
+    mut params []int = []
+    for p in f.params {
+        push(&params, resolve(l, &g, p.ty))
+    }
+    mut r := types.t_void
+    if f.ret_ty != -1 { r = resolve(l, &g, f.ret_ty) }
+    swap(&g.tenv, &tenv)
+    g.cur = saved_cur
+    mut owned []bool = []
+    for p in f.params {
+        push(&owned, p.is_own)
+    }
+    mut has_need := false
+    for c in f.contracts {
+        if not c.is_sure { has_need = true }
+    }
+    add_sig(&g, full, FnSig{params, owned, r, "", false, has_need})
+    push(&g.work, Work{m, index, copy(targs), copy(full)})
+    ret full
+}
+
+fn add_sig(g &Global, name str, own sig FnSig) {
+    push(&g.sig_list, sig)
+    put(&g.sigs, copy(name), len(g.sig_list) - 1)
+}
+
+fn is_tparam(tparams []ast.Binding, name str) bool {
+    for t in tparams {
+        if t.name == name { ret true }
+    }
+    ret false
+}
+
+fn bind_or_insert(bind &[]Bind, name str, ty int) {
+    for b in bind {
+        if b.name == name { ret }
+    }
+    push(&bind, Bind{copy(name), ty})
+}
+
+fn unify(l modules.Loaded, g Global, p int, a int, bind &[]Bind, tparams []ast.Binding) {
+    if a == types.t_err { ret }
+    match l.a.tys[p].kind {
+        TName{module, name, targs}: {
+            alias := opt_text(module)
+            if len(alias) == 0 and len(targs) == 0 and is_tparam(tparams, name) {
+                bind_or_insert(&bind, name, a)
+            } else if len(targs) != 0 {
+                at := get(g.inst_at, a) else -1
+                if at != -1 {
+                    args := copy(g.insts[at].targs)
+                    for x, i in targs {
+                        if i < len(args) { unify(l, g, x, args[i], &bind, tparams) }
+                    }
+                }
+            }
+        }
+        TPointer{x}: {
+            match types.kind(g.types, a) {
+                Pointer{t}: unify(l, g, x, t, &bind, tparams)
+                _: {}
+            }
+        }
+        TRef{x}: {
+            match types.kind(g.types, a) {
+                Ref{t}: unify(l, g, x, t, &bind, tparams)
+                Pointer{t}: unify(l, g, x, t, &bind, tparams)
+                _: {}
+            }
+        }
+        TSlice{x}: {
+            match types.kind(g.types, a) {
+                Slice{t}: unify(l, g, x, t, &bind, tparams)
+                Array{t, _}: unify(l, g, x, t, &bind, tparams)
+                _: {}
+            }
+        }
+        TArray{_, x}: {
+            match types.kind(g.types, a) {
+                Array{t, _}: unify(l, g, x, t, &bind, tparams)
+                _: {}
+            }
+        }
+        TOption{x}: {
+            match types.kind(g.types, a) {
+                Option{t}: unify(l, g, x, t, &bind, tparams)
+                _: unify(l, g, x, a, &bind, tparams)
+            }
+        }
+        TFn{params, ret_ty, _}: {
+            match types.kind(g.types, a) {
+                Fn{id}: {
+                    f := copy(g.types.fns[id])
+                    for x, i in params {
+                        if i < len(f.params) { unify(l, g, x.ty, f.params[i], &bind, tparams) }
+                    }
+                    if ret_ty != -1 { unify(l, g, ret_ty, f.ret_ty, &bind, tparams) }
+                }
+                _: {}
+            }
+        }
+        TResult{ok, er}: {
+            match types.kind(g.types, a) {
+                Result{o, e}: {
+                    if ok != -1 { unify(l, g, ok, o, &bind, tparams) }
+                    unify(l, g, er, e, &bind, tparams)
+                }
+                _: {
+                    if ok != -1 { unify(l, g, ok, a, &bind, tparams) }
+                }
+            }
+        }
+    }
+}
+
+// The module that declared `t`'s type, or -1.
+fn owner_of(g Global, t int) int {
+    match types.kind(g.types, t) {
+        Struct{id}: ret g.types.structs[id].module
+        Enum{id}: ret g.types.enums[id].module
+        Pointer{p}: ret owner_of(g, p)
+        Ref{p}: ret owner_of(g, p)
+        _: ret -1
+    }
+}
+
+fn check_case(name str, upper bool, what str, span diag.Span, diags &[]diag.Diag) {
+    mut first u8 = '_'
+    if len(name) > 0 { first = name[0] }
+    is_upper := first >= 'A' and first <= 'Z'
+    mut bad := is_upper
+    if upper { bad = not is_upper }
+    if bad {
+        mut want := "start with a small letter"
+        if upper { want = "start with a capital letter" }
+        push(&diags, diag.new("E0128", span, "{what} `{name}` must {want}"))
+    }
+}
+
+// ---- constants ----
+
+// What `eval_const` works with: `ast.ConstVal`, but with room for 128 bits.
+type Eval = EvalBad | EvalInt{w wide.Wide} | EvalFloat{v f64} | EvalBool{v bool}
+
+fn bad_const(g &Global, span diag.Span) Eval {
+    push(&g.diags, diag.new("E0139", span, "a `const` must be computable from literals and earlier constants; with a stated type it may call functions: `const x int = f()`"))
+    ret EvalBad
+}
+
+fn eval_is_bad(v Eval) bool {
+    match v {
+        EvalBad: ret true
+        _: ret false
+    }
+}
+
+fn eval_const(l modules.Loaded, g &Global, e int) Eval {
+    span := l.a.exprs[e].span
+    match l.a.exprs[e].kind {
+        Int{v}: ret EvalInt{num_wide(v)}
+        Float{v}: ret EvalFloat{v}
+        Char{c}: ret EvalInt{wide.of(u64(c), false, false)}
+        Bool{b}: ret EvalBool{b}
+        Var{n}: {
+            entry := get(g.mods[g.cur].consts, n) else ConstEntry{ast.ConstBool{false}, types.t_err, false}
+            if not has_key(g.mods[g.cur].consts, n) { ret bad_const(&g, span) }
+            match entry.val {
+                ConstInt{v}: ret EvalInt{num_wide(v)}
+                ConstFloat{v}: ret EvalFloat{v}
+                ConstBool{v}: ret EvalBool{v}
+                ConstComputed{_}: ret bad_const(&g, span)
+            }
+        }
+        Unary{op, inner}: {
+            v := eval_const(l, &g, inner)
+            if eval_is_bad(v) { ret EvalBad }
+            match op {
+                Neg: {
+                    match v {
+                        EvalInt{w}: ret EvalInt{wide.negate(w)}
+                        EvalFloat{x}: ret EvalFloat{-x}
+                        _: ret bad_const(&g, span)
+                    }
+                }
+                BitNot: {
+                    match v {
+                        EvalInt{w}: ret EvalInt{wide.bnot(w)}
+                        _: ret bad_const(&g, span)
+                    }
+                }
+                Not: {
+                    match v {
+                        EvalBool{b}: ret EvalBool{not b}
+                        _: ret bad_const(&g, span)
+                    }
+                }
+            }
+        }
+        Binary{op, lhs, rhs}: {
+            a := eval_const(l, &g, lhs)
+            if eval_is_bad(a) { ret EvalBad }
+            b := eval_const(l, &g, rhs)
+            if eval_is_bad(b) { ret EvalBad }
+            match a {
+                EvalInt{x}: {
+                    match b {
+                        EvalInt{y}: {
+                            r := eval_ints(op, x, y) else {
+                                ret bad_const(&g, span)
+                            }
+                            ret EvalInt{r}
+                        }
+                        _: ret bad_const(&g, span)
+                    }
+                }
+                EvalFloat{x}: {
+                    match b {
+                        EvalFloat{y}: {
+                            match op {
+                                Add: ret EvalFloat{x + y}
+                                Sub: ret EvalFloat{x - y}
+                                Mul: ret EvalFloat{x * y}
+                                Div: ret EvalFloat{x / y}
+                                _: ret bad_const(&g, span)
+                            }
+                        }
+                        _: ret bad_const(&g, span)
+                    }
+                }
+                _: ret bad_const(&g, span)
+            }
+        }
+        _: ret bad_const(&g, span)
+    }
+}
+
+fn eval_ints(op ast.BinOp, x wide.Wide, y wide.Wide) ?wide.Wide {
+    match op {
+        Add: ret wide.add(x, y)
+        Sub: ret wide.sub(x, y)
+        Mul: ret wide.mul(x, y)
+        Div: ret wide.div(x, y)
+        Rem: ret wide.rem(x, y)
+        BitAnd: ret wide.band(x, y)
+        BitOr: ret wide.bor(x, y)
+        BitXor: ret wide.bxor(x, y)
+        Shl: {
+            if not wide.is_shift(y) { ret none }
+            ret wide.shl(x, y)
+        }
+        Shr: {
+            if not wide.is_shift(y) { ret none }
+            ret wide.shr(x, y)
+        }
+        _: ret none
+    }
+}
+
+fn collect_consts(l modules.Loaded, g &Global) {
+    cur := g.cur
+    for c in l.units[cur].program.consts {
+        check_case(c.name, false, "constant", c.span, &g.diags)
+        if has_key(g.mods[cur].consts, c.name) or is_builtin(c.name) {
+            push(&g.diags, diag.new("E0102", c.span, "`{c.name}` is already defined"))
+            continue
+        }
+        if c.computed {
+            // Its type may be declared further down; `resolve_computed` fills it in.
+            id := len(g.computed)
+            push(&g.computed, ComputedConst{copy(c.name), "{g.mods[cur].prefix}const {c.name}", types.t_err, c.span})
+            put(&g.mods[cur].consts, copy(c.name), ConstEntry{ast.ConstComputed{id}, types.t_err, c.public})
+            continue
+        }
+        mut want := -1
+        if c.ty != -1 { want = resolve(l, &g, c.ty) }
+        v := eval_const(l, &g, c.value)
+        vspan := l.a.exprs[c.value].span
+        if eval_is_bad(v) {
+            // Already reported: uses of this name should not report again.
+            put(&g.mods[cur].consts, copy(c.name), ConstEntry{ast.ConstInt{ast.Num{0, false, false}}, types.t_err, c.public})
+            continue
+        }
+        mut final_val := ast.ConstBool{false}
+        mut ty := types.t_err
+        mut wide_value := wide.of(0, false, false)
+        mut is_int := false
+        match v {
+            EvalInt{n}: {
+                if want == -1 {
+                    ty = types.t_int
+                    wide_value = n
+                    is_int = true
+                } else if types.is_float(g.types, want) {
+                    if n.big {
+                        // The digits of this literal are gone; see PORTING.md.
+                        push(&g.diags, diag.new("E0115", vspan, "number does not fit in {types.name(g.types, want)}"))
+                        continue
+                    }
+                    final_val = ast.ConstFloat{wide.to_f64(n)}
+                    ty = want
+                } else if types.is_int(g.types, want) {
+                    ty = want
+                    wide_value = n
+                    is_int = true
+                } else if want == types.t_err {
+                    continue
+                } else {
+                    push(&g.diags, diag.new("E0104", vspan, "this value cannot be {types.name(g.types, want)}"))
+                    continue
+                }
+            }
+            EvalFloat{n}: {
+                if want == -1 {
+                    final_val = ast.ConstFloat{n}
+                    ty = types.t_f64
+                } else if types.is_float(g.types, want) {
+                    final_val = ast.ConstFloat{n}
+                    ty = want
+                } else if want == types.t_err {
+                    continue
+                } else {
+                    push(&g.diags, diag.new("E0104", vspan, "this value cannot be {types.name(g.types, want)}"))
+                    continue
+                }
+            }
+            EvalBool{b}: {
+                if want == -1 or want == types.t_bool {
+                    final_val = ast.ConstBool{b}
+                    ty = types.t_bool
+                } else if want == types.t_err {
+                    continue
+                } else {
+                    push(&g.diags, diag.new("E0104", vspan, "this value cannot be {types.name(g.types, want)}"))
+                    continue
+                }
+            }
+            EvalBad: {}
+        }
+        if is_int {
+            match types.kind(g.types, ty) {
+                Int{bits, signed}: {
+                    if not wide.fits(wide_value, bits, signed) {
+                        push(&g.diags, diag.new("E0115", vspan, "number does not fit in {types.name(g.types, ty)}"))
+                        continue
+                    }
+                    final_val = ast.ConstInt{ast.Num{wide.magnitude(wide_value), wide.negative(wide_value), false}}
+                }
+                _: {}
+            }
+        }
+        put(&g.mods[cur].consts, copy(c.name), ConstEntry{final_val, ty, c.public})
+    }
+}
+
+// Now that every type is known, gives the computed constants theirs.
+fn resolve_computed(l modules.Loaded, g &Global) {
+    cur := g.cur
+    for c in l.units[cur].program.consts {
+        if not c.computed { continue }
+        if not has_key(g.mods[cur].consts, c.name) { continue }
+        entry := get(g.mods[cur].consts, c.name) else ConstEntry{ast.ConstBool{false}, types.t_err, false}
+        mut id := -1
+        match entry.val {
+            ConstComputed{i}: id = i
+            _: continue
+        }
+        ty := resolve(l, &g, c.ty)
+        if ty != types.t_err and not const_data(g.types, ty) {
+            push(&g.diags, diag.new("E0173", c.span, "a computed `const` cannot be {types.name(g.types, ty)}: it must be plain data or `str`"))
+        }
+        g.computed[id].ty = ty
+        put(&g.mods[cur].consts, copy(c.name), ConstEntry{ast.ConstComputed{id}, ty, entry.public})
+    }
+}
+
+fn plain_data(t types.Types, ty int) bool {
+    match types.kind(t, ty) {
+        Int{_, _}: ret true
+        Float{_}: ret true
+        Bool: ret true
+        Array{e, _}: ret plain_data(t, e)
+        Struct{id}: {
+            for f in t.structs[id].fields {
+                if not plain_data(t, f.ty) { ret false }
+            }
+            ret not has_key(t.user_drop, ty)
+        }
+        _: ret false
+    }
+}
+
+// Can the value be written into the program as bytes?
+fn const_data(t types.Types, ty int) bool {
+    ret ty == types.t_str or plain_data(t, ty)
+}
+
+// ---- declarations ----
+
+fn define_name(g &Global, name str, own def NameDef, public bool, span diag.Span) bool {
+    if has_key(g.mods[g.cur].names, name) or has_key(g.mods[g.cur].gtypes, name) or prim(name) != -1 {
+        push(&g.diags, diag.new("E0110", span, "`{name}` is defined twice"))
+        ret false
+    }
+    put(&g.mods[g.cur].names, copy(name), NameEntry{def, public})
+    ret true
+}
+
+// Declares the names of a module's types, so they can refer to each other freely.
+fn declare_types(l modules.Loaded, g &Global) []int {
+    mut ids []int = []
+    module := g.cur
+    for d, index in l.units[module].program.types {
+        check_case(d.name, true, "type", d.span, &g.diags)
+        if len(d.tparams) != 0 {
+            for p in d.tparams {
+                check_case(p.name, true, "type parameter", p.span, &g.diags)
+            }
+            if has_key(g.mods[module].names, d.name) or has_key(g.mods[module].gtypes, d.name) {
+                push(&g.diags, diag.new("E0110", d.span, "`{d.name}` is defined twice"))
+            } else {
+                put(&g.mods[module].gtypes, copy(d.name), GType{index, d.public})
+                match d.body {
+                    Variants{vars}: {
+                        for v, i in vars {
+                            check_case(v.name, true, "variant", v.span, &g.diags)
+                            if has_key(g.mods[module].names, v.name) or has_key(g.mods[module].gtypes, v.name) or has_key(g.mods[module].gvariants, v.name) {
+                                push(&g.diags, diag.new("E0110", v.span, "`{v.name}` is defined twice"))
+                            } else {
+                                put(&g.mods[module].gvariants, copy(v.name), GVariant{index, i, d.public})
+                            }
+                        }
+                    }
+                    _: {}
+                }
+            }
+            push(&ids, -1)
+            continue
+        }
+        mut ty := types.t_err
+        match d.body {
+            Struct{_}: {
+                push(&g.types.structs, types.StructDef{copy(d.name), [], 0, 1, module, 0})
+                ty = types.intern(&g.types, types.Struct{len(g.types.structs) - 1})
+            }
+            Variants{vars}: {
+                mut variants []types.Variant = []
+                for v in vars {
+                    push(&variants, types.Variant{copy(v.name), []})
+                }
+                push(&g.types.enums, types.EnumDef{copy(d.name), variants, types.tag_size, module, 0})
+                ty = types.intern(&g.types, types.Enum{len(g.types.enums) - 1})
+            }
+        }
+        put(&g.spans, ty, d.span)
+        if not define_name(&g, d.name, NameType{ty}, d.public, d.span) {
+            push(&ids, -1)
+            continue
+        }
+        match d.body {
+            Variants{vars}: {
+                eid := enum_of(g.types, ty)
+                if eid != -1 {
+                    for v, i in vars {
+                        check_case(v.name, true, "variant", v.span, &g.diags)
+                        _ = define_name(&g, v.name, NameVariant{eid, i, ty}, d.public, v.span)
+                    }
+                }
+            }
+            _: {}
+        }
+        push(&ids, ty)
+    }
+    ret ids
+}
+
+fn enum_of(t types.Types, ty int) int {
+    match types.kind(t, ty) {
+        Enum{id}: ret id
+        _: ret -1
+    }
+}
+
+fn struct_of(t types.Types, ty int) int {
+    match types.kind(t, ty) {
+        Struct{id}: ret id
+        _: ret -1
+    }
+}
+
+fn resolve_field_list(l modules.Loaded, g &Global, fields []ast.FieldDecl) []types.Field {
+    mut out []types.Field = []
+    for f in fields {
+        check_case(f.name, false, "field", f.span, &g.diags)
+        match l.a.tys[f.ty].kind {
+            TRef{_}: push(&g.diags, diag.new("E0157", f.span, "`&` is only for parameters; a struct cannot hold one"))
+            _: {}
+        }
+        for x in out {
+            if x.name == f.name {
+                push(&g.diags, diag.new("E0137", f.span, "field `{f.name}` appears twice"))
+                break
+            }
+        }
+        ty := resolve(l, &g, f.ty)
+        push(&out, types.Field{copy(f.name), ty, 0})
+    }
+    ret out
+}
+
+fn fill_types(l modules.Loaded, g &Global, ids []int) {
+    for d, n in l.units[g.cur].program.types {
+        ty := ids[n]
+        if ty == -1 { continue }
+        match d.body {
+            Struct{fields}: {
+                sid := struct_of(g.types, ty)
+                if sid != -1 {
+                    resolved := resolve_field_list(l, &g, fields)
+                    g.types.structs[sid].fields = resolved
+                }
+            }
+            Variants{vars}: {
+                eid := enum_of(g.types, ty)
+                if eid != -1 {
+                    for v, i in vars {
+                        resolved := resolve_field_list(l, &g, v.fields)
+                        g.types.enums[eid].variants[i].fields = resolved
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_c_type(t types.Types, ty int) bool {
+    ret ty == types.t_err or not types.is_aggregate(t, ty)
+}
+
+fn collect_funcs(l modules.Loaded, g &Global) {
+    cur := g.cur
+    prefix := copy(g.mods[cur].prefix)
+    for f, index in l.units[cur].program.funcs {
+        check_case(f.name, false, "function", f.name_span, &g.diags)
+        if is_builtin(f.name) {
+            push(&g.diags, diag.new("E0102", f.name_span, "`{f.name}` is a built-in name"))
+            continue
+        }
+        if has_key(g.mods[cur].funcs, f.name) or has_key(g.mods[cur].consts, f.name) {
+            push(&g.diags, diag.new("E0110", f.name_span, "function `{f.name}` is defined twice"))
+            continue
+        }
+        if len(f.tparams) != 0 {
+            for p in f.tparams {
+                check_case(p.name, true, "type parameter", p.span, &g.diags)
+            }
+            put(&g.mods[cur].funcs, copy(f.name), FuncEntry{true, index, f.public})
+            continue
+        }
+        mut params []int = []
+        for x in f.params {
+            push(&params, resolve(l, &g, x.ty))
+        }
+        mut r := types.t_void
+        if f.ret_ty != -1 { r = resolve(l, &g, f.ret_ty) }
+        if types.is_ref(g.types, r) {
+            push(&g.diags, diag.new("E0157", f.name_span, "a function cannot return a `&`; return the value"))
+        }
+        if f.name == "drop" {
+            mut ok := false
+            if len(params) == 1 {
+                match types.kind(g.types, params[0]) {
+                    Ref{t}: {
+                        match types.kind(g.types, t) {
+                            Struct{_}: {
+                                put(&g.types.user_drop, t, "{prefix}drop")
+                                ok = true
+                            }
+                            Enum{_}: {
+                                put(&g.types.user_drop, t, "{prefix}drop")
+                                ok = true
+                            }
+                            _: {}
+                        }
+                    }
+                    _: {}
+                }
+            }
+            if not ok {
+                push(&g.diags, diag.new("E0156", f.name_span, "`drop` takes exactly one `&` parameter of a struct or variant type"))
+            }
+        }
+        if not f.is_claw {
+            mut bad := false
+            mut span := f.name_span
+            for x, i in f.params {
+                if types.is_ptr(g.types, params[i]) {
+                    span = x.span
+                    bad = true
+                    break
+                }
+            }
+            if not bad and types.is_ptr(g.types, r) { bad = true }
+            if bad {
+                push(&g.diags, fix("E0140", span, "pointers only exist inside `claw fn`", "make it a `claw fn`"))
+            }
+        }
+        put(&g.mods[cur].funcs, copy(f.name), FuncEntry{false, index, f.public})
+        mut owned []bool = []
+        for p in f.params {
+            push(&owned, p.is_own)
+        }
+        mut has_need := false
+        for c in f.contracts {
+            if not c.is_sure { has_need = true }
+        }
+        add_sig(&g, "{prefix}{f.name}", FnSig{params, owned, r, "", false, has_need})
+    }
+    for x in l.units[cur].program.externs {
+        if has_key(g.mods[cur].funcs, x.name) or is_builtin(x.name) {
+            push(&g.diags, diag.new("E0110", x.span, "function `{x.name}` is defined twice"))
+            continue
+        }
+        mut params []int = []
+        for a in x.params {
+            push(&params, resolve(l, &g, a.ty))
+        }
+        mut r := types.t_void
+        if x.ret_ty != -1 { r = resolve(l, &g, x.ret_ty) }
+        for a, i in x.params {
+            if not is_c_type(g.types, params[i]) {
+                push(&g.diags, diag.new("E0149", a.span, "`extern fn` takes only numbers, bool and pointers; pass a pointer to the struct"))
+            }
+        }
+        if not is_c_type(g.types, r) {
+            push(&g.diags, diag.new("E0149", x.span, "`extern fn` returns only numbers, bool and pointers"))
+        }
+        put(&g.mods[cur].funcs, copy(x.name), FuncEntry{false, -1, x.public})
+        mut symbol := opt_text(x.symbol)
+        if len(symbol) == 0 { symbol = copy(x.name) }
+        mut owned []bool = []
+        for _ in params {
+            push(&owned, false)
+        }
+        add_sig(&g, "{prefix}{x.name}", FnSig{params, owned, r, symbol, x.variadic, false})
+    }
+}
+
+// ---- function bodies ----
+
+fn new_tables(g &Global, n int) {
+    for len(g.ty) < n {
+        push(&g.ty, types.t_err)
+        push(&g.coerce, ast.CoerceNo)
+        push(&g.res, ast.ResNone)
+    }
+}
+
+fn check_body(l modules.Loaded, g &Global, f ast.Func, module int, full str, is_main bool) {
+    sig_at := get(g.sigs, full) else -1
+    if sig_at == -1 { ret }
+    sig := copy(g.sig_list[sig_at])
+    g.cur = module
+    g.func_name = copy(f.name)
+    g.func_claw = f.is_claw
+    clear(&g.addressed)
+    clear(&g.vars)
+    clear(&g.scope_start)
+    push(&g.scope_start, 0)
+    g.ret_ty = sig.ret_ty
+    g.loops = 0
+    g.is_main = is_main
+    clear(&g.locks)
+    clear(&g.scope_locks)
+    g.in_text = false
+    g.in_defer = false
+    clear(&g.moved)
+    clear(&g.flows)
+    g.in_contract = false
+    g.sure_clause = false
+    g.in_old = false
+    for x, i in f.params {
+        if x.name == "_" { continue }
+        if i >= len(sig.params) { break }
+        ty := sig.params[i]
+        mut t := ty
+        mut view := not x.is_own
+        mut mutable := false
+        match types.kind(g.types, ty) {
+            Ref{inner}: {
+                t = inner
+                view = true
+                mutable = true
+            }
+            _: {}
+        }
+        declare(&g, x.name, t, mutable, x.span, x.span)
+        v := lookup(g, x.name)
+        if v != -1 {
+            g.vars[v].view = view
+            g.vars[v].by_ref = mutable
+        }
+    }
+    if len(f.contracts) != 0 and (is_main or f.name == "drop") {
+        push(&g.diags, diag.new("E0166", f.name_span, "`{f.name}` is called by the compiler, so it cannot have contracts"))
+    }
+    g.in_contract = true
+    for c in f.contracts {
+        g.sure_clause = c.is_sure
+        check_against(l, &g, c.e, types.t_bool)
+    }
+    g.in_contract = false
+    g.sure_clause = false
+    ends := block(l, &g, f.body)
+    pop_scope(&g)
+    if not ends and sig.ret_ty != types.t_void and sig.ret_ty != types.t_err and not is_void_result(g.types, sig.ret_ty) {
+        push(&g.diags, diag.new("E0107", l.a.blocks[f.body].end, "`{f.name}` can reach its end without `ret`"))
+    }
+}
+
+// The expressions a function's own copy uses all come out of `clone_block`, so a template
+// instance can be checked without touching the template.
+fn clone_list(a &ast.Ast, items []int) []int {
+    mut out []int = []
+    for x in items {
+        push(&out, clone_expr(&a, x))
+    }
+    ret out
+}
+
+fn clone_opt(a &ast.Ast, x int) int {
+    if x == -1 { ret -1 }
+    ret clone_expr(&a, x)
+}
+
+fn clone_expr(a &ast.Ast, e int) int {
+    span := a.exprs[e].span
+    k := copy(a.exprs[e].kind)
+    mut out := ast.None
+    match k {
+        Int{_}: out = copy(k)
+        Float{_}: out = copy(k)
+        Char{_}: out = copy(k)
+        Bool{_}: out = copy(k)
+        Str{_}: out = copy(k)
+        Interp{parts}: {
+            mut p []ast.Part = []
+            for x in parts {
+                match x {
+                    PartLit{s}: push(&p, ast.PartLit{copy(s)})
+                    PartExpr{i}: push(&p, ast.PartExpr{clone_expr(&a, i)})
+                }
+            }
+            out = ast.Interp{p}
+        }
+        None: out = ast.None
+        RetVal: out = ast.RetVal
+        Old{x}: out = ast.Old{clone_expr(&a, x)}
+        Var{_}: out = copy(k)
+        Unary{op, x}: out = ast.Unary{op, clone_expr(&a, x)}
+        Binary{op, x, y}: {
+            lhs := clone_expr(&a, x)
+            rhs := clone_expr(&a, y)
+            out = ast.Binary{op, lhs, rhs}
+        }
+        Call{module, name, name_span, targs, args, via}: {
+            cargs := clone_list(&a, args)
+            cvia := clone_opt(&a, via)
+            out = ast.Call{copy(module), copy(name), name_span, copy(targs), cargs, cvia}
+        }
+        CallValue{f, args}: {
+            cf := clone_expr(&a, f)
+            cargs := clone_list(&a, args)
+            out = ast.CallValue{cf, cargs}
+        }
+        StructLit{module, name, name_span, targs, args}: {
+            cargs := clone_list(&a, args)
+            out = ast.StructLit{copy(module), copy(name), name_span, copy(targs), cargs}
+        }
+        AddrOf{x}: out = ast.AddrOf{clone_expr(&a, x)}
+        Deref{x}: out = ast.Deref{clone_expr(&a, x)}
+        ArrayLit{items}: out = ast.ArrayLit{clone_list(&a, items)}
+        ArrayFill{x}: out = ast.ArrayFill{clone_expr(&a, x)}
+        Field{x, name, name_span}: out = ast.Field{clone_expr(&a, x), copy(name), name_span}
+        Index{x, i}: {
+            cx := clone_expr(&a, x)
+            ci := clone_expr(&a, i)
+            out = ast.Index{cx, ci}
+        }
+        Slice{x, lo, hi}: {
+            cx := clone_expr(&a, x)
+            clo := clone_opt(&a, lo)
+            chi := clone_opt(&a, hi)
+            out = ast.Slice{cx, clo, chi}
+        }
+        Try{x}: out = ast.Try{clone_expr(&a, x)}
+        Else{x, handler}: {
+            cx := clone_expr(&a, x)
+            mut h := ast.ElseValue{-1}
+            match handler {
+                ElseValue{v}: h = ast.ElseValue{clone_expr(&a, v)}
+                ElseBlock{binder, body}: h = ast.ElseBlock{copy(binder), clone_block(&a, body)}
+            }
+            out = ast.Else{cx, h}
+        }
+    }
+    ret ast.new_expr(&a, out, span)
+}
+
+fn clone_block(a &ast.Ast, b int) int {
+    end := a.blocks[b].end
+    list := copy(a.blocks[b].stmts)
+    mut out []int = []
+    for s in list {
+        push(&out, clone_stmt(&a, s))
+    }
+    ret ast.new_block(&a, out, end)
+}
+
+fn clone_stmt(a &ast.Ast, s int) int {
+    span := a.stmts[s].span
+    k := copy(a.stmts[s].kind)
+    mut out := ast.Break
+    match k {
+        Let{mutable, name, name_span, ty, init}: out = ast.Let{mutable, copy(name), name_span, ty, clone_expr(&a, init)}
+        Assign{target, op, value}: {
+            ct := clone_expr(&a, target)
+            cv := clone_expr(&a, value)
+            out = ast.Assign{ct, op, cv}
+        }
+        Discard{e}: out = ast.Discard{clone_expr(&a, e)}
+        ExprStmt{e}: out = ast.ExprStmt{clone_expr(&a, e)}
+        If{cond, then, els}: {
+            cc := clone_expr(&a, cond)
+            ct := clone_block(&a, then)
+            mut ce ?ast.ElseStmt = none
+            x := els else ast.ElseIf{-1}
+            match x {
+                ElseBlockOf{b}: ce = ast.ElseBlockOf{clone_block(&a, b)}
+                ElseIf{i}: {
+                    if i != -1 { ce = ast.ElseIf{clone_stmt(&a, i)} }
+                }
+            }
+            out = ast.If{cc, ct, ce}
+        }
+        ForRange{vname, var_span, start, end, body}: {
+            cs := clone_expr(&a, start)
+            ce := clone_expr(&a, end)
+            cb := clone_block(&a, body)
+            out = ast.ForRange{copy(vname), var_span, cs, ce, cb}
+        }
+        ForIn{elem, elem_span, index, subject, body}: {
+            cs := clone_expr(&a, subject)
+            cb := clone_block(&a, body)
+            out = ast.ForIn{copy(elem), elem_span, copy(index), cs, cb}
+        }
+        ForCond{cond, body}: {
+            cc := clone_expr(&a, cond)
+            cb := clone_block(&a, body)
+            out = ast.ForCond{cc, cb}
+        }
+        ForEver{body}: out = ast.ForEver{clone_block(&a, body)}
+        Match{subject, arms}: {
+            cs := clone_expr(&a, subject)
+            mut carms []ast.Arm = []
+            for arm in arms {
+                push(&carms, ast.Arm{copy(arm.pat), arm.span, clone_block(&a, arm.body)})
+            }
+            out = ast.Match{cs, carms}
+        }
+        Ret{e}: out = ast.Ret{clone_opt(&a, e)}
+        Fail{e}: out = ast.Fail{clone_expr(&a, e)}
+        Defer{b}: out = ast.Defer{clone_block(&a, b)}
+        Sure{e, text}: out = ast.Sure{clone_expr(&a, e), copy(text)}
+        Break: out = ast.Break
+        Continue: out = ast.Continue
+    }
+    ret ast.new_stmt(&a, out, span)
+}
+
+fn clone_func(a &ast.Ast, f ast.Func, name str) ast.Func {
+    body := clone_block(&a, f.body)
+    mut contracts []ast.Contract = []
+    for c in f.contracts {
+        push(&contracts, ast.Contract{c.is_sure, clone_expr(&a, c.e), copy(c.text)})
+    }
+    ret ast.Func{copy(name), f.name_span, f.public, f.is_claw, copy(f.tparams), new_map[str, bool](hash_str), copy(f.params), f.ret_ty, contracts, copy(f.effects), f.sig_end, copy(f.test_name), body}
+}
+
+fn set_addressed(f &ast.Func, names []str) {
+    for n in names {
+        put(&f.addressed, copy(n), true)
+    }
+}
+
+// `tests_only`: there is no program to start, so `main` is optional.
+pub fn check(l &modules.Loaded, tests_only bool, diags &[]diag.Diag) Checked +mem {
+    mut mods []Mod = []
+    for u in l.units {
+        push(&mods, Mod{copy(u.prefix), new_map[str, bool](hash_str), new_map[str, NameEntry](hash_str),
+            new_map[str, ConstEntry](hash_str), new_map[str, FuncEntry](hash_str), new_map[str, GType](hash_str),
+            new_map[str, GVariant](hash_str)})
+    }
+    mut g := Global{
+        [], types.new_types(), mods, 0, [], new_map[str, int](hash_str), [], new_map[str, int](hash_str), [],
+        new_map[int, int](hash_int), new_map[int, diag.Span](hash_int), false, false, l.core, false, 0, [], [],
+        [], [], [],
+        "", false, [], [], [], 0, 0, false, [], [], false, false, [], [], false, false, false,
+    }
+    swap(&g.diags, &diags)
+    new_tables(&g, len(l.a.exprs))
+
+    for i in 0..len(l.units) {
+        g.cur = i
+        collect_consts(l, &g)
+    }
+    mut ids [][]int = []
+    for i in 0..len(l.units) {
+        g.cur = i
+        push(&ids, declare_types(l, &g))
+    }
+    for i in 0..len(l.units) {
+        g.cur = i
+        fill_types(l, &g, ids[i])
+    }
+    // In order of type id, as compiler/src/sema.rs does; `insts` is ordered that way already.
+    mut every []int = []
+    for x in g.insts {
+        push(&every, x.ty)
+    }
+    for list in ids {
+        for t in list {
+            if t != -1 { push(&every, t) }
+        }
+    }
+    for t in every {
+        ensure_layout(&g, t)
+    }
+    g.layout_ready = true
+
+    for i in 0..len(l.units) {
+        g.cur = i
+        resolve_computed(l, &g)
+    }
+    for i in 0..len(l.units) {
+        g.cur = i
+        collect_funcs(l, &g)
+    }
+
+    g.funcs_ready = true
+    existing := len(g.insts)
+    for i in 0..existing {
+        x := copy(g.insts[i])
+        attach_generic_drop(l, &g, x.ty, x.m, x.name, x.targs)
+    }
+
+    root := len(l.units) - 1
+    mut main_at := -1
+    for f, i in l.units[root].program.funcs {
+        if f.name == "main" {
+            main_at = i
+            break
+        }
+    }
+    if main_at == -1 {
+        if not tests_only {
+            push(&g.diags, diag.new("E0109", diag.Span{0, 0, 1, 1, 0}, "no `fn main()`; every program needs one"))
+        }
+    } else {
+        f := l.units[root].program.funcs[main_at]
+        if len(f.params) != 0 or f.ret_ty != -1 or len(f.tparams) != 0 {
+            push(&g.diags, diag.new("E0109", f.name_span, "`main` takes no parameters and returns nothing"))
+        }
+    }
+
+    mut titles []str = []
+    for f in l.units[root].program.funcs {
+        t := opt_text(f.test_name)
+        if is_test(f) {
+            if has(titles, t) {
+                push(&g.diags, diag.new("E0167", f.name_span, "there is already a test named \"{t}\""))
+            } else {
+                push(&titles, copy(t))
+            }
+        }
+    }
+
+    for i in 0..len(l.units) {
+        for j in 0..len(l.units[i].program.funcs) {
+            if len(l.units[i].program.funcs[j].tparams) != 0 { continue }
+            full := "{l.units[i].prefix}{l.units[i].program.funcs[j].name}"
+            is_main := (i == root and l.units[i].program.funcs[j].name == "main") or is_test(l.units[i].program.funcs[j])
+            check_body(l, &g, l.units[i].program.funcs[j], i, full, is_main)
+            if len(g.addressed) > 0 { set_addressed(&l.units[i].program.funcs[j], g.addressed) }
+        }
+    }
+
+    // Each template instance is checked as ordinary code with its types filled in.
+    mut instances []ast.Func = []
+    for len(g.work) > 0 {
+        w := pop(&g.work) else { break }
+        mut inst := clone_func(&l.a, l.units[w.m].program.funcs[w.index], w.full)
+        new_tables(&g, len(l.a.exprs))
+        g.tenv = tenv_of(l.units[w.m].program.funcs[w.index].tparams, w.targs)
+        check_body(l, &g, inst, w.m, w.full, false)
+        clear(&g.tenv)
+        if len(g.addressed) > 0 { set_addressed(&inst, g.addressed) }
+        push(&instances, inst)
+    }
+
+    for i in 0..len(l.units) {
+        for e in l.units[i].import_spans.items {
+            if not has_key(g.mods[i].used, e.key) {
+                push(&g.diags, diag.new("E0148", e.val, "module `{e.key}` is imported but not used"))
+            }
+        }
+    }
+
+    swap(&g.diags, &diags)
+    for i in 0..len(l.a.exprs) {
+        l.a.exprs[i].ty = g.ty[i]
+        l.a.exprs[i].coerce = g.coerce[i]
+        swap(&l.a.exprs[i].res, &g.res[i])
+    }
+    mut out := Checked{types.new_types(), new_map[str, int](hash_str), [], instances, []}
+    swap(&out.types, &g.types)
+    swap(&out.sigs, &g.sigs)
+    swap(&out.sig_list, &g.sig_list)
+    swap(&out.computed, &g.computed)
+    ret out
+}
+
+fn is_test(f ast.Func) bool {
+    _ = copy(f.test_name) else { ret false }
+    ret true
+}
+
+fn path_of(l modules.Loaded, e int) ?Path {
+    match l.a.exprs[e].kind {
+        Var{n}: ret Path{copy(n), []}
+        Field{b, name, _}: {
+            mut p := path_of(l, b) else { ret none }
+            push(&p.comps, CompField{copy(name)})
+            ret p
+        }
+        Index{b, _}: {
+            mut p := path_of(l, b) else { ret none }
+            push(&p.comps, CompIndex)
+            ret p
+        }
+        Slice{b, _, _}: {
+            mut p := path_of(l, b) else { ret none }
+            push(&p.comps, CompIndex)
+            ret p
+        }
+        _: ret none
+    }
+}
+
+fn comp_eq(a Comp, b Comp) bool {
+    match a {
+        CompField{x}: {
+            match b {
+                CompField{y}: ret x == y
+                CompIndex: ret false
+            }
+        }
+        CompIndex: {
+            match b {
+                CompField{_}: ret false
+                CompIndex: ret true
+            }
+        }
+    }
+}
+
+// Could these two paths touch the same memory?
+fn overlap(a Path, b Path) bool {
+    if a.root != b.root { ret false }
+    for c, i in a.comps {
+        if i >= len(b.comps) { break }
+        if not comp_eq(c, b.comps[i]) { ret false }
+    }
+    ret true
+}
+
+// An expression and everything nested in it, outermost first.
+pub fn walk(l modules.Loaded, e int, out &[]int) +mem {
+    push(&out, e)
+    match l.a.exprs[e].kind {
+        Old{x}: walk(l, x, &out)
+        Unary{_, x}: walk(l, x, &out)
+        AddrOf{x}: walk(l, x, &out)
+        Deref{x}: walk(l, x, &out)
+        Field{x, _, _}: walk(l, x, &out)
+        Try{x}: walk(l, x, &out)
+        ArrayFill{x}: walk(l, x, &out)
+        Binary{_, x, y}: {
+            walk(l, x, &out)
+            walk(l, y, &out)
+        }
+        Index{x, i}: {
+            walk(l, x, &out)
+            walk(l, i, &out)
+        }
+        Slice{x, lo, hi}: {
+            walk(l, x, &out)
+            if lo != -1 { walk(l, lo, &out) }
+            if hi != -1 { walk(l, hi, &out) }
+        }
+        Call{_, _, _, _, args, _}: {
+            for a in args {
+                walk(l, a, &out)
+            }
+        }
+        StructLit{_, _, _, _, args}: {
+            for a in args {
+                walk(l, a, &out)
+            }
+        }
+        ArrayLit{items}: {
+            for a in items {
+                walk(l, a, &out)
+            }
+        }
+        CallValue{f, args}: {
+            walk(l, f, &out)
+            for a in args {
+                walk(l, a, &out)
+            }
+        }
+        Interp{parts}: {
+            for p in parts {
+                match p {
+                    PartExpr{x}: walk(l, x, &out)
+                    PartLit{_}: {}
+                }
+            }
+        }
+        Else{x, handler}: {
+            walk(l, x, &out)
+            match handler {
+                ElseValue{v}: walk(l, v, &out)
+                ElseBlock{_, _}: {}
+            }
+        }
+        _: {}
+    }
+}
+
+fn mutable_paths(l modules.Loaded, e int, out &[]Path) {
+    mut nodes []int = []
+    walk(l, e, &nodes)
+    for x in nodes {
+        match l.a.exprs[x].kind {
+            AddrOf{inner}: {
+                p := path_of(l, inner) else { continue }
+                push(&out, p)
+            }
+            _: {}
+        }
+    }
+}
+
+fn is_lit(l modules.Loaded, e int) bool {
+    match l.a.exprs[e].kind {
+        Int{_}: ret true
+        Float{_}: ret true
+        Unary{op, x}: {
+            match op {
+                Neg: ret is_lit(l, x)
+                BitNot: ret is_lit(l, x)
+                Not: ret false
+            }
+        }
+        Binary{op, x, y}: {
+            match op {
+                Eq: ret false
+                Ne: ret false
+                Lt: ret false
+                Le: ret false
+                Gt: ret false
+                Ge: ret false
+                And: ret false
+                Or: ret false
+                _: ret is_lit(l, x) and is_lit(l, y)
+            }
+        }
+        _: ret false
+    }
+}
+
+// Literals whose type depends on what is expected of them.
+fn hint_dep(l modules.Loaded, e int) bool {
+    if is_lit(l, e) { ret true }
+    match l.a.exprs[e].kind {
+        None: ret true
+        ArrayLit{_}: ret true
+        ArrayFill{_}: ret true
+        Str{_}: ret true
+        _: ret false
+    }
+}
+
+// Does this parameter type still contain a type parameter nobody has decided?
+fn mentions_unbound(l modules.Loaded, p int, bind []Bind, tparams []ast.Binding) bool {
+    match l.a.tys[p].kind {
+        TName{_, name, targs}: {
+            if is_tparam(tparams, name) and tenv_get(bind, name) == -1 { ret true }
+            for x in targs {
+                if mentions_unbound(l, x, bind, tparams) { ret true }
+            }
+            ret false
+        }
+        TPointer{x}: ret mentions_unbound(l, x, bind, tparams)
+        TRef{x}: ret mentions_unbound(l, x, bind, tparams)
+        TSlice{x}: ret mentions_unbound(l, x, bind, tparams)
+        TArray{_, x}: ret mentions_unbound(l, x, bind, tparams)
+        TOption{x}: ret mentions_unbound(l, x, bind, tparams)
+        TResult{ok, er}: ret (ok != -1 and mentions_unbound(l, ok, bind, tparams)) or mentions_unbound(l, er, bind, tparams)
+        TFn{params, ret_ty, _}: {
+            for x in params {
+                if mentions_unbound(l, x.ty, bind, tparams) { ret true }
+            }
+            ret ret_ty != -1 and mentions_unbound(l, ret_ty, bind, tparams)
+        }
+    }
+}
+
+fn root_of(l modules.Loaded, g Global, e int) Root {
+    match l.a.exprs[e].kind {
+        Var{n}: ret RootVar{copy(n)}
+        Deref{_}: ret RootThrough
+        Field{b, _, _}: {
+            if types.is_ptr(g.types, g.ty[b]) { ret RootThrough }
+            ret root_of(l, g, b)
+        }
+        Index{b, _}: {
+            if types.is_ptr(g.types, g.ty[b]) { ret RootThrough }
+            ret root_of(l, g, b)
+        }
+        _: ret RootOther
+    }
+}
+
+// The variable at the root of `e`, or "".
+fn root_name(l modules.Loaded, e int) str {
+    match l.a.exprs[e].kind {
+        Var{n}: ret copy(n)
+        Field{b, _, _}: ret root_name(l, b)
+        Index{b, _}: ret root_name(l, b)
+        _: ret ""
+    }
+}
+
+fn root_is_through(l modules.Loaded, g Global, e int) bool {
+    match root_of(l, g, e) {
+        RootThrough: ret true
+        _: ret false
+    }
+}
+
+fn tkind(g Global, t int) types.Kind {
+    ret types.kind(g.types, t)
+}
+
+fn tname(g Global, t int) str {
+    ret types.name(g.types, t)
+}
+
+fn err(g &Global, code str, span diag.Span, msg str) int {
+    push(&g.diags, diag.new(code, span, msg))
+    ret types.t_err
+}
+
+// The variable called `name`, innermost scope first, or -1.
+fn lookup(g Global, name str) int {
+    mut i := len(g.vars) - 1
+    for i >= 0 {
+        if g.vars[i].name == name { ret i }
+        i -= 1
+    }
+    ret -1
+}
+
+fn moved_at(moved []Moved, name str) int {
+    for m, i in moved {
+        if m.name == name { ret i }
+    }
+    ret -1
+}
+
+fn moved_put(moved &[]Moved, name str, span diag.Span) {
+    at := moved_at(moved, name)
+    if at != -1 {
+        moved[at].span = span
+    } else {
+        push(&moved, Moved{copy(name), span})
+    }
+}
+
+fn moved_extend(moved &[]Moved, other []Moved) {
+    for m in other {
+        moved_put(&moved, m.name, m.span)
+    }
+}
+
+fn moved_remove(g &Global, name str) {
+    at := moved_at(g.moved, name)
+    if at != -1 { _ = remove(&g.moved, at) }
+}
+
+fn declare(g &Global, name str, ty int, mutable bool, span diag.Span, decl diag.Span) {
+    check_case(name, false, "name", span, &g.diags)
+    taken := lookup(g, name) != -1 or is_builtin(name) or has_key(g.mods[g.cur].funcs, name) or has_key(g.mods[g.cur].consts, name)
+    if taken {
+        push(&g.diags, diag.new("E0102", span, "`{name}` is already defined; names cannot be reused or hidden"))
+        if lookup(g, name) == -1 {
+            push(&g.vars, Var{copy(name), ty, false, false, mutable, true, true, span, decl})
+        }
+        ret
+    }
+    moved_remove(&g, name)
+    push(&g.vars, Var{copy(name), ty, false, false, mutable, false, false, span, decl})
+}
+
+fn push_scope(g &Global) {
+    push(&g.scope_start, len(g.vars))
+}
+
+fn pop_scope(g &Global) {
+    for len(g.scope_locks) > 0 and g.scope_locks[len(g.scope_locks) - 1].depth == len(g.scope_start) {
+        count := g.scope_locks[len(g.scope_locks) - 1].count
+        _ = pop(&g.scope_locks)
+        for len(g.locks) > count - 1 {
+            _ = pop(&g.locks)
+        }
+    }
+    start := g.scope_start[len(g.scope_start) - 1]
+    for i in start..len(g.vars) {
+        v := copy(g.vars[i])
+        moved_remove(&g, v.name)
+        if not v.read and not (v.by_ref and v.written) {
+            push(&g.diags, fix("E0105", v.span, "`{v.name}` is never read", "rename `{v.name}` to `_`"))
+        } else if v.mutable and not v.written and not v.by_ref {
+            push(&g.diags, fix("E0116", v.span, "`{v.name}` is `mut` but never changes", "remove `mut`"))
+        }
+    }
+    for len(g.vars) > start {
+        _ = pop(&g.vars)
+    }
+    _ = pop(&g.scope_start)
+}
+
+// True if control can never run past the end of the block.
+fn block(l modules.Loaded, g &Global, b int) bool {
+    push_scope(&g)
+    ends := stmts(l, &g, b)
+    pop_scope(&g)
+    ret ends
+}
+
+fn stmts(l modules.Loaded, g &Global, b int) bool {
+    mut ends := false
+    mut reported := false
+    for s in l.a.blocks[b].stmts {
+        if ends and not reported {
+            push(&g.diags, diag.new("E0113", l.a.stmts[s].span, "this code can never run"))
+            reported = true
+        }
+        if stmt(l, &g, s) { ends = true }
+    }
+    ret ends
+}
+
+// Checks `e` against `want`, allowing `T` where `?T` or `T ! E` is expected.
+fn check_against(l modules.Loaded, g &Global, e int, want int) {
+    got := expr(l, &g, e, want)
+    accept(l, &g, e, got, want)
+}
+
+fn is_addr_of(l modules.Loaded, e int) bool {
+    match l.a.exprs[e].kind {
+        AddrOf{_}: ret true
+        _: ret false
+    }
+}
+
+fn var_name(l modules.Loaded, e int) str {
+    match l.a.exprs[e].kind {
+        Var{n}: ret copy(n)
+        _: ret ""
+    }
+}
+
+fn accept(l modules.Loaded, g &Global, e int, got int, want int) {
+    espan := l.a.exprs[e].span
+    match tkind(g, want) {
+        Ref{inner}: {
+            match tkind(g, got) {
+                Pointer{p}: {
+                    if p == inner and is_addr_of(l, e) { ret }
+                }
+                _: {}
+            }
+            if got == inner {
+                push(&g.diags, fix("E0157", espan, "this parameter changes the value, so write `&` here", "add `&`"))
+                n := var_name(l, e)
+                if len(n) > 0 {
+                    v := lookup(g, n)
+                    if v != -1 { g.vars[v].written = true }
+                }
+                ret
+            }
+        }
+        _: {}
+    }
+    if got == want or got == types.t_err or want == types.t_err { ret }
+    match tkind(g, want) {
+        Option{p}: {
+            if p == got {
+                g.coerce[e] = ast.CoerceSome{want}
+                ret
+            }
+        }
+        Result{ok, _}: {
+            if ok == got {
+                g.coerce[e] = ast.CoerceOk{want}
+                ret
+            }
+        }
+        _: {}
+    }
+    mismatch(&g, espan, got, want)
+}
+
+fn mismatch(g &Global, span diag.Span, got int, want int) {
+    if got == types.t_err or want == types.t_err { ret }
+    mut msg := "expected {tname(g, want)}, found {tname(g, got)}"
+    if types.is_num(g.types, got) and types.is_num(g.types, want) {
+        msg = "{msg}; convert with `{tname(g, want)}(...)`"
+    }
+    push(&g.diags, diag.new("E0104", span, msg))
+}
+
+fn value_type(g &Global, span diag.Span, ty int) int {
+    match tkind(g, ty) {
+        Void: ret err(&g, "E0104", span, "this has no value")
+        StrLit: ret err(&g, "E0900", span, "this string form only works directly inside `print`")
+        Ref{_}: ret err(&g, "E0157", span, "`&x` only works as an argument to a `&` parameter")
+        _: ret ty
+    }
+}
+
+fn printable(g &Global, span diag.Span, ty int) {
+    _ = value_type(&g, span, ty)
+    if is_fn_type(g.types, ty) {
+        _ = err(&g, "E0104", span, "a function has nothing to print")
+    }
+    if types.contains_itself(g.types, ty) {
+        n := tname(g, ty)
+        _ = err(&g, "E0179", span, "`{n}` contains itself, so it cannot be printed whole; write a function that walks it")
+    }
+}
+
+// The type a literal should aim for, looking through `?T` and `T ! E`. -1 is no hint.
+fn strip(g Global, hint int) int {
+    if hint == -1 { ret -1 }
+    match tkind(g, hint) {
+        Option{p}: ret p
+        Result{ok, _}: ret ok
+        _: ret hint
+    }
+}
+
+fn place(l modules.Loaded, g &Global, e int) int {
+    span := l.a.exprs[e].span
+    mut t := types.t_err
+    match l.a.exprs[e].kind {
+        Var{name}: {
+            v := lookup(g, name)
+            if v != -1 {
+                t = g.vars[v].ty
+            } else {
+                t = err(&g, "E0101", span, "unknown name `{name}`; declare it with `{name} := ...`")
+            }
+        }
+        Field{base, name, name_span}: {
+            b := place_base(l, &g, base)
+            t = field_type(&g, b, name, name_span)
+        }
+        Index{base, i}: {
+            b := place_base(l, &g, base)
+            if b == types.t_str {
+                _ = expr(l, &g, i, types.t_int)
+                ret err(&g, "E0131", span, "a `str` cannot be changed in place")
+            }
+            t = index_type(l, &g, b, i, l.a.exprs[base].span)
+        }
+        Deref{inner}: t = deref_type(l, &g, e, inner)
+        _: {
+            _ = expr(l, &g, e, -1)
+            t = err(&g, "E0131", span, "this cannot be assigned to")
+        }
+    }
+    g.ty[e] = t
+    ret t
+}
+
+// The base of a field or index on the left of `=`. Going through a pointer reads it.
+fn place_base(l modules.Loaded, g &Global, base int) int {
+    t := place(l, &g, base)
+    if types.is_ptr(g.types, t) {
+        n := root_name(l, base)
+        if len(n) > 0 {
+            v := lookup(g, n)
+            if v != -1 { g.vars[v].read = true }
+        }
+    }
+    ret t
+}
+
+fn deref_type(l modules.Loaded, g &Global, e int, inner int) int {
+    t := expr(l, &g, inner, -1)
+    match tkind(g, t) {
+        Pointer{p}: ret p
+        Err: ret types.t_err
+        _: {
+            n := tname(g, t)
+            ret err(&g, "E0104", l.a.exprs[e].span, "`*` needs a pointer, found {n}")
+        }
+    }
+}
+
+fn field_type(g &Global, base0 int, name str, span diag.Span) int {
+    // `p.x` reads through a pointer to a struct.
+    mut base := base0
+    match tkind(g, base0) {
+        Pointer{p}: base = p
+        _: {}
+    }
+    match tkind(g, base) {
+        Slice{e}: {
+            if g.func_claw {
+                if name == "ptr" { ret types.intern(&g.types, types.Pointer{e}) }
+                if name == "len" or name == "cap" { ret types.t_int }
+                ret err(&g, "E0129", span, "{tname(g, base)} has only `ptr`, `len` and `cap`")
+            }
+            ret err(&g, "E0129", span, "{tname(g, base)} has no fields")
+        }
+        Str: {
+            if g.func_claw {
+                if name == "ptr" { ret types.intern(&g.types, types.Pointer{types.t_u8}) }
+                if name == "len" or name == "cap" { ret types.t_int }
+                ret err(&g, "E0129", span, "{tname(g, base)} has only `ptr`, `len` and `cap`")
+            }
+            ret err(&g, "E0129", span, "{tname(g, base)} has no fields")
+        }
+        Struct{id}: {
+            for f in g.types.structs[id].fields {
+                if f.name == name { ret f.ty }
+            }
+            n := tname(g, base)
+            ret err(&g, "E0129", span, "`{n}` has no field `{name}`")
+        }
+        Err: ret types.t_err
+        _: {
+            n := tname(g, base)
+            ret err(&g, "E0129", span, "{n} has no fields")
+        }
+    }
+}
+
+fn index_type(l modules.Loaded, g &Global, base int, i int, base_span diag.Span) int {
+    check_against(l, &g, i, types.t_int)
+    match tkind(g, base) {
+        Pointer{elem}: ret elem
+        Slice{elem}: ret elem
+        Str: ret types.t_u8
+        Array{elem, n}: {
+            match l.a.exprs[i].kind {
+                Int{v}: {
+                    if not num_in_range(v, n) {
+                        push(&g.diags, diag.new("E0130", l.a.exprs[i].span, "index {num_text(v)} is outside `{tname(g, base)}`"))
+                    }
+                }
+                _: {}
+            }
+            ret elem
+        }
+        Err: ret types.t_err
+        _: {
+            n := tname(g, base)
+            ret err(&g, "E0129", base_span, "{n} cannot be indexed")
+        }
+    }
+}
+
+fn stmt(l modules.Loaded, g &Global, s int) bool {
+    span := l.a.stmts[s].span
+    match l.a.stmts[s].kind {
+        Let{mutable, name, name_span, ty, init}: {
+            mut final_ty := types.t_err
+            if ty != -1 {
+                mut want := resolve(l, &g, ty)
+                if not g.func_claw and types.is_ptr(g.types, want) {
+                    push(&g.diags, diag.new("E0140", l.a.tys[ty].span, "pointers only exist inside `claw fn`"))
+                    want = types.t_err
+                }
+                check_against(l, &g, init, want)
+                final_ty = want
+            } else {
+                got := expr(l, &g, init, -1)
+                final_ty = value_type(&g, l.a.exprs[init].span, got)
+            }
+            mut held := ""
+            if not mutable and coerce_is_no(g.coerce[init]) { held = view_of(l, g, init) }
+            if len(held) > 0 {
+                g.coerce[init] = ast.CoerceView
+            } else {
+                consume(l, &g, init)
+            }
+            mut decl := diag.Span{span.start, span.start, span.line, span.col, span.file}
+            if mutable { decl = diag.Span{span.start, name_span.start, span.line, span.col, span.file} }
+            declare(&g, name, final_ty, mutable, name_span, decl)
+            if len(held) > 0 {
+                v := lookup(g, name)
+                if v != -1 { g.vars[v].view = true }
+                push(&g.locks, held)
+                push(&g.scope_locks, ScopeLock{len(g.scope_start), len(g.locks)})
+            }
+            ret false
+        }
+        Assign{target, op, value}: {
+            ty := place(l, &g, target)
+            tspan := l.a.exprs[target].span
+            match root_of(l, g, target) {
+                RootVar{root}: {
+                    v := lookup(g, root)
+                    if v != -1 {
+                        mutable := g.vars[v].mutable
+                        if not mutable {
+                            push(&g.diags, fix("E0103", tspan, "`{root}` cannot change", "declare `mut {root}`"))
+                        }
+                        g.vars[v].written = true
+                    }
+                    if has(g.locks, root) {
+                        push(&g.diags, diag.new("E0122", tspan, "`{root}` cannot change while a `for` or a view is reading it"))
+                    }
+                }
+                RootThrough: {}
+                RootOther: {
+                    if ty != types.t_err {
+                        push(&g.diags, diag.new("E0131", tspan, "this cannot be assigned to"))
+                    }
+                }
+            }
+            target_is_var := len(var_name(l, target)) > 0
+            if not target_is_var {
+                root := root_name(l, target)
+                if len(root) > 0 { check_live(&g, root, tspan) }
+            }
+            if not g.func_claw {
+                // `a[i] = g(&a)`: g could move the very memory being assigned to.
+                mut muts []Path = []
+                mutable_paths(l, value, &muts)
+                p := path_of(l, target) else Path{"", []}
+                if len(p.root) > 0 {
+                    for m in muts {
+                        if overlap(m, p) {
+                            push(&g.diags, diag.new("E0158", l.a.exprs[value].span, "`{p.root}` is being assigned and changed at once"))
+                            break
+                        }
+                    }
+                }
+            }
+            if has_op(op) {
+                o := op else ast.Add
+                is_plain := binop_is_add_sub(o)
+                if types.is_ptr(g.types, ty) {
+                    if not is_plain {
+                        push(&g.diags, diag.new("E0104", tspan, "`{ast.binop_text(o)}=` does not work on pointers"))
+                    }
+                    check_against(l, &g, value, types.t_int)
+                    ret false
+                }
+                if not types.is_num(g.types, ty) and ty != types.t_err {
+                    n := tname(g, ty)
+                    push(&g.diags, diag.new("E0104", tspan, "`{ast.binop_text(o)}=` needs a number, found {n}"))
+                } else if types.is_float(g.types, ty) and not binop_is_arith(o) {
+                    push(&g.diags, diag.new("E0104", tspan, "`{ast.binop_text(o)}=` does not work on floats"))
+                }
+            }
+            check_against(l, &g, value, ty)
+            consume(l, &g, value)
+            if target_is_var {
+                moved_remove(&g, var_name(l, target))
+            }
+            ret false
+        }
+        Discard{e}: {
+            got := expr(l, &g, e, -1)
+            v := value_type(&g, l.a.exprs[e].span, got)
+            match tkind(g, v) {
+                Result{_, _}: push(&g.diags, diag.new("E0125", l.a.exprs[e].span, "an error cannot be ignored; use `?` or `else`"))
+                _: {}
+            }
+            ret false
+        }
+        ExprStmt{e}: {
+            got := expr(l, &g, e, -1)
+            mut is_call := false
+            match l.a.exprs[e].kind {
+                Call{_, _, _, _, _, _}: is_call = true
+                CallValue{_, _}: is_call = true
+                Try{_}: is_call = true
+                Else{_, _}: is_call = true
+                _: {}
+            }
+            if is_call {
+                if got != types.t_void and got != types.t_err {
+                    push(&g.diags, fix("E0111", l.a.exprs[e].span, "result is not used", "assign it to `_` if it really does not matter"))
+                }
+            } else {
+                push(&g.diags, diag.new("E0114", l.a.exprs[e].span, "this expression does nothing"))
+            }
+            ret false
+        }
+        If{cond, then, els}: {
+            check_against(l, &g, cond, types.t_bool)
+            before := copy(g.moved)
+            a := block(l, &g, then)
+            mut after_then := before
+            swap(&after_then, &g.moved)
+            mut c := false
+            x := els else ast.ElseIf{-1}
+            match x {
+                ElseBlockOf{b}: c = block(l, &g, b)
+                ElseIf{i}: {
+                    if i != -1 { c = stmt(l, &g, i) }
+                }
+            }
+            join_flow(&g, a, after_then, c)
+            ret a and c
+        }
+        ForRange{vname, var_span, start, end, body}: {
+            check_against(l, &g, start, types.t_int)
+            check_against(l, &g, end, types.t_int)
+            push_scope(&g)
+            if vname != "_" { declare(&g, vname, types.t_int, false, var_span, var_span) }
+            loop_body(l, &g, body, false)
+            pop_scope(&g)
+            ret false
+        }
+        ForIn{elem, elem_span, index, subject, body}: {
+            t := expr(l, &g, subject, -1)
+            mut elem_ty := types.t_err
+            match tkind(g, t) {
+                Array{e, _}: elem_ty = e
+                Slice{e}: elem_ty = e
+                Str: elem_ty = types.t_u8
+                Err: elem_ty = types.t_err
+                _: {
+                    n := tname(g, t)
+                    elem_ty = err(&g, "E0104", l.a.exprs[subject].span, "`for ... in` needs an array, found {n}; use `a..b` for numbers")
+                }
+            }
+            push_scope(&g)
+            if elem != "_" {
+                declare(&g, elem, elem_ty, false, elem_span, elem_span)
+                v := lookup(g, elem)
+                if v != -1 { g.vars[v].view = true }
+            }
+            b := copy(index) else ast.Binding{"", no_span()}
+            if len(b.name) > 0 and b.name != "_" {
+                declare(&g, b.name, types.t_int, false, b.span, b.span)
+            }
+            root := root_name(l, subject)
+            locked := len(root) > 0
+            if locked { push(&g.locks, root) }
+            loop_body(l, &g, body, false)
+            if locked { _ = pop(&g.locks) }
+            pop_scope(&g)
+            ret false
+        }
+        ForCond{cond, body}: {
+            check_against(l, &g, cond, types.t_bool)
+            loop_body(l, &g, body, false)
+            ret false
+        }
+        ForEver{body}: {
+            loop_body(l, &g, body, true)
+            ret not has_break(l, body)
+        }
+        Match{subject, arms}: ret match_stmt(l, &g, span, subject, arms)
+        Sure{e, _}: {
+            g.in_contract = true
+            check_against(l, &g, e, types.t_bool)
+            g.in_contract = false
+            ret false
+        }
+        Defer{body}: {
+            if not g.func_claw {
+                push(&g.diags, diag.new("E0142", span, "`defer` only exists inside `claw fn`"))
+            }
+            loops := g.loops
+            was := g.in_defer
+            g.loops = 0
+            g.in_defer = true
+            before := copy(g.moved)
+            _ = block(l, &g, body)
+            mut left := -1
+            for m, i in g.moved {
+                if moved_at(before, m.name) == -1 {
+                    left = i
+                    break
+                }
+            }
+            if left != -1 {
+                m := copy(g.moved[left])
+                push(&g.diags, diag.new("E0151", m.span, "`defer` cannot move `{m.name}`: it runs after everything else"))
+            }
+            g.moved = before
+            g.loops = loops
+            g.in_defer = was
+            ret false
+        }
+        Ret{e}: {
+            if g.in_defer {
+                push(&g.diags, diag.new("E0143", span, "`defer` cannot leave the function"))
+            }
+            if e != -1 {
+                if g.ret_ty == types.t_void {
+                    _ = expr(l, &g, e, -1)
+                    push(&g.diags, diag.new("E0104", l.a.exprs[e].span, "this function returns nothing; write `ret` alone"))
+                } else {
+                    check_against(l, &g, e, g.ret_ty)
+                    consume(l, &g, e)
+                }
+            } else {
+                ok_void := is_void_result(g.types, g.ret_ty)
+                if g.ret_ty != types.t_void and g.ret_ty != types.t_err and not ok_void {
+                    n := tname(g, g.ret_ty)
+                    push(&g.diags, diag.new("E0104", span, "this function must return {n}"))
+                }
+            }
+            ret true
+        }
+        Fail{e}: {
+            if g.in_defer {
+                push(&g.diags, diag.new("E0143", span, "`defer` cannot leave the function"))
+            }
+            match tkind(g, g.ret_ty) {
+                Result{_, er}: {
+                    check_against(l, &g, e, er)
+                    consume(l, &g, e)
+                }
+                Err: {
+                    _ = expr(l, &g, e, -1)
+                }
+                _: {
+                    _ = expr(l, &g, e, -1)
+                    push(&g.diags, diag.new("E0124", span, "`fail` needs a function returning `T ! E`"))
+                }
+            }
+            ret true
+        }
+        Break: {
+            break_or_continue(&g, span, true)
+            ret true
+        }
+        Continue: {
+            break_or_continue(&g, span, false)
+            ret true
+        }
+    }
+}
+
+fn binop_is_add_sub(o ast.BinOp) bool {
+    match o {
+        Add: ret true
+        Sub: ret true
+        _: ret false
+    }
+}
+
+fn binop_is_arith(o ast.BinOp) bool {
+    match o {
+        Add: ret true
+        Sub: ret true
+        Mul: ret true
+        Div: ret true
+        _: ret false
+    }
+}
+
+fn break_or_continue(g &Global, span diag.Span, is_break bool) {
+    if g.loops == 0 {
+        push(&g.diags, diag.new("E0108", span, "`break` and `continue` only work inside `for`"))
+    }
+    state := copy(g.moved)
+    if len(g.flows) > 0 {
+        last := len(g.flows) - 1
+        if is_break {
+            push(&g.flows[last].breaks, state)
+        } else {
+            push(&g.flows[last].conts, state)
+        }
+    }
+}
+
+fn loop_body(l modules.Loaded, g &Global, body int, forever bool) {
+    entry := copy(g.moved)
+    push(&g.flows, LoopFlow{[], []})
+    g.loops += 1
+    ends := block(l, &g, body)
+    g.loops -= 1
+    flow := pop(&g.flows) else LoopFlow{[], []}
+
+    // What has left by the time the loop comes around again.
+    mut back []Moved = []
+    if not ends { swap(&back, &g.moved) }
+    clear(&g.moved)
+    for c in flow.conts {
+        moved_extend(&back, c)
+    }
+    mut again []Moved = []
+    for m in back {
+        if moved_at(entry, m.name) == -1 { push(&again, copy(m)) }
+    }
+    sort_moved(&again)
+    for m in again {
+        if lookup(g, m.name) != -1 {
+            push(&g.diags, fix("E0151", m.span, "`{m.name}` moves here on every pass of the loop", "write `copy({m.name})`"))
+        }
+    }
+    mut out []Moved = []
+    if not forever {
+        out = entry
+        moved_extend(&out, back)
+    }
+    for b in flow.breaks {
+        moved_extend(&out, b)
+    }
+    g.moved = out
+}
+
+fn sort_moved(a &[]Moved) {
+    mut sorted []Moved = []
+    for x in a {
+        mut j := len(sorted)
+        for j > 0 and sorted[j - 1].span.start > x.span.start {
+            j -= 1
+        }
+        insert(&sorted, j, copy(x))
+    }
+    a = sorted
+}
+
+// After two branches: anything moved on a path that continues counts as moved.
+fn join_flow(g &Global, first_ends bool, own first []Moved, second_ends bool) {
+    if first_ends { ret }
+    if second_ends {
+        g.moved = first
+    } else {
+        moved_extend(&g.moved, first)
+    }
+}
+
+fn check_live(g &Global, name str, span diag.Span) {
+    at := moved_at(g.moved, name)
+    if at == -1 { ret }
+    was := g.moved[at].span
+    moved_remove(&g, name)
+    push(&g.diags, fix("E0151", span, "`{name}` was moved away at line {was.line}", "write `copy({name})` there"))
+}
+
+// `x := a.b[i]`: the variable this would be a read-only view into, if it can be one. "" if not.
+fn view_of(l modules.Loaded, g Global, e int) str {
+    if not is_field_or_index(l.a.exprs[e].kind) or not types.needs_drop(g.types, g.ty[e]) or g.in_contract { ret "" }
+    mut at := e
+    for {
+        mut next := -1
+        match l.a.exprs[at].kind {
+            Field{inner, _, _}: next = inner
+            Index{inner, _}: next = inner
+            Slice{inner, _, _}: next = inner
+            Var{n}: ret copy(n)
+            _: ret ""
+        }
+        if types.is_ptr(g.types, g.ty[next]) { ret "" }
+        at = next
+    }
+}
+
+// `e` is being taken over by something else. Only whole local variables can go.
+fn consume(l modules.Loaded, g &Global, e int) {
+    t := g.ty[e]
+    if t == types.t_err or not types.needs_drop(g.types, t) { ret }
+    span := l.a.exprs[e].span
+    if g.in_contract {
+        match l.a.exprs[e].kind {
+            Var{_}: push(&g.diags, diag.new("E0164", span, "a contract only looks: it cannot move a value"))
+            Field{_, _, _}: push(&g.diags, diag.new("E0164", span, "a contract only looks: it cannot move a value"))
+            Index{_, _}: push(&g.diags, diag.new("E0164", span, "a contract only looks: it cannot move a value"))
+            Deref{_}: push(&g.diags, diag.new("E0164", span, "a contract only looks: it cannot move a value"))
+            Slice{_, _, _}: push(&g.diags, diag.new("E0164", span, "a contract only looks: it cannot move a value"))
+            _: {}
+        }
+        ret
+    }
+    match l.a.exprs[e].kind {
+        Var{n}: {
+            v := lookup(g, n)
+            if v == -1 { ret }
+            if g.vars[v].view {
+                push(&g.diags, fix("E0152", span, "`{n}` is borrowed here, so it cannot be moved away", "write `copy({n})`"))
+                ret
+            }
+            if has(g.locks, n) {
+                push(&g.diags, diag.new("E0122", span, "`{n}` cannot move while it is being walked, matched or viewed"))
+                ret
+            }
+            moved_put(&g.moved, n, span)
+        }
+        Field{_, _, _}: consume_part(l, &g, e, span)
+        Index{_, _}: consume_part(l, &g, e, span)
+        Deref{_}: consume_part(l, &g, e, span)
+        Slice{_, _, _}: {
+            push(&g.diags, diag.new("E0152", span, "a slice only borrows; write `copy(...)` to keep it"))
+        }
+        _: {}
+    }
+}
+
+fn consume_part(l modules.Loaded, g &Global, e int, span diag.Span) {
+    // `module.Variant` is a new value, not a field being moved out.
+    if res_is_variant(g.res[e]) { ret }
+    if g.func_claw and root_is_through(l, g, e) { ret }
+    push(&g.diags, diag.new("E0152", span, "only a whole variable can be moved; write `copy(...)`, or use `remove` or `swap`"))
+}
+
+fn match_stmt(l modules.Loaded, g &Global, span diag.Span, subject int, arms []ast.Arm) bool {
+    got := expr(l, &g, subject, -1)
+    t := value_type(&g, l.a.exprs[subject].span, got)
+    kind := tkind(g, t)
+    mut seen_variants []int = []
+    mut seen_ints []ast.Num = []
+    mut seen_bools []bool = []
+    mut wild := false
+    mut all_end := true
+
+    match kind {
+        Enum{_}: {}
+        Int{_, _}: {}
+        Bool: {}
+        Err: {}
+        _: {
+            n := tname(g, t)
+            push(&g.diags, diag.new("E0104", l.a.exprs[subject].span, "`match` works on variants, integers and bool, not {n}"))
+        }
+    }
+
+    mut root := root_name(l, subject)
+    if len(root) > 0 and not types.needs_drop(g.types, t) { root = "" }
+    locked := len(root) > 0
+    if locked { push(&g.locks, root) }
+    before := copy(g.moved)
+    mut has_joined := false
+    mut joined []Moved = []
+    for arm in arms {
+        g.moved = copy(before)
+        if wild {
+            push(&g.diags, diag.new("E0113", arm.span, "this arm can never run: `_` above catches everything"))
+        }
+        push_scope(&g)
+        match arm.pat {
+            PatWild: wild = true
+            PatBool{b}: {
+                if not kind_is_bool(kind) and not kind_is_err(kind) {
+                    push(&g.diags, diag.new("E0118", arm.span, "this pattern does not match the type being matched"))
+                }
+                if has(seen_bools, b) {
+                    push(&g.diags, diag.new("E0121", arm.span, "this case is already handled"))
+                }
+                push(&seen_bools, b)
+            }
+            PatInt{v}: {
+                match kind {
+                    Int{bits, signed}: {
+                        if not num_fits(v, bits, signed) {
+                            n := tname(g, t)
+                            push(&g.diags, diag.new("E0115", arm.span, "number does not fit in {n}"))
+                        }
+                    }
+                    Err: {}
+                    _: push(&g.diags, diag.new("E0118", arm.span, "this pattern does not match the type being matched"))
+                }
+                mut dup := false
+                for x in seen_ints {
+                    if num_eq(x, v) { dup = true }
+                }
+                if dup {
+                    push(&g.diags, diag.new("E0121", arm.span, "this case is already handled"))
+                }
+                push(&seen_ints, v)
+            }
+            PatVariant{name, binds}: variant_pat(&g, arm.span, kind, t, name, binds, &seen_variants)
+        }
+        ends := block(l, &g, arm.body)
+        if not ends { all_end = false }
+        pop_scope(&g)
+        if not ends {
+            has_joined = true
+            moved_extend(&joined, g.moved)
+        }
+    }
+    if has_joined {
+        g.moved = joined
+    } else {
+        g.moved = before
+    }
+    if locked { _ = pop(&g.locks) }
+
+    if not wild {
+        match kind {
+            Enum{id}: {
+                mut missing []str = []
+                for v, i in g.types.enums[id].variants {
+                    if not has(seen_variants, i) { push(&missing, copy(v.name)) }
+                }
+                if len(missing) != 0 {
+                    list := join(missing, ", ")
+                    push(&g.diags, diag.new("E0120", span, "`match` misses: {list}"))
+                }
+            }
+            Bool: {
+                if len(seen_bools) < 2 {
+                    push(&g.diags, diag.new("E0120", span, "`match` must handle both true and false"))
+                }
+            }
+            Int{_, _}: {
+                push(&g.diags, diag.new("E0120", span, "`match` on a number needs a `_:` arm"))
+            }
+            _: {}
+        }
+    }
+    ret all_end and len(arms) != 0
+}
+
+fn variant_pat(g &Global, span diag.Span, kind types.Kind, t int, name str, binds []ast.Binding, seen &[]int) {
+    mut id := -1
+    match kind {
+        Enum{e}: id = e
+        Err: ret
+        _: {
+            push(&g.diags, diag.new("E0118", span, "this pattern does not match the type being matched"))
+            ret
+        }
+    }
+    def := copy(g.types.enums[id])
+    mut idx := -1
+    for v, i in def.variants {
+        if v.name == name {
+            idx = i
+            break
+        }
+    }
+    if idx == -1 {
+        n := tname(g, t)
+        push(&g.diags, diag.new("E0118", span, "`{n}` has no variant `{name}`"))
+        ret
+    }
+    if has(seen, idx) {
+        push(&g.diags, diag.new("E0121", span, "this case is already handled"))
+    }
+    push(&seen, idx)
+    fields := def.variants[idx].fields
+    if len(binds) != 0 and len(binds) != len(fields) {
+        push(&g.diags, diag.new("E0119", span, "`{name}` has {len(fields)} fields, found {len(binds)} names"))
+        for b in binds {
+            if b.name != "_" {
+                declare(&g, b.name, types.t_err, false, b.span, b.span)
+                v := lookup(g, b.name)
+                g.vars[v].read = true
+            }
+        }
+        ret
+    }
+    for b, i in binds {
+        if i >= len(fields) { break }
+        if b.name != "_" {
+            declare(&g, b.name, fields[i].ty, false, b.span, b.span)
+            v := lookup(g, b.name)
+            if v != -1 { g.vars[v].view = true }
+        }
+    }
+}
+
+fn expr(l modules.Loaded, g &Global, e int, hint int) int {
+    mut t := expr_inner(l, &g, e, hint)
+    if not g.func_claw and types.is_ptr(g.types, t) {
+        push(&g.diags, diag.new("E0140", l.a.exprs[e].span, "pointers only exist inside `claw fn`"))
+        t = types.t_err
+    }
+    g.ty[e] = t
+    ret t
+}
+
+fn expr_inner(l modules.Loaded, g &Global, e int, hint int) int {
+    num_hint := strip(g, hint)
+    span := l.a.exprs[e].span
+    match l.a.exprs[e].kind {
+        Int{v}: {
+            mut t := types.t_int
+            if num_hint != -1 and (types.is_int(g.types, num_hint) or types.is_float(g.types, num_hint)) { t = num_hint }
+            match tkind(g, t) {
+                Int{bits, signed}: {
+                    if not num_fits(v, bits, signed) {
+                        n := tname(g, t)
+                        ret err(&g, "E0115", span, "number does not fit in {n}")
+                    }
+                }
+                _: {}
+            }
+            ret t
+        }
+        Float{_}: {
+            if num_hint != -1 and types.is_float(g.types, num_hint) { ret num_hint }
+            ret types.t_f64
+        }
+        Char{_}: ret types.t_u8
+        Bool{_}: ret types.t_bool
+        Str{_}: {
+            // Handed to C: a pointer to the NUL-terminated bytes.
+            bytes := types.intern(&g.types, types.Pointer{types.t_u8})
+            if hint == bytes { ret bytes }
+            ret types.t_str
+        }
+        Interp{parts}: {
+            for p in parts {
+                match p {
+                    PartExpr{x}: {
+                        g.in_text = true
+                        t := expr(l, &g, x, -1)
+                        g.in_text = false
+                        printable(&g, l.a.exprs[x].span, t)
+                    }
+                    PartLit{_}: {}
+                }
+            }
+            ret types.t_str
+        }
+        None: {
+            if hint != -1 {
+                match tkind(g, hint) {
+                    Option{_}: ret hint
+                    Pointer{_}: ret hint
+                    Err: ret types.t_err
+                    _: {}
+                }
+            }
+            ret err(&g, "E0123", span, "cannot tell which `?T` this `none` is; give the variable a type")
+        }
+        RetVal: {
+            if not g.sure_clause {
+                ret err(&g, "E0162", span, "`ret` only means the result inside `sure`")
+            }
+            match tkind(g, g.ret_ty) {
+                Void: ret err(&g, "E0162", span, "this function returns nothing, so `sure` has no `ret` to look at")
+                Option{p}: ret p
+                Result{ok, _}: {
+                    if ok == types.t_void {
+                        ret err(&g, "E0162", span, "this function has no success value, so `sure` has no `ret` to look at")
+                    }
+                    ret ok
+                }
+                _: ret g.ret_ty
+            }
+        }
+        Old{inner}: {
+            if not g.sure_clause or g.in_old {
+                _ = expr(l, &g, inner, -1)
+                ret err(&g, "E0163", span, "`old(...)` only works in `sure`, and not inside another `old`")
+            }
+            g.in_old = true
+            t := expr(l, &g, inner, -1)
+            g.in_old = false
+            if t != types.t_err and not types.is_num(g.types, t) and t != types.t_bool {
+                n := tname(g, t)
+                ret err(&g, "E0163", l.a.exprs[inner].span, "`old` remembers numbers and bool, not {n}; try `old(len(x))`")
+            }
+            ret t
+        }
+        Var{name}: ret var(l, &g, e, name, num_hint)
+        AddrOf{inner}: ret addr_of(l, &g, e, inner, hint)
+        Deref{inner}: ret deref_type(l, &g, e, inner)
+        Unary{op, inner}: ret unary(l, &g, e, op, inner, num_hint)
+        Binary{op, lhs, rhs}: ret binary(l, &g, op, lhs, rhs, num_hint)
+        Call{module, name, name_span, targs, args, via}: {
+            alias := opt_text(module)
+            ret call(l, &g, e, alias, name, name_span, targs, args, via)
+        }
+        CallValue{f, args}: {
+            t := expr(l, &g, f, -1)
+            ret call_value(l, &g, e, t, l.a.exprs[f].span, args)
+        }
+        StructLit{module, name, name_span, targs, args}: {
+            alias := opt_text(module)
+            ret struct_lit(l, &g, e, alias, name, name_span, targs, args, num_hint)
+        }
+        ArrayLit{items}: ret array_lit(l, &g, e, items, num_hint)
+        ArrayFill{item}: {
+            if num_hint != -1 {
+                match tkind(g, num_hint) {
+                    Array{elem, _}: {
+                        check_against(l, &g, item, elem)
+                        if types.needs_drop(g.types, elem) {
+                            push(&g.diags, diag.new("E0153", l.a.exprs[item].span, "`[x...]` would share one owner between many items; build the array item by item"))
+                        }
+                        ret num_hint
+                    }
+                    Err: {
+                        _ = expr(l, &g, item, -1)
+                        ret types.t_err
+                    }
+                    _: {}
+                }
+            }
+            _ = expr(l, &g, item, -1)
+            ret err(&g, "E0123", span, "`[x...]` needs a known array type; write `a [10]int = [0...]`")
+        }
+        Field{base, name, name_span}: {
+            match l.a.exprs[base].kind {
+                Var{alias}: {
+                    if lookup(g, alias) == -1 and has_key(l.units[g.cur].imports, alias) {
+                        m := import(l, &g, alias, l.a.exprs[base].span)
+                        ret member(l, &g, e, m, name, name_span, num_hint)
+                    }
+                }
+                _: {}
+            }
+            b := expr(l, &g, base, -1)
+            ret field_type(&g, b, name, name_span)
+        }
+        Index{base, i}: {
+            b := expr(l, &g, base, -1)
+            ret index_type(l, &g, b, i, l.a.exprs[base].span)
+        }
+        Slice{base, lo, hi}: {
+            b := expr(l, &g, base, -1)
+            if lo != -1 { check_against(l, &g, lo, types.t_int) }
+            if hi != -1 { check_against(l, &g, hi, types.t_int) }
+            match tkind(g, b) {
+                Array{el, _}: ret types.intern(&g.types, types.Slice{el})
+                Slice{_}: ret b
+                Str: ret b
+                Err: ret b
+                _: {
+                    n := tname(g, b)
+                    ret err(&g, "E0129", l.a.exprs[base].span, "{n} cannot be sliced")
+                }
+            }
+        }
+        Try{inner}: ret try_expr(l, &g, e, inner)
+        Else{inner, handler}: ret else_expr(l, &g, e, inner, handler)
+    }
+}
+
+fn var(l modules.Loaded, g &Global, e int, name str, hint int) int {
+    span := l.a.exprs[e].span
+    if lookup(g, name) != -1 {
+        check_live(&g, name, span)
+        v := lookup(g, name)
+        g.vars[v].read = true
+        ty := g.vars[v].ty
+        view := g.vars[v].view
+        if g.sure_clause and not g.in_old and not view and types.needs_drop(g.types, ty) {
+            push(&g.diags, diag.new("E0165", span, "`{name}` was taken over with `own`, so it may be gone when `sure` runs; use `old(...)`"))
+        }
+        ret ty
+    }
+    m := g.cur
+    if has_key(g.mods[m].consts, name) or has_key(g.mods[m].names, name) or has_key(g.mods[m].gvariants, name) or has_key(g.mods[m].funcs, name) {
+        ret member(l, &g, e, m, name, span, hint)
+    }
+    core := g.core
+    if has_key(g.mods[core].funcs, name) {
+        entry := get(g.mods[core].funcs, name) else FuncEntry{false, -1, false}
+        if entry.public { ret member(l, &g, e, core, name, span, hint) }
+    }
+    if name == "_" {
+        ret err(&g, "E0101", span, "`_` can only be assigned to, not read")
+    }
+    mut extra := ""
+    if g.in_text { extra = "; a literal brace in a string is `{{{{`" }
+    ret err(&g, "E0101", span, "unknown name `{name}`{extra}")
+}
+
+// A constant or a field-less variant of module `m`.
+fn member(l modules.Loaded, g &Global, e int, m int, name str, span diag.Span, hint int) int {
+    local := m == g.cur
+    if has_key(g.mods[m].funcs, name) {
+        ret func_value(&g, e, m, name, span, hint)
+    }
+    if has_key(g.mods[m].gvariants, name) {
+        gv := get(g.mods[m].gvariants, name) else GVariant{-1, -1, false}
+        if not gv.public and not local {
+            ret err(&g, "E0147", span, private_msg(name))
+        }
+        d := l.units[m].program.types[gv.index]
+        match d.body {
+            Variants{vars}: {
+                if len(vars[gv.vidx].fields) != 0 {
+                    ret err(&g, "E0106", span, "`{name}` needs its fields: `{name}{{...}`")
+                }
+            }
+            Struct{_}: ret types.t_err
+        }
+        args := targs_from_hint(g, d.name, m, hint) else {
+            ret err(&g, "E0123", span, "cannot tell which `{d.name}[...]` this `{name}` is; give the variable a type or write `{name}[...]{{}`")
+        }
+        ty := instantiate_type(l, &g, m, gv.index, args)
+        match tkind(g, ty) {
+            Enum{eid}: g.res[e] = ast.ResVariant{eid, gv.vidx}
+            _: {}
+        }
+        ret ty
+    }
+    if has_key(g.mods[m].consts, name) {
+        entry := get(g.mods[m].consts, name) else ConstEntry{ast.ConstBool{false}, types.t_err, false}
+        if not entry.public and not local {
+            ret err(&g, "E0147", span, private_msg(name))
+        }
+        g.res[e] = ast.ResConst{entry.val, entry.ty}
+        ret entry.ty
+    }
+    if not has_key(g.mods[m].names, name) {
+        ret err(&g, "E0101", span, "unknown name `{name}`")
+    }
+    entry := get(g.mods[m].names, name) else NameEntry{NameType{types.t_err}, false}
+    match entry.def {
+        NameVariant{eid, idx, ty}: {
+            if not entry.public and not local {
+                ret err(&g, "E0147", span, private_msg(name))
+            }
+            if len(g.types.enums[eid].variants[idx].fields) != 0 {
+                ret err(&g, "E0106", span, "`{name}` needs its fields: `{name}{{...}`")
+            }
+            g.res[e] = ast.ResVariant{eid, idx}
+            ret ty
+        }
+        NameType{_}: ret err(&g, "E0101", span, "`{name}` is a type, not a value")
+    }
+}
+
+// The type arguments of the template named `dname` of module `m`, if `hint` is an instance of it.
+fn targs_from_hint(g Global, dname str, m int, hint int) ?[]int {
+    if hint == -1 { ret none }
+    at := get(g.inst_at, hint) else { ret none }
+    if g.insts[at].m == m and g.insts[at].name == dname { ret copy(g.insts[at].targs) }
+    ret none
+}
+
+// A function named where a value is expected: `apply(double, 3)`.
+fn func_value(g &Global, e int, m int, name str, span diag.Span, hint int) int {
+    entry := get(g.mods[m].funcs, name) else FuncEntry{false, -1, false}
+    if not entry.public and m != g.cur {
+        ret err(&g, "E0147", span, private_msg(name))
+    }
+    if entry.generic {
+        ret err(&g, "E0176", span, "`{name}` is a template, so it is not one function; wrap the use you want in a small `fn`")
+    }
+    full := "{g.mods[m].prefix}{name}"
+    sig_at := get(g.sigs, full) else -1
+    if sig_at == -1 { ret types.t_err }
+    sig := copy(g.sig_list[sig_at])
+    if len(sig.ext) > 0 {
+        ret err(&g, "E0176", span, "`extern fn {name}` cannot be a value; wrap it in a small `claw fn`")
+    }
+    if sig.has_need {
+        ret err(&g, "E0177", span, "`{name}` has a `need`, and a call through a value could not check it; wrap it in a `fn` that handles every input")
+    }
+    if hint == -1 {
+        ret err(&g, "E0123", span, "cannot tell which function type `{name}` should have; write `f fn(int) int = {name}`")
+    }
+    mut id := -1
+    match tkind(g, hint) {
+        Fn{i}: id = i
+        Err: ret types.t_err
+        _: ret err(&g, "E0123", span, "cannot tell which function type `{name}` should have; write `f fn(int) int = {name}`")
+    }
+    effects := g.types.fns[id].effects
+    g.res[e] = ast.ResFunc{full}
+    ret types.fn_type(&g.types, types.FnType{copy(sig.params), copy(sig.owned), sig.ret_ty, effects})
+}
+
+fn addr_of(l modules.Loaded, g &Global, e int, inner int, hint int) int {
+    span := l.a.exprs[e].span
+    inner_span := l.a.exprs[inner].span
+    if g.in_contract {
+        _ = expr(l, &g, inner, -1)
+        ret err(&g, "E0164", span, "a contract only looks: it cannot take `&`")
+    }
+    if not g.func_claw {
+        mut ok := hint == -1
+        if hint != -1 {
+            match tkind(g, hint) {
+                Ref{_}: ok = true
+                _: {}
+            }
+        }
+        if not ok {
+            _ = expr(l, &g, inner, -1)
+            ret err(&g, "E0157", span, "`&x` only works as an argument to a `&` parameter")
+        }
+    }
+    mut addressable := false
+    match l.a.exprs[inner].kind {
+        Var{_}: addressable = true
+        Field{_, _, _}: addressable = true
+        Index{_, _}: addressable = true
+        Deref{_}: addressable = true
+        _: {}
+    }
+    if not addressable {
+        _ = expr(l, &g, inner, -1)
+        ret err(&g, "E0131", inner_span, "only variables, fields and elements have an address")
+    }
+    t := place(l, &g, inner)
+    match root_of(l, g, inner) {
+        RootVar{root}: {
+            check_live(&g, root, inner_span)
+            if has(g.locks, root) {
+                push(&g.diags, diag.new("E0122", inner_span, "`{root}` cannot change while it is being walked, matched or viewed"))
+            }
+            v := lookup(g, root)
+            if v != -1 {
+                if not g.vars[v].mutable {
+                    push(&g.diags, fix("E0103", inner_span, "cannot take the address of `{root}`, it is not `mut`", "declare `mut {root}`"))
+                }
+                g.vars[v].read = true
+                g.vars[v].written = true
+            }
+            if len(var_name(l, inner)) > 0 and not types.is_aggregate(g.types, t) {
+                if not has(g.addressed, root) { push(&g.addressed, copy(root)) }
+            }
+        }
+        RootThrough: {}
+        RootOther: ret err(&g, "E0131", inner_span, "only variables, fields and elements have an address")
+    }
+    if t == types.t_err { ret types.t_err }
+    mut wants_ref := false
+    if hint != -1 {
+        match tkind(g, hint) {
+            Ref{_}: wants_ref = true
+            _: {}
+        }
+    }
+    if g.func_claw and not wants_ref { ret types.intern(&g.types, types.Pointer{t}) }
+    ret types.intern(&g.types, types.Ref{t})
+}
+
+fn unary(l modules.Loaded, g &Global, e int, op ast.UnOp, inner int, hint int) int {
+    span := l.a.exprs[e].span
+    match op {
+        Not: {
+            check_against(l, &g, inner, types.t_bool)
+            ret types.t_bool
+        }
+        Neg: {
+            t := expr(l, &g, inner, hint)
+            match tkind(g, t) {
+                Int{_, signed}: {
+                    if signed { ret t }
+                }
+                Float{_}: ret t
+                Err: ret t
+                _: {}
+            }
+            n := tname(g, t)
+            ret err(&g, "E0104", span, "`-` needs a signed number, found {n}")
+        }
+        BitNot: {
+            t := expr(l, &g, inner, hint)
+            if types.is_int(g.types, t) or t == types.t_err { ret t }
+            n := tname(g, t)
+            ret err(&g, "E0104", span, "`~` needs an integer, found {n}")
+        }
+    }
+}
+
+type Pair { a int, b int }
+
+fn operands(l modules.Loaded, g &Global, lhs int, rhs int, hint int) Pair {
+    if is_lit(l, lhs) and not is_lit(l, rhs) {
+        b := expr(l, &g, rhs, hint)
+        a := expr(l, &g, lhs, b)
+        ret Pair{a, b}
+    }
+    a := expr(l, &g, lhs, hint)
+    b := expr(l, &g, rhs, a)
+    ret Pair{a, b}
+}
+
+fn binary(l modules.Loaded, g &Global, op ast.BinOp, lhs int, rhs int, hint int) int {
+    match op {
+        And: ret binary_bool(l, &g, lhs, rhs)
+        Or: ret binary_bool(l, &g, lhs, rhs)
+        Eq: ret binary_eq(l, &g, op, lhs, rhs)
+        Ne: ret binary_eq(l, &g, op, lhs, rhs)
+        Lt: ret binary_cmp(l, &g, op, lhs, rhs)
+        Le: ret binary_cmp(l, &g, op, lhs, rhs)
+        Gt: ret binary_cmp(l, &g, op, lhs, rhs)
+        Ge: ret binary_cmp(l, &g, op, lhs, rhs)
+        _: {}
+    }
+    p := operands(l, &g, lhs, rhs, hint)
+    a := p.a
+    b := p.b
+    rspan := l.a.exprs[rhs].span
+    lspan := l.a.exprs[lhs].span
+    if types.is_ptr(g.types, a) and binop_is_add_sub(op) {
+        if b == types.t_int { ret a }
+        is_sub := binop_is_sub(op)
+        if b == a and is_sub { ret types.t_int }
+        mut want := "int"
+        if is_sub { want = "int or the same pointer type" }
+        ret err(&g, "E0104", rspan, "pointer arithmetic needs {want}")
+    }
+    if a != b {
+        mismatch(&g, rspan, b, a)
+        ret types.t_err
+    }
+    int_only := not binop_is_arith(op)
+    mut ok := types.is_num(g.types, a)
+    if int_only { ok = types.is_int(g.types, a) }
+    if not ok and a != types.t_err {
+        n := tname(g, a)
+        mut want := "numbers"
+        if int_only { want = "integers" }
+        ret err(&g, "E0104", lspan, "`{ast.binop_text(op)}` needs {want}, found {n}")
+    }
+    ret a
+}
+
+fn binop_is_sub(o ast.BinOp) bool {
+    match o {
+        Sub: ret true
+        _: ret false
+    }
+}
+
+fn binary_bool(l modules.Loaded, g &Global, lhs int, rhs int) int {
+    check_against(l, &g, lhs, types.t_bool)
+    check_against(l, &g, rhs, types.t_bool)
+    ret types.t_bool
+}
+
+fn binary_eq(l modules.Loaded, g &Global, op ast.BinOp, lhs int, rhs int) int {
+    p := operands(l, &g, lhs, rhs, -1)
+    a := p.a
+    b := p.b
+    if a != b {
+        mismatch(&g, l.a.exprs[rhs].span, b, a)
+    } else if a != types.t_err and not types.is_num(g.types, a) and a != types.t_bool and not types.is_ptr(g.types, a) and a != types.t_str {
+        n := tname(g, a)
+        push(&g.diags, diag.new("E0104", l.a.exprs[lhs].span, "`{ast.binop_text(op)}` works on numbers and bool, not {n}; use `match`"))
+    }
+    ret types.t_bool
+}
+
+fn binary_cmp(l modules.Loaded, g &Global, op ast.BinOp, lhs int, rhs int) int {
+    p := operands(l, &g, lhs, rhs, -1)
+    a := p.a
+    b := p.b
+    if a != b {
+        mismatch(&g, l.a.exprs[rhs].span, b, a)
+    } else if a != types.t_err and not types.is_num(g.types, a) and not types.is_ptr(g.types, a) and a != types.t_str {
+        n := tname(g, a)
+        push(&g.diags, diag.new("E0104", l.a.exprs[lhs].span, "`{ast.binop_text(op)}` needs numbers, found {n}"))
+    }
+    ret types.t_bool
+}
+
+fn print_part(l modules.Loaded, g &Global, x int) {
+    g.in_text = true
+    t := expr(l, &g, x, -1)
+    g.in_text = false
+    printable(&g, l.a.exprs[x].span, t)
+}
+
+fn print_arg(l modules.Loaded, g &Global, a int) {
+    match l.a.exprs[a].kind {
+        Str{_}: g.ty[a] = types.t_strlit
+        Interp{parts}: {
+            g.ty[a] = types.t_strlit
+            for p in parts {
+                match p {
+                    PartExpr{x}: print_part(l, &g, x)
+                    PartLit{_}: {}
+                }
+            }
+        }
+        _: {
+            t := expr(l, &g, a, -1)
+            printable(&g, l.a.exprs[a].span, t)
+        }
+    }
+}
+
+// The type of a call to a built-in, or -1 when `name` is not one.
+fn builtin(l modules.Loaded, g &Global, e int, name str, span diag.Span, targs []int, args []int) int {
+    if name == "print" {
+        if len(args) != 1 {
+            push(&g.diags, diag.new("E0106", span, "`print` takes 1 value, found {len(args)}"))
+        }
+        for a in args {
+            print_arg(l, &g, a)
+        }
+        ret types.t_void
+    }
+    if name == "len" {
+        if len(args) != 1 {
+            ret err(&g, "E0106", span, "`len` takes 1 value, found {len(args)}")
+        }
+        t := expr(l, &g, args[0], -1)
+        match tkind(g, t) {
+            Array{_, _}: ret types.t_int
+            Slice{_}: ret types.t_int
+            Str: ret types.t_int
+            Err: ret types.t_int
+            _: {
+                n := tname(g, t)
+                ret err(&g, "E0104", l.a.exprs[args[0]].span, "`len` needs an array, found {n}")
+            }
+        }
+    }
+    if name == "__state" and g.mods[g.cur].prefix == "__check." {
+        ret types.intern(&g.types, types.Pointer{types.t_int})
+    }
+    if name == "copy" {
+        if len(args) != 1 {
+            ret err(&g, "E0106", span, "`copy` takes 1 value, found {len(args)}")
+        }
+        got := expr(l, &g, args[0], -1)
+        t := value_type(&g, l.a.exprs[args[0]].span, got)
+        if t != types.t_err and types.has_user_drop(g.types, t) {
+            n := tname(g, t)
+            ret err(&g, "E0154", span, "{n} has its own `drop`, so the compiler cannot copy it")
+        }
+        ret t
+    }
+    if name == "sizeof" {
+        t := one_targ(l, &g, name, span, targs)
+        if t == -1 { ret types.t_err }
+        if len(args) != 0 {
+            ret err(&g, "E0106", span, "`sizeof[T]()` takes no values")
+        }
+        ensure_layout(&g, t)
+        g.res[e] = ast.ResConst{ast.ConstInt{ast.Num{types.size(g.types, t), false, false}}, types.t_int}
+        ret types.t_int
+    }
+    if name == "alloc" {
+        t := one_targ(l, &g, name, span, targs)
+        if not g.func_claw {
+            ret err(&g, "E0140", span, "`alloc` only exists inside `claw fn`")
+        }
+        if len(args) != 1 {
+            ret err(&g, "E0106", span, "`alloc[T](n)` takes the number of items")
+        }
+        check_against(l, &g, args[0], types.t_int)
+        if t != -1 { ret types.intern(&g.types, types.Pointer{t}) }
+        ret types.t_err
+    }
+    if name == "free" {
+        if not g.func_claw {
+            ret err(&g, "E0140", span, "`free` only exists inside `claw fn`")
+        }
+        if len(args) != 1 {
+            ret err(&g, "E0106", span, "`free(p)` takes one pointer")
+        }
+        t := expr(l, &g, args[0], -1)
+        if not types.is_ptr(g.types, t) and t != types.t_err {
+            n := tname(g, t)
+            ret err(&g, "E0104", l.a.exprs[args[0]].span, "`free` needs a pointer, found {n}")
+        }
+        ret types.t_void
+    }
+    if name == "cast" {
+        t := one_targ(l, &g, name, span, targs)
+        if not g.func_claw {
+            ret err(&g, "E0140", span, "`cast` only exists inside `claw fn`")
+        }
+        if len(args) != 1 {
+            ret err(&g, "E0106", span, "`cast[T](x)` converts 1 value")
+        }
+        from := expr(l, &g, args[0], -1)
+        if t == -1 { ret types.t_err }
+        if from != types.t_err and (not is_word(g.types, from) or not is_word(g.types, t)) {
+            ret err(&g, "E0104", span, "`cast` converts between pointers, `int` and `u64`; use `T(x)` for numbers")
+        }
+        ret t
+    }
+    target := prim(name)
+    if target == -1 { ret -1 }
+    if len(args) != 1 {
+        ret err(&g, "E0106", span, "`{name}(...)` converts 1 value, found {len(args)}")
+    }
+    mut hint := -1
+    if is_lit(l, args[0]) { hint = target }
+    t := expr(l, &g, args[0], hint)
+    ok := t == types.t_err or
+        (types.is_num(g.types, t) and types.is_num(g.types, target)) or
+        (t == types.t_bool and types.is_int(g.types, target)) or
+        (t == types.t_bool and target == types.t_bool)
+    if not ok {
+        n := tname(g, t)
+        ret err(&g, "E0104", l.a.exprs[args[0]].span, "cannot convert {n} to {name}")
+    }
+    ret target
+}
+
+fn is_word(t types.Types, x int) bool {
+    ret types.is_ptr(t, x) or x == types.t_int or x == types.t_u64
+}
+
+// The one type argument, or -1.
+fn one_targ(l modules.Loaded, g &Global, name str, span diag.Span, targs []int) int {
+    if len(targs) != 1 {
+        push(&g.diags, diag.new("E0144", span, "write `{name}[T](...)` with one type"))
+        ret -1
+    }
+    t := resolve(l, &g, targs[0])
+    if t != types.t_err { ret t }
+    ret -1
+}
+
+fn resolve_targs(l modules.Loaded, g &Global, targs []int) ?[]int {
+    mut out []int = []
+    for a in targs {
+        t := resolve(l, &g, a)
+        if t == types.t_err { ret none }
+        push(&out, t)
+    }
+    ret out
+}
+
+// Only the expected type can say what this name means.
+fn waits_for_hint(l modules.Loaded, g Global, a int) bool {
+    if hint_dep(l, a) { ret true }
+    match l.a.exprs[a].kind {
+        Var{name}: {
+            if lookup(g, name) != -1 { ret false }
+            ret has_key(g.mods[g.cur].gvariants, name) or named_function(g, name) != -1
+        }
+        _: ret false
+    }
+}
+
+// The place in `sig_list` of the signature behind a plain name, if it means an ordinary function, else -1.
+fn named_function(g Global, name str) int {
+    cur := g.cur
+    if has_key(g.mods[cur].consts, name) or has_key(g.mods[cur].names, name) { ret -1 }
+    mut m := cur
+    if has_key(g.mods[cur].funcs, name) {
+        entry := get(g.mods[cur].funcs, name) else FuncEntry{false, -1, false}
+        if entry.generic { ret -1 }
+    } else {
+        core := g.core
+        if not has_key(g.mods[core].funcs, name) { ret -1 }
+        entry := get(g.mods[core].funcs, name) else FuncEntry{false, -1, false}
+        if entry.generic or not entry.public { ret -1 }
+        m = core
+    }
+    ret get(g.sigs, "{g.mods[m].prefix}{name}") else -1
+}
+
+type Inferred { bind []Bind, got []int }
+
+fn infer(l modules.Loaded, g &Global, tparams []ast.Binding, pats []int, args []int, explicit []int, first int) Inferred {
+    mut bind := tenv_of(tparams, explicit)
+    mut got []int = []
+    for _ in args {
+        push(&got, -1)
+    }
+    if first != -1 and len(args) > 0 { got[0] = first }
+    for a, i in args {
+        if waits_for_hint(l, g, a) { continue }
+        mut t := got[i]
+        if t == -1 { t = expr(l, &g, a, -1) }
+        got[i] = t
+        if i < len(pats) { unify(l, g, pats[i], t, &bind, tparams) }
+    }
+    // A function named as an argument says what its parameter's type variables are.
+    for a, i in args {
+        if i >= len(pats) or got[i] != -1 { continue }
+        name := var_name(l, a)
+        if len(name) == 0 { continue }
+        mut is_fn_pat := false
+        match l.a.tys[pats[i]].kind {
+            TFn{_, _, _}: is_fn_pat = true
+            _: {}
+        }
+        if lookup(g, name) == -1 and is_fn_pat {
+            at := named_function(g, name)
+            if at != -1 {
+                sig := copy(g.sig_list[at])
+                t := types.fn_type(&g.types, types.FnType{copy(sig.params), copy(sig.owned), sig.ret_ty, 0})
+                unify(l, g, pats[i], t, &bind, tparams)
+            }
+        }
+    }
+    for a, i in args {
+        if got[i] != -1 { continue }
+        // A literal decides a parameter only if nothing else has.
+        open := i < len(pats) and mentions_unbound(l, pats[i], bind, tparams)
+        mut is_none_fill := false
+        match l.a.exprs[a].kind {
+            None: is_none_fill = true
+            ArrayFill{_}: is_none_fill = true
+            _: {}
+        }
+        if open and not is_none_fill {
+            t := expr(l, &g, a, -1)
+            got[i] = t
+            unify(l, g, pats[i], t, &bind, tparams)
+        }
+    }
+    ret Inferred{bind, got}
+}
+
+// A fixed array handed to a parameter that only reads a `[]T`.
+fn array_view(g Global, got int, want int, is_own bool) bool {
+    if is_own { ret false }
+    match tkind(g, got) {
+        Array{a, _}: {
+            match tkind(g, want) {
+                Slice{b}: ret a == b
+                _: ret false
+            }
+        }
+        _: ret false
+    }
+}
+
+// `own` says which parameters take the value over; shorter means none may be viewed.
+fn finish_args(l modules.Loaded, g &Global, args []int, wants []int, got []int, wanted_own []bool) {
+    for a, i in args {
+        mut is_own := true
+        if i < len(wanted_own) { is_own = wanted_own[i] }
+        mut want := -1
+        if i < len(wants) { want = wants[i] }
+        mut g_ty := -1
+        if i < len(got) { g_ty = got[i] }
+        if want != -1 and g_ty != -1 {
+            if not array_view(g, g_ty, want, is_own) {
+                accept(l, &g, a, g_ty, want)
+            }
+        } else if want != -1 {
+            mut is_slice := false
+            match tkind(g, want) {
+                Slice{_}: is_slice = true
+                _: {}
+            }
+            if not is_own and is_slice {
+                t := expr(l, &g, a, want)
+                if not array_view(g, t, want, false) {
+                    accept(l, &g, a, t, want)
+                }
+            } else {
+                check_against(l, &g, a, want)
+            }
+        } else if g_ty == -1 {
+            // Past the named parameters of a C function: a string means its bytes.
+            bytes := types.intern(&g.types, types.Pointer{types.t_u8})
+            mut hint := -1
+            match l.a.exprs[a].kind {
+                Str{_}: hint = bytes
+                _: {}
+            }
+            _ = expr(l, &g, a, hint)
+        }
+    }
+}
+
+// A call through something that holds a function.
+fn call_value(l modules.Loaded, g &Global, e int, ty int, span diag.Span, args []int) int {
+    mut id := -1
+    match tkind(g, ty) {
+        Fn{i}: id = i
+        _: {}
+    }
+    if id == -1 {
+        for a in args {
+            _ = expr(l, &g, a, -1)
+        }
+        if ty == types.t_err { ret types.t_err }
+        n := tname(g, ty)
+        ret err(&g, "E0104", span, "{n} cannot be called")
+    }
+    f := copy(g.types.fns[id])
+    if len(args) != len(f.params) {
+        push(&g.diags, diag.new("E0106", span, "this function takes {len(f.params)} values, found {len(args)}"))
+    }
+    mut got []int = []
+    for _ in args {
+        push(&got, -1)
+    }
+    finish_args(l, &g, args, f.params, got, f.owned)
+    for a, i in args {
+        if i < len(f.owned) and f.owned[i] { consume(l, &g, a) }
+    }
+    if not g.func_claw { check_exclusive(l, &g, span, args) }
+    g.res[e] = ast.ResValue{ty}
+    ret f.ret_ty
+}
+
+fn call(l modules.Loaded, g &Global, e int, alias str, name str, span diag.Span, targs []int, args []int, via int) int {
+    if len(alias) == 0 {
+        v := lookup(g, name)
+        if v != -1 {
+            held := g.vars[v].ty
+            if held == types.t_err {
+                _ = var(l, &g, e, name, -1)
+                for a in args {
+                    _ = expr(l, &g, a, -1)
+                }
+                ret types.t_err
+            }
+            if is_fn_type(g.types, held) {
+                _ = var(l, &g, e, name, -1)
+                ret call_value(l, &g, e, held, span, args)
+            }
+        }
+        b := builtin(l, &g, e, name, span, targs, args)
+        if b != -1 { ret b }
+    }
+    cur := g.cur
+    mut first := -1
+    mut target := -1
+    if len(alias) > 0 {
+        v := lookup(g, alias)
+        if v != -1 {
+            g.vars[v].read = true
+            mut base := g.vars[v].ty
+            match tkind(g, base) {
+                Ref{t}: base = t
+                _: {}
+            }
+            mut field := -1
+            match tkind(g, base) {
+                Struct{id}: {
+                    for f in g.types.structs[id].fields {
+                        if f.name == name {
+                            field = f.ty
+                            break
+                        }
+                    }
+                }
+                _: {}
+            }
+            if field != -1 and is_fn_type(g.types, field) and via != -1 {
+                _ = expr(l, &g, via, -1)
+                ret call_value(l, &g, e, field, span, args)
+            }
+            for a in args {
+                _ = expr(l, &g, a, -1)
+            }
+            ret err(&g, "E0150", span, "Claw has no methods; write `{name}({alias}, ...)`")
+        }
+        target = import(l, &g, alias, span)
+    } else if has_key(g.mods[cur].funcs, name) {
+        target = cur
+    } else {
+        // Not here: look in the module that declares the first argument's type.
+        mut found := -1
+        plain := len(args) > 0 and not waits_for_hint(l, g, args[0])
+        if plain {
+            t := expr(l, &g, args[0], -1)
+            first = t
+            m := owner_of(g, t)
+            if m != -1 and has_key(g.mods[m].funcs, name) {
+                entry := get(g.mods[m].funcs, name) else FuncEntry{false, -1, false}
+                if entry.public { found = m }
+            }
+        }
+        // Last, the module every program can see without importing it.
+        if found == -1 {
+            core := g.core
+            if has_key(g.mods[core].funcs, name) {
+                entry := get(g.mods[core].funcs, name) else FuncEntry{false, -1, false}
+                if entry.public { found = core }
+            }
+        }
+        target = found
+    }
+    mut m := -1
+    if target != -1 and has_key(g.mods[target].funcs, name) { m = target }
+    if m == -1 {
+        if len(alias) == 0 or target != -1 {
+            push(&g.diags, diag.new("E0101", span, "unknown function `{name}`"))
+        }
+        for a, i in args {
+            if not (i == 0 and first != -1) { _ = expr(l, &g, a, -1) }
+        }
+        ret types.t_err
+    }
+    entry := get(g.mods[m].funcs, name) else FuncEntry{false, -1, false}
+    if not entry.public and m != cur {
+        push(&g.diags, diag.new("E0147", span, private_msg(name)))
+    }
+    if name == "drop" {
+        push(&g.diags, diag.new("E0156", span, "`drop` runs by itself; it cannot be called"))
+    }
+
+    mut full := ""
+    mut got []int = []
+    if entry.generic {
+        f := l.units[m].program.funcs[entry.index]
+        explicit := resolve_targs(l, &g, targs) else { ret types.t_err }
+        if len(explicit) > len(f.tparams) {
+            ret err(&g, "E0144", span, "`{name}` takes {len(f.tparams)} type arguments, found {len(explicit)}")
+        }
+        if len(f.params) != len(args) {
+            push(&g.diags, diag.new("E0106", span, "`{name}` takes {len(f.params)} values, found {len(args)}"))
+        }
+        mut pats []int = []
+        for p in f.params {
+            push(&pats, p.ty)
+        }
+        inf := infer(l, &g, f.tparams, pats, args, explicit, first)
+        mut ordered []int = []
+        for p in f.tparams {
+            t := tenv_get(inf.bind, p.name)
+            if t == types.t_err { ret types.t_err }
+            if t == -1 {
+                ret err(&g, "E0144", span, "cannot work out `{p.name}`; write `{name}[...](...)`")
+            }
+            push(&ordered, t)
+        }
+        full = instantiate_fn(l, &g, m, entry.index, ordered)
+        got = copy(inf.got)
+    } else {
+        if len(targs) != 0 {
+            push(&g.diags, diag.new("E0144", span, "`{name}` takes no type arguments"))
+        }
+        for _ in args {
+            push(&got, -1)
+        }
+        if len(args) != 0 { got[0] = first }
+        full = "{g.mods[m].prefix}{name}"
+    }
+
+    sig_at := get(g.sigs, full) else -1
+    if sig_at == -1 { ret types.t_err }
+    sig := copy(g.sig_list[sig_at])
+    if len(sig.ext) > 0 and not g.func_claw {
+        push(&g.diags, diag.new("E0141", span, "`extern fn {name}` can only be called from `claw fn`"))
+    }
+    arity_ok := len(args) == len(sig.params) or (sig.variadic and len(args) > len(sig.params))
+    if not arity_ok and not entry.generic {
+        push(&g.diags, diag.new("E0106", span, "`{name}` takes {len(sig.params)} values, found {len(args)}"))
+    }
+    finish_args(l, &g, args, sig.params, got, sig.owned)
+    for a, i in args {
+        if i < len(sig.owned) and sig.owned[i] { consume(l, &g, a) }
+    }
+    if not g.func_claw { check_exclusive(l, &g, span, args) }
+    if sig.variadic {
+        for a, i in args {
+            if i < len(sig.params) { continue }
+            at := g.ty[a]
+            if not is_c_type(g.types, at) or at == types.t_strlit {
+                push(&g.diags, diag.new("E0149", l.a.exprs[a].span, "only numbers, bool and pointers can be passed to C"))
+            }
+        }
+    }
+    g.res[e] = ast.ResFunc{full}
+    ret sig.ret_ty
+}
+
+// One call may not change something while also reading or changing it elsewhere.
+fn check_exclusive(l modules.Loaded, g &Global, span diag.Span, args []int) {
+    mut muts []Path = []
+    for a in args {
+        mutable_paths(l, a, &muts)
+    }
+    for m, i in muts {
+        for j in i + 1..len(muts) {
+            if overlap(muts[j], m) {
+                push(&g.diags, diag.new("E0158", span, "`{m.root}` is passed with `&` twice in one call"))
+                ret
+            }
+        }
+    }
+    for a in args {
+        if is_addr_of(l, a) or not types.is_aggregate(g.types, g.ty[a]) { continue }
+        p := path_of(l, a) else { continue }
+        for m in muts {
+            if overlap(m, p) {
+                push(&g.diags, diag.new("E0158", l.a.exprs[a].span, "`{p.root}` is read here and changed with `&` in the same call"))
+                ret
+            }
+        }
+    }
+}
+
+fn check_all(l modules.Loaded, g &Global, args []int) {
+    for a in args {
+        _ = expr(l, &g, a, -1)
+    }
+}
+
+fn ordered_targs(g &Global, bind []Bind, tparams []ast.Binding, name str, span diag.Span) ?[]int {
+    mut ordered []int = []
+    for p in tparams {
+        t := tenv_get(bind, p.name)
+        if t == types.t_err { ret none }
+        if t == -1 {
+            _ = err(&g, "E0144", span, "cannot work out `{p.name}`; write `{name}[...]{{...}`")
+            ret none
+        }
+        push(&ordered, t)
+    }
+    ret ordered
+}
+
+fn struct_lit(l modules.Loaded, g &Global, e int, alias str, name str, span diag.Span, targs []int, args []int, hint int) int {
+    cur := g.cur
+    mut m := cur
+    if len(alias) > 0 {
+        m = import(l, &g, alias, span)
+        if m == -1 {
+            check_all(l, &g, args)
+            ret types.t_err
+        }
+    }
+    if has_key(g.mods[m].gtypes, name) {
+        gt := get(g.mods[m].gtypes, name) else GType{-1, false}
+        if not gt.public and m != cur {
+            check_all(l, &g, args)
+            ret err(&g, "E0147", span, private_msg(name))
+        }
+        d := l.units[m].program.types[gt.index]
+        match d.body {
+            Struct{fields}: {
+                explicit := resolve_targs(l, &g, targs) else { ret types.t_err }
+                if len(args) != len(fields) {
+                    push(&g.diags, diag.new("E0106", span, "`{name}` has {len(fields)} fields, found {len(args)}"))
+                }
+                mut pats []int = []
+                for f in fields {
+                    push(&pats, f.ty)
+                }
+                inf := infer(l, &g, d.tparams, pats, args, explicit, -1)
+                ordered := ordered_targs(&g, inf.bind, d.tparams, name, span) else { ret types.t_err }
+                ty := instantiate_type(l, &g, m, gt.index, ordered)
+                if ty == types.t_err { ret types.t_err }
+                id := struct_of(g.types, ty)
+                if id == -1 { ret types.t_err }
+                mut wants []int = []
+                for f in g.types.structs[id].fields {
+                    push(&wants, f.ty)
+                }
+                finish_args(l, &g, args, wants, inf.got, [])
+                for a in args {
+                    consume(l, &g, a)
+                }
+                ret ty
+            }
+            Variants{_}: ret types.t_err
+        }
+    }
+    if has_key(g.mods[m].gvariants, name) {
+        gv := get(g.mods[m].gvariants, name) else GVariant{-1, -1, false}
+        if not gv.public and m != cur {
+            check_all(l, &g, args)
+            ret err(&g, "E0147", span, private_msg(name))
+        }
+        d := l.units[m].program.types[gv.index]
+        match d.body {
+            Variants{vars}: {
+                fields := vars[gv.vidx].fields
+                mut explicit := resolve_targs(l, &g, targs) else { ret types.t_err }
+                if len(explicit) == 0 {
+                    explicit = targs_from_hint(g, d.name, m, hint) else []
+                }
+                if len(args) != len(fields) {
+                    push(&g.diags, diag.new("E0106", span, "`{name}` has {len(fields)} fields, found {len(args)}"))
+                }
+                mut pats []int = []
+                for f in fields {
+                    push(&pats, f.ty)
+                }
+                inf := infer(l, &g, d.tparams, pats, args, explicit, -1)
+                ordered := ordered_targs(&g, inf.bind, d.tparams, name, span) else { ret types.t_err }
+                ty := instantiate_type(l, &g, m, gv.index, ordered)
+                eid := enum_of(g.types, ty)
+                if eid == -1 { ret types.t_err }
+                g.res[e] = ast.ResVariant{eid, gv.vidx}
+                mut wants []int = []
+                for f in g.types.enums[eid].variants[gv.vidx].fields {
+                    push(&wants, f.ty)
+                }
+                finish_args(l, &g, args, wants, inf.got, [])
+                for a in args {
+                    consume(l, &g, a)
+                }
+                ret ty
+            }
+            Struct{_}: ret types.t_err
+        }
+    }
+    if not has_key(g.mods[m].names, name) {
+        check_all(l, &g, args)
+        ret err(&g, "E0112", span, "unknown type `{name}`")
+    }
+    entry := get(g.mods[m].names, name) else NameEntry{NameType{types.t_err}, false}
+    mut fields []types.Field = []
+    mut ty := types.t_err
+    match entry.def {
+        NameType{t}: {
+            ty = t
+            sid := struct_of(g.types, t)
+            if sid == -1 {
+                check_all(l, &g, args)
+                ret err(&g, "E0101", span, "`{name}` is a variant type; build one of its variants")
+            }
+            fields = copy(g.types.structs[sid].fields)
+        }
+        NameVariant{eid, idx, t}: {
+            ty = t
+            g.res[e] = ast.ResVariant{eid, idx}
+            fields = copy(g.types.enums[eid].variants[idx].fields)
+        }
+    }
+    if not entry.public and m != cur {
+        push(&g.diags, diag.new("E0147", span, private_msg(name)))
+    }
+    if len(args) != len(fields) {
+        push(&g.diags, diag.new("E0106", span, "`{name}` has {len(fields)} fields, found {len(args)}"))
+    }
+    for a, i in args {
+        if i >= len(fields) { break }
+        check_against(l, &g, a, fields[i].ty)
+        consume(l, &g, a)
+    }
+    for i in len(fields)..len(args) {
+        _ = expr(l, &g, args[i], -1)
+    }
+    ret ty
+}
+
+fn array_lit(l modules.Loaded, g &Global, e int, items []int, hint int) int {
+    if hint != -1 {
+        match tkind(g, hint) {
+            Array{elem, n}: {
+                if len(items) != n {
+                    name := tname(g, hint)
+                    push(&g.diags, diag.new("E0104", l.a.exprs[e].span, "`{name}` needs {n} items, found {len(items)}"))
+                }
+                array_items(l, &g, items, 0, elem)
+                ret hint
+            }
+            Slice{elem}: {
+                array_items(l, &g, items, 0, elem)
+                ret hint
+            }
+            _: {}
+        }
+    }
+    if len(items) == 0 {
+        ret err(&g, "E0123", l.a.exprs[e].span, "cannot tell what this empty array holds; write `a []int = []`")
+    }
+    got := expr(l, &g, items[0], -1)
+    first := value_type(&g, l.a.exprs[items[0]].span, got)
+    consume(l, &g, items[0])
+    array_items(l, &g, items, 1, first)
+    if first == types.t_err { ret types.t_err }
+    ret types.intern(&g.types, types.Array{first, len(items)})
+}
+
+fn array_items(l modules.Loaded, g &Global, items []int, from int, elem int) {
+    for i in from..len(items) {
+        check_against(l, &g, items[i], elem)
+        consume(l, &g, items[i])
+    }
+}
+
+fn try_expr(l modules.Loaded, g &Global, e int, inner int) int {
+    span := l.a.exprs[e].span
+    if g.in_contract {
+        _ = expr(l, &g, inner, -1)
+        ret err(&g, "E0164", span, "`?` would leave in the middle of a contract; get the value first")
+    }
+    if g.in_defer {
+        push(&g.diags, diag.new("E0143", span, "`defer` cannot leave the function"))
+    }
+    t := expr(l, &g, inner, -1)
+    consume(l, &g, inner)
+    match tkind(g, t) {
+        Option{p}: {
+            if not g.is_main {
+                mut ok := false
+                match tkind(g, g.ret_ty) {
+                    Option{_}: ok = true
+                    Err: ok = true
+                    _: {}
+                }
+                if not ok {
+                    ret err(&g, "E0124", span, "`?` on `?T` needs a function returning `?U`; or handle it with `else`")
+                }
+            }
+            ret p
+        }
+        Result{ok, er}: {
+            if not g.is_main {
+                mut fine := false
+                match tkind(g, g.ret_ty) {
+                    Result{_, my_err}: fine = my_err == er
+                    Err: fine = true
+                    _: {}
+                }
+                if not fine {
+                    n := tname(g, er)
+                    ret err(&g, "E0124", span, "`?` needs a function that can fail with {n}; or handle it with `else`")
+                }
+            }
+            ret ok
+        }
+        Err: ret types.t_err
+        _: {
+            n := tname(g, t)
+            ret err(&g, "E0104", l.a.exprs[inner].span, "`?` needs `?T` or `T ! E`, found {n}")
+        }
+    }
+}
+
+fn else_expr(l modules.Loaded, g &Global, e int, inner int, handler ast.ElseKind) int {
+    span := l.a.exprs[e].span
+    t := expr(l, &g, inner, -1)
+    consume(l, &g, inner)
+    mut payload := types.t_err
+    mut er := -1
+    match tkind(g, t) {
+        Option{p}: payload = p
+        Result{ok, x}: {
+            payload = ok
+            er = x
+        }
+        Err: payload = types.t_err
+        _: {
+            n := tname(g, t)
+            _ = err(&g, "E0104", l.a.exprs[inner].span, "`else` needs `?T` or `T ! E`, found {n}")
+            payload = types.t_err
+        }
+    }
+    match handler {
+        ElseValue{v}: {
+            if payload == types.t_void {
+                push(&g.diags, diag.new("E0104", span, "there is no value to replace here; use `else {{ ... }`"))
+                _ = expr(l, &g, v, -1)
+            } else {
+                check_against(l, &g, v, payload)
+                consume(l, &g, v)
+            }
+        }
+        ElseBlock{binder, b}: {
+            if g.in_contract {
+                push(&g.diags, diag.new("E0164", span, "a contract cannot contain an `else` block; use `else value`"))
+            }
+            before := copy(g.moved)
+            push_scope(&g)
+            bound := copy(binder) else ast.Binding{"", no_span()}
+            if len(bound.name) > 0 {
+                if er != -1 {
+                    declare(&g, bound.name, er, false, bound.span, bound.span)
+                } else {
+                    if t != types.t_err {
+                        push(&g.diags, diag.new("E0138", bound.span, "`?T` has no error value to name; write `else {{ ... }`"))
+                    }
+                    declare(&g, bound.name, types.t_err, false, bound.span, bound.span)
+                    v := lookup(g, bound.name)
+                    g.vars[v].read = true
+                }
+            }
+            ends := block(l, &g, b)
+            pop_scope(&g)
+            g.moved = before
+            if not ends {
+                push(&g.diags, diag.new("E0117", l.a.blocks[b].end, "an `else` block must leave: end it with `ret`, `fail`, `break` or `continue`"))
+            }
+        }
+    }
+    ret payload
+}
+
+// Does a `break` inside this block leave *this* loop?
+fn has_break(l modules.Loaded, b int) bool {
+    for s in l.a.blocks[b].stmts {
+        if stmt_breaks(l, s) { ret true }
+    }
+    ret false
+}
+
+fn expr_breaks(l modules.Loaded, e int) bool {
+    match l.a.exprs[e].kind {
+        Else{x, handler}: {
+            if expr_breaks(l, x) { ret true }
+            match handler {
+                ElseBlock{_, b}: ret has_break(l, b)
+                ElseValue{v}: ret expr_breaks(l, v)
+            }
+        }
+        Try{x}: ret expr_breaks(l, x)
+        Field{x, _, _}: ret expr_breaks(l, x)
+        Unary{_, x}: ret expr_breaks(l, x)
+        AddrOf{x}: ret expr_breaks(l, x)
+        Deref{x}: ret expr_breaks(l, x)
+        Index{x, i}: ret expr_breaks(l, x) or expr_breaks(l, i)
+        Slice{x, _, _}: ret expr_breaks(l, x)
+        Binary{_, x, y}: ret expr_breaks(l, x) or expr_breaks(l, y)
+        Call{_, _, _, _, args, _}: ret any_breaks(l, args)
+        StructLit{_, _, _, _, args}: ret any_breaks(l, args)
+        ArrayLit{items}: ret any_breaks(l, items)
+        CallValue{f, args}: ret expr_breaks(l, f) or any_breaks(l, args)
+        ArrayFill{x}: ret expr_breaks(l, x)
+        _: ret false
+    }
+}
+
+fn any_breaks(l modules.Loaded, items []int) bool {
+    for a in items {
+        if expr_breaks(l, a) { ret true }
+    }
+    ret false
+}
+
+fn stmt_breaks(l modules.Loaded, s int) bool {
+    match l.a.stmts[s].kind {
+        Break: ret true
+        If{cond, then, els}: {
+            if expr_breaks(l, cond) or has_break(l, then) { ret true }
+            x := els else ast.ElseIf{-1}
+            match x {
+                ElseBlockOf{b}: ret has_break(l, b)
+                ElseIf{i}: {
+                    if i != -1 { ret stmt_breaks(l, i) }
+                    ret false
+                }
+            }
+        }
+        Match{subject, arms}: {
+            if expr_breaks(l, subject) { ret true }
+            for a in arms {
+                if has_break(l, a.body) { ret true }
+            }
+            ret false
+        }
+        Let{_, _, _, _, init}: ret expr_breaks(l, init)
+        Assign{target, _, value}: ret expr_breaks(l, value) or expr_breaks(l, target)
+        ExprStmt{e}: ret expr_breaks(l, e)
+        Discard{e}: ret expr_breaks(l, e)
+        Fail{e}: ret expr_breaks(l, e)
+        Ret{e}: {
+            if e != -1 { ret expr_breaks(l, e) }
+            ret false
+        }
+        _: ret false
+    }
+}

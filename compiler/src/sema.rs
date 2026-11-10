@@ -965,7 +965,10 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
         g.cur = i;
         fill_types(&mut g, &u.program, &ids[i], diags);
     }
-    let every: Vec<Ty> = g.instance_of.keys().copied().chain(ids.iter().flatten().flatten().copied()).collect();
+    // By type id, not hash order: which type a cycle is reported on must not vary from run to run.
+    let mut made: Vec<Ty> = g.instance_of.keys().copied().collect();
+    made.sort_by_key(|t| t.0);
+    let every: Vec<Ty> = made.into_iter().chain(ids.iter().flatten().flatten().copied()).collect();
     for t in every {
         g.ensure_layout(t, diags);
     }
@@ -981,7 +984,9 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
     }
 
     g.funcs_ready = true;
-    let existing: Vec<(Ty, (usize, String, Vec<Ty>))> = g.instance_of.iter().map(|(t, i)| (*t, i.clone())).collect();
+    let mut existing: Vec<(Ty, (usize, String, Vec<Ty>))> = g.instance_of.iter().map(|(t, i)| (*t, i.clone())).collect();
+    // The order instances are made in decides the order of the program's symbols.
+    existing.sort_by_key(|x| x.0 .0);
     for (ty, (m, name, targs)) in existing {
         g.attach_generic_drop(ty, m, &name, targs, diags);
     }
@@ -1837,6 +1842,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 self.moved.insert(n.clone(), e.span);
             }
             ExprKind::Field { .. } | ExprKind::Index { .. } | ExprKind::Deref(_) => {
+                // `module.Variant` is a new value, not a field being moved out.
+                if matches!(*e.res.borrow(), Res::Variant(..)) {
+                    return;
+                }
                 if self.func.claw && matches!(root_of(e, &self.g.types), Root::Through) {
                     return; // Raw memory: moving it out is the programmer's business.
                 }

@@ -1,0 +1,8 @@
+pub type Msg = Text{s str} | Quiet
+
+pub fn show(m Msg) str +mem {
+    match m {
+        Text{s}: ret copy(s)
+        Quiet: ret "quiet"
+    }
+}

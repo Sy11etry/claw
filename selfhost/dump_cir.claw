@@ -1,0 +1,64 @@
+// `dump_cir [--check] [--tests] [--fast] [--regs] file`: the program right after lowering, in the
+// same words as `claw __cir`. No flags is `claw build --no-opt`, `--check` is `claw run`,
+// `--check --tests` is `claw test --blocks`, `--fast` is `claw build --fast --no-opt`.
+
+use cir
+use diag
+use effects
+use lower
+use modules
+use rt
+use sema
+
+fn say_errors(ds []diag.Diag, files []str) {
+    mut sorted := copy(ds)
+    diag.sort(&sorted)
+    rt.write_out(diag.render(files, sorted))
+}
+
+fn main() {
+    rt.ensure_stack()
+    args := rt.args()
+    mut check := false
+    mut tests := false
+    mut fast := false
+    mut regs := false
+    mut path := ""
+    for a, i in args {
+        if i == 0 { continue }
+        if a == "--check" {
+            check = true
+        } else if a == "--tests" {
+            tests = true
+        } else if a == "--fast" {
+            fast = true
+        } else if a == "--regs" {
+            regs = true
+        } else if len(path) == 0 {
+            path = copy(a)
+        }
+    }
+    mut l := modules.load(path, check) else err {
+        say_errors(err.diags, err.files)
+        ret
+    }
+    mut diags []diag.Diag = []
+    c := sema.check(&l, tests, &diags)
+    _ = effects.check(l, c, &diags)
+    if len(diags) > 0 {
+        say_errors(diags, l.files)
+        ret
+    }
+    m := lower.lower(l, c, lower.Opts{check, tests, fast}, &diags)
+    if len(diags) > 0 {
+        say_errors(diags, l.files)
+        ret
+    }
+    mut o []u8 = []
+    if regs {
+        cir.reg_dump(m, &o)
+    } else {
+        cir.dump(m, &o)
+    }
+    rt.write_out(rt.text(o))
+}

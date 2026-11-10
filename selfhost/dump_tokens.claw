@@ -1,0 +1,17 @@
+// `dump_tokens file`: one line per token, to compare with `claw __tokens`.
+use diag
+use lexer
+use rt
+
+fn main() {
+    a := rt.args()
+    src := rt.read_file(a[1]) else { ret }
+    mut d []diag.Diag = []
+    toks := lexer.lex(src, 0, &d)
+    for t in toks {
+        print("{t.kind} {t.text} {t.value} {t.big} {t.span.start} {t.span.stop} {t.span.line} {t.span.col}")
+    }
+    for e in d {
+        print("{e.code} {e.span.line}:{e.span.col}")
+    }
+}

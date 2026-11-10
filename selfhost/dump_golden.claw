@@ -1,0 +1,24 @@
+// `dump_golden`: the table `claw __encoder-golden` prints, from the encoders written in Claw.
+
+use arm64
+use rt
+
+fn hex8(w u32) str +mem {
+    digits := "0123456789abcdef"
+    mut o []u8 = []
+    mut shift u32 = 28
+    for {
+        push(&o, digits[int((w >> shift) & 15)])
+        if shift == 0 { break }
+        shift -= 4
+    }
+    ret rt.text(o)
+}
+
+fn main() {
+    mut o := ""
+    for row in arm64.golden() {
+        o = "{o}{hex8(row.word)}\t{row.text}\n"
+    }
+    rt.write_out(o)
+}

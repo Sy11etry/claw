@@ -1,0 +1,9 @@
+// error: E0127
+type A[T] { other B[T] }
+
+type B[T] { back A[T] }
+
+type Use { a A[int] }
+
+fn main() {
+}

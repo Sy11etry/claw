@@ -1,0 +1,204 @@
+// Syntax tree. Nodes live in one arena; a reference is an index, "no value" is -1.
+// Sema writes each expression's type into `Expr.ty`.
+
+use diag
+
+// types.ERR: the type of an expression sema has not looked at.
+pub const ty_err = 13
+
+// An integer literal. Rust keeps an i128; here only what fits 64 bits is exact.
+pub type Num { value u64, neg bool, big bool }
+
+// `(String, Span)` in Rust.
+pub type Binding { name str, span diag.Span }
+
+pub type Size = SizeLit{v Num} | SizeName{name str}
+
+// `(own, type)` of one parameter of a function type.
+pub type FnParam { is_own bool, ty int }
+
+pub type TypeKind = TName{module ?str, name str, targs []int} |
+    TPointer{inner int} |
+    TRef{inner int} |
+    TSlice{inner int} |
+    TArray{size Size, inner int} |
+    TOption{inner int} |
+    // `T ! E`, or `! E` when the success value is nothing: `ok` is then -1.
+    TResult{ok int, err int} |
+    // `fn(int, &[]int) int +mem`.
+    TFn{params []FnParam, ret_ty int, effects []str}
+
+pub type TypeExpr { kind TypeKind, span diag.Span }
+
+pub type Program { funcs []Func, types []TypeDecl, consts []ConstDecl, externs []ExternDecl, uses []UseDecl }
+
+// `use a.b`: the file a/b.claw, known here as `b`.
+pub type UseDecl { path []str, span diag.Span }
+
+// `symbol`: the C function's name, when it differs from `name`.
+pub type ExternDecl { symbol ?str, name str, span diag.Span, public bool, params []Param, variadic bool, ret_ty int }
+
+pub type FieldDecl { name str, span diag.Span, ty int }
+
+pub type VariantDecl { name str, span diag.Span, fields []FieldDecl }
+
+pub type TypeBody = Struct{fields []FieldDecl} | Variants{variants []VariantDecl}
+
+pub type TypeDecl { name str, span diag.Span, public bool, tparams []Binding, body TypeBody }
+
+// `computed`: the value needs running code; it became the function `const <name>`.
+// `text`: the value as written, for `claw sig`.
+pub type ConstDecl { name str, span diag.Span, public bool, ty int, value int, computed bool, text str }
+
+// `addressed`: scalar locals whose address is taken, so they must live in memory.
+// `sig_end`: where a missing `+effect` would be written.
+// `test_name`: the name of a `test` block; such a function is only built by `claw test`.
+pub type Func {
+    name str,
+    name_span diag.Span,
+    public bool,
+    is_claw bool,
+    tparams []Binding,
+    addressed Map[str, bool],
+    params []Param,
+    ret_ty int,
+    contracts []Contract,
+    effects []str,
+    sig_end diag.Span,
+    test_name ?str,
+    body int,
+}
+
+// One `need` or `sure` clause of a signature. `text`: the clause as written.
+pub type Contract { is_sure bool, e int, text str }
+
+// `is_own`: `own x T`, the function takes the value over.
+pub type Param { is_own bool, name str, span diag.Span, ty int }
+
+pub type Block { stmts []int, end diag.Span }
+
+pub type Stmt { kind StmtKind, span diag.Span }
+
+pub type ElseStmt = ElseBlockOf{b int} | ElseIf{s int}
+
+pub type Pat = PatWild | PatVariant{name str, binds []Binding} | PatInt{v Num} | PatBool{v bool}
+
+pub type Arm { pat Pat, span diag.Span, body int }
+
+pub type StmtKind = Let{mutable bool, name str, name_span diag.Span, ty int, init int} |
+    Assign{target int, op ?BinOp, value int} |
+    Discard{e int} |
+    ExprStmt{e int} |
+    If{cond int, then int, els ?ElseStmt} |
+    ForRange{var str, var_span diag.Span, start int, end int, body int} |
+    ForIn{elem str, elem_span diag.Span, index ?Binding, subject int, body int} |
+    ForCond{cond int, body int} |
+    ForEver{body int} |
+    Match{subject int, arms []Arm} |
+    Ret{e int} |
+    Fail{e int} |
+    Defer{b int} |
+    // `sure x` inside a body; the text is for the message when it fails.
+    Sure{e int, text str} |
+    Break |
+    Continue
+
+pub type BinOp = Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr | Eq | Ne | Lt | Le | Gt | Ge | And | Or
+
+pub fn binop_text(op BinOp) str {
+    match op {
+        Add: ret "+"
+        Sub: ret "-"
+        Mul: ret "*"
+        Div: ret "/"
+        Rem: ret "%"
+        BitAnd: ret "&"
+        BitOr: ret "|"
+        BitXor: ret "^"
+        Shl: ret "<<"
+        Shr: ret ">>"
+        Eq: ret "=="
+        Ne: ret "!="
+        Lt: ret "<"
+        Le: ret "<="
+        Gt: ret ">"
+        Ge: ret ">="
+        And: ret "and"
+        Or: ret "or"
+    }
+}
+
+pub type UnOp = Neg | BitNot | Not
+
+// sema.rs has this type; it lives here because `Res` needs it and modules cannot import in a cycle.
+pub type ConstVal = ConstInt{v Num} | ConstFloat{v f64} | ConstBool{v bool} | ConstComputed{i int}
+
+// What a name turned out to mean, decided by sema and read by lowering.
+pub type Res = ResNone | ResFunc{name str} | ResValue{ty int} | ResConst{val ConstVal, ty int} | ResVariant{a int, b int}
+
+// An implicit wrap sema decided on: `T` used where `?T` or `T ! E` is expected.
+pub type Coerce = CoerceNo | CoerceSome{ty int} | CoerceOk{ty int} | CoerceView
+
+pub type Expr { kind ExprKind, span diag.Span, ty int, coerce Coerce, res Res }
+
+pub type Part = PartLit{s str} | PartExpr{e int}
+
+// `binder` in `x else err { ... }`.
+pub type ElseKind = ElseValue{e int} | ElseBlock{binder ?Binding, body int}
+
+pub type ExprKind = Int{v Num} |
+    Float{v f64} |
+    Char{v u8} |
+    Bool{v bool} |
+    Str{s str} |
+    Interp{parts []Part} |
+    None |
+    // `ret` inside a `sure` contract.
+    RetVal |
+    // `old(e)` inside a `sure` contract: `e` as it was on entry.
+    Old{e int} |
+    Var{name str} |
+    Unary{op UnOp, e int} |
+    Binary{op BinOp, l int, r int} |
+    // `via` is `module.name` read as a field, for when `module` turns out to be a variable.
+    Call{module ?str, name str, name_span diag.Span, targs []int, args []int, via int} |
+    // `table[i](x)`: a call through any other expression.
+    CallValue{f int, args []int} |
+    StructLit{module ?str, name str, name_span diag.Span, targs []int, args []int} |
+    AddrOf{e int} |
+    Deref{e int} |
+    ArrayLit{items []int} |
+    ArrayFill{e int} |
+    Field{e int, name str, name_span diag.Span} |
+    Index{e int, i int} |
+    // `a[lo..hi]`, either end optional: a read-only view.
+    Slice{e int, lo int, hi int} |
+    Try{e int} |
+    Else{e int, handler ElseKind}
+
+// The arena behind the whole tree.
+pub type Ast { exprs []Expr, stmts []Stmt, blocks []Block, tys []TypeExpr }
+
+pub fn new_ast() Ast {
+    ret Ast{[], [], [], []}
+}
+
+pub fn new_expr(a &Ast, own kind ExprKind, span diag.Span) int +mem {
+    push(&a.exprs, Expr{kind, span, ty_err, CoerceNo, ResNone})
+    ret len(a.exprs) - 1
+}
+
+pub fn new_stmt(a &Ast, own kind StmtKind, span diag.Span) int +mem {
+    push(&a.stmts, Stmt{kind, span})
+    ret len(a.stmts) - 1
+}
+
+pub fn new_block(a &Ast, own stmts []int, end diag.Span) int +mem {
+    push(&a.blocks, Block{stmts, end})
+    ret len(a.blocks) - 1
+}
+
+pub fn new_type(a &Ast, own kind TypeKind, span diag.Span) int +mem {
+    push(&a.tys, TypeExpr{kind, span})
+    ret len(a.tys) - 1
+}

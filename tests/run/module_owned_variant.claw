@@ -1,0 +1,10 @@
+// `module.Variant` builds a value; it is not a field moved out of a struct.
+use lib.owned_variant
+
+fn main() {
+    m := owned_variant.Quiet
+    print(owned_variant.show(m))
+    print(owned_variant.show(owned_variant.Text{"hi"}))
+}
+// expect: quiet
+// expect: hi

@@ -165,6 +165,48 @@ def info_test(path):
     return None
 
 
+def bootstrap():
+    """The compiler written in Claw builds itself, twice, to the very same bytes as Rust's `--no-opt`."""
+    out = ROOT / "selfhost/build"
+    for d in ("s0", "s1", "s2", "s3"):
+        (out / d).mkdir(parents=True, exist_ok=True)
+    main = ROOT / "selfhost/main.claw"
+    steps = [
+        [CLAW, "build", main, "-o", out / "s1/clawc"],
+        [CLAW, "build", "--no-opt", main, "-o", out / "s0/clawc"],
+        [out / "s1/clawc", main, "-o", out / "s2/clawc"],
+        [out / "s2/clawc", main, "-o", out / "s3/clawc"],
+    ]
+    for cmd in steps:
+        p = child(cmd, capture_output=True, text=True, timeout=300)
+        if p.returncode != 0:
+            return f"{cmd[0]} failed: {p.stderr[-600:]}"
+    a, b, c = ((out / d / "clawc").read_bytes() for d in ("s0", "s2", "s3"))
+    if b != c:
+        return "stage 2 and stage 3 differ: the compiler does not reproduce itself"
+    if a != b:
+        return "the self-built compiler differs from Rust's --no-opt build"
+    return None
+
+
+def selfhost_corpus(tmp):
+    """Every run test, built by the compiler written in Claw: the same bytes as Rust's `--no-opt`."""
+    clawc = ROOT / "selfhost/build/s3/clawc"
+    bad = []
+    for path in sorted((ROOT / "tests/run").glob("*.claw")):
+        if "const_computed" in path.name:
+            continue
+        for flags in ([], ["--fast"]):
+            a, b = tmp / "x" / path.stem, tmp / "y" / path.stem
+            a.parent.mkdir(exist_ok=True)
+            b.parent.mkdir(exist_ok=True)
+            p = child([CLAW, "build", "--no-opt", *flags, path, "-o", a], capture_output=True)
+            q = child([clawc, *flags, path, "-o", b], capture_output=True)
+            if p.returncode != q.returncode or (p.returncode == 0 and a.read_bytes() != b.read_bytes()):
+                bad.append(f"{path.name} {' '.join(flags)}")
+    return None if not bad else f"{len(bad)} differ: {', '.join(bad[:5])}"
+
+
 def card_command():
     """`claw card` is exactly the card the size budget is checked on."""
     p = child([CLAW, "card"], capture_output=True, text=True)
@@ -358,6 +400,16 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL info/{path.name}: {msg}")
+        total += 1
+        msg = bootstrap()
+        if msg:
+            failures += 1
+            print(f"FAIL bootstrap: {msg}")
+        total += 1
+        msg = msg or selfhost_corpus(tmp)
+        if msg:
+            failures += 1
+            print(f"FAIL selfhost corpus: {msg}")
         total += 1
         msg = card_command()
         if msg:

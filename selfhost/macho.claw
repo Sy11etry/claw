@@ -1,0 +1,475 @@
+// Writes a signed arm64 Mach-O executable directly: no assembler, no linker.
+// The layout mirrors what clang + ld produce on macOS (checked with otool).
+
+use codegen
+use sha256
+
+const base_addr u64 = 0x1_0000_0000
+const page u64 = 0x4000
+const sig_page int = 4096
+
+fn align(v u64, a u64) u64 {
+    ret (v + a - 1) & ~(a - 1)
+}
+
+fn max_u64(a u64, b u64) u64 {
+    if a > b { ret a }
+    ret b
+}
+
+fn w_u8(w &[]u8, v u8) {
+    push(&w, v)
+}
+
+fn w_u16(w &[]u8, v u16) {
+    push(&w, u8(v & 255))
+    push(&w, u8(v >> 8))
+}
+
+fn w_u32(w &[]u8, v u32) {
+    push(&w, u8(v & 255))
+    push(&w, u8((v >> 8) & 255))
+    push(&w, u8((v >> 16) & 255))
+    push(&w, u8(v >> 24))
+}
+
+fn w_u64(w &[]u8, v u64) {
+    w_u32(&w, u32(v & 0xFFFF_FFFF))
+    w_u32(&w, u32(v >> 32))
+}
+
+fn add_text(w &[]u8, s str) {
+    for c in s {
+        push(&w, c)
+    }
+}
+
+fn name16(w &[]u8, s str) {
+    mut i := 0
+    for c in s {
+        push(&w, c)
+        i += 1
+    }
+    for i < 16 {
+        push(&w, 0)
+        i += 1
+    }
+}
+
+fn pad_to(w &[]u8, n int) {
+    for len(w) < n {
+        push(&w, 0)
+    }
+}
+
+// A load command for one segment.
+type Seg {
+    name str,
+    vmaddr u64,
+    vmsize u64,
+    fileoff u64,
+    filesize u64,
+    maxprot u32,
+    initprot u32,
+    flags u32,
+    nsects u32,
+}
+
+fn segment(w &[]u8, s Seg) {
+    w_u32(&w, 0x19)
+    w_u32(&w, 72 + 80 * s.nsects)
+    name16(&w, s.name)
+    w_u64(&w, s.vmaddr)
+    w_u64(&w, s.vmsize)
+    w_u64(&w, s.fileoff)
+    w_u64(&w, s.filesize)
+    w_u32(&w, s.maxprot)
+    w_u32(&w, s.initprot)
+    w_u32(&w, s.nsects)
+    w_u32(&w, s.flags)
+}
+
+fn section(w &[]u8, sect str, seg str, addr u64, size u64, off u32, al u32, flags u32) {
+    name16(&w, sect)
+    name16(&w, seg)
+    w_u64(&w, addr)
+    w_u64(&w, size)
+    w_u32(&w, off)
+    w_u32(&w, al)
+    w_u32(&w, 0)
+    w_u32(&w, 0)
+    w_u32(&w, flags)
+    w_u32(&w, 0)
+    w_u32(&w, 0)
+    w_u32(&w, 0)
+}
+
+fn path_cmd(w &[]u8, cmd u32, path str, extra []u32) {
+    header := 8 + 4 + 4 * len(extra)
+    size := align(u64(header + len(path) + 1), 8)
+    start := len(w)
+    w_u32(&w, cmd)
+    w_u32(&w, u32(size))
+    w_u32(&w, u32(header))
+    for e in extra {
+        w_u32(&w, e)
+    }
+    add_text(&w, path)
+    pad_to(&w, start + int(size))
+}
+
+fn linkedit_cmd(w &[]u8, cmd u32, off u64, size u64) {
+    w_u32(&w, cmd)
+    w_u32(&w, 16)
+    w_u32(&w, u32(off))
+    w_u32(&w, u32(size))
+}
+
+// Chained fixups: every GOT slot binds to a libSystem symbol.
+fn chained_fixups(imports []str, got_seg_offset u64) []u8 +mem {
+    seg_count u32 = 5
+    got_seg_index := 2
+    starts_offset u32 = 32
+    image_size := 4 + 4 * seg_count
+    seg_info_offset := u32(align(u64(image_size), 8))
+    seg_size u32 = 24
+    imports_offset := starts_offset + seg_info_offset + seg_size
+    symbols_offset := imports_offset + 4 * u32(len(imports))
+
+    mut w []u8 = []
+    w_u32(&w, 0)
+    w_u32(&w, starts_offset)
+    w_u32(&w, imports_offset)
+    w_u32(&w, symbols_offset)
+    w_u32(&w, u32(len(imports)))
+    w_u32(&w, 1) // DYLD_CHAINED_IMPORT
+    w_u32(&w, 0) // uncompressed symbol names
+    pad_to(&w, int(starts_offset))
+
+    w_u32(&w, seg_count)
+    for i in 0..int(seg_count) {
+        if i == got_seg_index {
+            w_u32(&w, seg_info_offset)
+        } else {
+            w_u32(&w, 0)
+        }
+    }
+    pad_to(&w, int(starts_offset + seg_info_offset))
+
+    w_u32(&w, seg_size)
+    w_u16(&w, u16(page))
+    w_u16(&w, 6) // DYLD_CHAINED_PTR_64_OFFSET
+    w_u64(&w, got_seg_offset)
+    w_u32(&w, 0)
+    w_u16(&w, 1)
+    w_u16(&w, 0)
+
+    mut names []u8 = []
+    push(&names, 0)
+    for name in imports {
+        w_u32(&w, 1 | (u32(len(names)) << 9)) // library ordinal 1 = libSystem
+        for c in name {
+            push(&names, c)
+        }
+        push(&names, 0)
+    }
+    for c in names {
+        push(&w, c)
+    }
+    n := int(align(u64(len(w)), 8))
+    pad_to(&w, n)
+    ret w
+}
+
+// A trie holding one export, `__mh_execute_header` at offset 0.
+fn exports_trie() []u8 +mem {
+    mut t []u8 = []
+    push(&t, 0)
+    push(&t, 1)
+    add_text(&t, "__mh_execute_header")
+    push(&t, 0)
+    node := u8(len(t) + 1)
+    push(&t, node)
+    push(&t, 2) // terminal size 2, flags 0, address 0, no children
+    push(&t, 0)
+    push(&t, 0)
+    push(&t, 0)
+    n := int(align(u64(len(t)), 8))
+    pad_to(&t, n)
+    ret t
+}
+
+fn page_patch(word u32, pc u64, target u64) u32 {
+    pages := (int(target & ~0xFFF) - int(pc & ~0xFFF)) >> 12
+    p := u32(pages)
+    ret word | ((p & 3) << 29) | (((p >> 2) & 0x7FFFF) << 5)
+}
+
+fn be32(b &[]u8, v u32) {
+    push(&b, u8(v >> 24))
+    push(&b, u8((v >> 16) & 255))
+    push(&b, u8((v >> 8) & 255))
+    push(&b, u8(v & 255))
+}
+
+fn be64(b &[]u8, v u64) {
+    be32(&b, u32(v >> 32))
+    be32(&b, u32(v & 0xFFFF_FFFF))
+}
+
+fn signature_size(code_limit int, ident str) int {
+    slots := (code_limit + sig_page - 1) / sig_page
+    ret 20 + 88 + len(ident) + 1 + slots * 32
+}
+
+// Ad-hoc signature in the same shape ld writes: SuperBlob + CodeDirectory v20400.
+fn sign(file []u8, ident str, text_filesize u64) []u8 +mem {
+    slots := (len(file) + sig_page - 1) / sig_page
+    ident_off u32 = 88
+    hash_off := ident_off + u32(len(ident)) + 1
+    cd_len := hash_off + u32(slots) * 32
+
+    mut b []u8 = []
+    be32(&b, 0xfade_0cc0) // SuperBlob
+    be32(&b, 20 + cd_len)
+    be32(&b, 1)
+    be32(&b, 0) // slot: CodeDirectory
+    be32(&b, 20)
+
+    be32(&b, 0xfade_0c02)
+    be32(&b, cd_len)
+    be32(&b, 0x20400)
+    be32(&b, 0x20002) // adhoc | linker-signed
+    be32(&b, hash_off)
+    be32(&b, ident_off)
+    be32(&b, 0) // special slots
+    be32(&b, u32(slots))
+    be32(&b, u32(len(file)))
+    push(&b, 32) // SHA-256, 4K pages
+    push(&b, 2)
+    push(&b, 0)
+    push(&b, 12)
+    be32(&b, 0)
+    be32(&b, 0) // scatter
+    be32(&b, 0) // team
+    be32(&b, 0)
+    be64(&b, 0) // codeLimit64
+    be64(&b, 0) // execSegBase
+    be64(&b, text_filesize)
+    be64(&b, 1) // CS_EXECSEG_MAIN_BINARY
+
+    add_text(&b, ident)
+    push(&b, 0)
+    mut at := 0
+    for at < len(file) {
+        mut stop := at + sig_page
+        if stop > len(file) { stop = len(file) }
+        h := sha256.sum(file[at..stop])
+        for x in h {
+            push(&b, x)
+        }
+        at = stop
+    }
+    ret b
+}
+
+pub fn write_macho(obj codegen.Object, ident str) []u8 +mem {
+    // segments; fixups, trie, symtab, dysymtab; dylinker, uuid, build, main, dylib, signature
+    sizeofcmds u64 = 72 + (72 + 160) + (72 + 80) + (72 + 80) + 72 + 16 + 16 + 24 + 80 + 32 + 24 + 24 + 24 + 56 + 16
+    ncmds u32 = 15
+
+    text_off := align(32 + sizeofcmds, 16)
+    code_size := u64(len(obj.code)) * 4
+    rodata_off := align(text_off + code_size, 8)
+    text_end := rodata_off + u64(len(obj.rodata))
+    text_filesize := align(max_u64(text_end, 1), page)
+
+    got_off := text_filesize
+    got_addr := base_addr + got_off
+    got_size := u64(len(obj.imports)) * 8
+    data_size := align(max_u64(got_size, 1), page)
+    linkedit_off := got_off + data_size
+    // Zero-filled writable memory: takes address space, not file space.
+    bss_addr := got_addr + data_size
+    bss_vmsize := align(max_u64(obj.bss_size, 1), page)
+
+    fixups := chained_fixups(obj.imports, got_off)
+    trie := exports_trie()
+
+    mut strtab []u8 = []
+    push(&strtab, 0)
+    mut nlist []u8 = []
+    for sym in obj.symbols {
+        w_u32(&nlist, u32(len(strtab)))
+        w_u8(&nlist, 0x0e) // N_SECT, local
+        w_u8(&nlist, 1)
+        w_u16(&nlist, 0)
+        w_u64(&nlist, base_addr + text_off + u64(sym.pos) * 4)
+        add_text(&strtab, sym.name)
+        push(&strtab, 0)
+    }
+    n_strtab := int(align(u64(len(strtab)), 8))
+    pad_to(&strtab, n_strtab)
+
+    fixups_off := linkedit_off
+    trie_off := fixups_off + u64(len(fixups))
+    sym_off := trie_off + u64(len(trie))
+    str_off := sym_off + u64(len(nlist))
+    sig_off := align(str_off + u64(len(strtab)), 16)
+    sig_size := u64(signature_size(int(sig_off), ident))
+    linkedit_filesize := sig_off + sig_size - linkedit_off
+
+    // Patch address references now that the layout is known.
+    mut code := copy(obj.code)
+    code_addr := base_addr + text_off
+    rodata_addr := base_addr + rodata_off
+    for r in obj.data_refs {
+        target := rodata_addr + u64(r.x)
+        pc := code_addr + u64(r.at) * 4
+        code[r.at] = page_patch(code[r.at], pc, target)
+        code[r.at + 1] |= u32(target & 0xFFF) << 10
+    }
+    for r in obj.code_refs {
+        target := code_addr + u64(r.x) * 4
+        pc := code_addr + u64(r.at) * 4
+        code[r.at] = page_patch(code[r.at], pc, target)
+        code[r.at + 1] |= u32(target & 0xFFF) << 10
+    }
+    for at in obj.bss_refs {
+        pc := code_addr + u64(at) * 4
+        code[at] = page_patch(code[at], pc, bss_addr)
+        code[at + 1] |= u32(bss_addr & 0xFFF) << 10
+    }
+    for r in obj.got_refs {
+        target := got_addr + u64(r.x) * 8
+        pc := code_addr + u64(r.at) * 4
+        code[r.at] = page_patch(code[r.at], pc, target)
+        code[r.at + 1] |= u32((target & 0xFFF) / 8) << 10
+    }
+
+    mut w []u8 = []
+    reserve(&w, int(sig_off + sig_size))
+    w_u32(&w, 0xfeed_facf)
+    w_u32(&w, 0x0100_000c) // arm64
+    w_u32(&w, 0)
+    w_u32(&w, 2) // MH_EXECUTE
+    w_u32(&w, ncmds)
+    w_u32(&w, u32(sizeofcmds))
+    w_u32(&w, 0x0020_0085) // NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
+    w_u32(&w, 0)
+
+    segment(&w, Seg{"__PAGEZERO", 0, base_addr, 0, 0, 0, 0, 0, 0})
+    segment(&w, Seg{"__TEXT", base_addr, text_filesize, 0, text_filesize, 5, 5, 0, 2})
+    section(&w, "__text", "__TEXT", code_addr, code_size, u32(text_off), 2, 0x8000_0400)
+    section(&w, "__const", "__TEXT", rodata_addr, u64(len(obj.rodata)), u32(rodata_off), 3, 0)
+    segment(&w, Seg{"__DATA_CONST", got_addr, data_size, got_off, data_size, 3, 3, 0x10, 1})
+    section(&w, "__got", "__DATA_CONST", got_addr, got_size, u32(got_off), 3, 0)
+    segment(&w, Seg{"__DATA", bss_addr, bss_vmsize, linkedit_off, 0, 3, 3, 0, 1})
+    section(&w, "__bss", "__DATA", bss_addr, obj.bss_size, 0, 3, 1)
+    segment(&w, Seg{"__LINKEDIT", bss_addr + bss_vmsize, align(linkedit_filesize, page), linkedit_off, linkedit_filesize, 1, 1, 0, 0})
+
+    linkedit_cmd(&w, 0x8000_0034, fixups_off, u64(len(fixups)))
+    linkedit_cmd(&w, 0x8000_0033, trie_off, u64(len(trie)))
+
+    nsyms := u32(len(obj.symbols))
+    w_u32(&w, 2) // LC_SYMTAB
+    w_u32(&w, 24)
+    w_u32(&w, u32(sym_off))
+    w_u32(&w, nsyms)
+    w_u32(&w, u32(str_off))
+    w_u32(&w, u32(len(strtab)))
+
+    w_u32(&w, 0x0b) // LC_DYSYMTAB
+    w_u32(&w, 80)
+    w_u32(&w, 0)
+    w_u32(&w, nsyms)
+    w_u32(&w, nsyms)
+    w_u32(&w, 0)
+    w_u32(&w, nsyms)
+    w_u32(&w, 0)
+    for _ in 0..12 {
+        w_u32(&w, 0)
+    }
+
+    no_extra []u32 = []
+    path_cmd(&w, 0x0e, "/usr/lib/dyld", no_extra)
+
+    // Deterministic UUID derived from the program itself.
+    mut body []u8 = []
+    reserve(&body, len(code) * 4 + len(obj.rodata))
+    for c in code {
+        w_u32(&body, c)
+    }
+    for x in obj.rodata {
+        push(&body, x)
+    }
+    digest := sha256.sum(body)
+    w_u32(&w, 0x1b)
+    w_u32(&w, 24)
+    for x, i in digest {
+        if i >= 16 { break }
+        mut v := x
+        if i == 6 { v = (x & 0x0F) | 0x40 }
+        if i == 8 { v = (x & 0x3F) | 0x80 }
+        push(&w, v)
+    }
+
+    w_u32(&w, 0x32) // LC_BUILD_VERSION
+    w_u32(&w, 24)
+    w_u32(&w, 1) // macOS
+    w_u32(&w, 0x000b_0000) // minos 11.0
+    w_u32(&w, 0x000f_0000) // sdk 15.0
+    w_u32(&w, 0)
+
+    w_u32(&w, 0x8000_0028) // LC_MAIN
+    w_u32(&w, 24)
+    w_u64(&w, text_off + u64(obj.entry) * 4)
+    w_u64(&w, 0)
+
+    dylib_extra []u32 = [2, 0x0001_0000, 0x0001_0000]
+    path_cmd(&w, 0x0c, "/usr/lib/libSystem.B.dylib", dylib_extra)
+
+    linkedit_cmd(&w, 0x1d, sig_off, sig_size)
+
+    sure u64(len(w)) == 32 + sizeofcmds
+
+    pad_to(&w, int(text_off))
+    for c in code {
+        w_u32(&w, c)
+    }
+    pad_to(&w, int(rodata_off))
+    for x in obj.rodata {
+        push(&w, x)
+    }
+    pad_to(&w, int(got_off))
+
+    // GOT: a chain of binds, each pointing 8 bytes ahead to the next.
+    n := len(obj.imports)
+    for i in 0..n {
+        mut next u64 = 0
+        if i + 1 < n { next = 2 }
+        w_u64(&w, u64(i) | (next << 51) | (u64(1) << 63))
+    }
+    pad_to(&w, int(linkedit_off))
+
+    for x in fixups {
+        push(&w, x)
+    }
+    for x in trie {
+        push(&w, x)
+    }
+    for x in nlist {
+        push(&w, x)
+    }
+    for x in strtab {
+        push(&w, x)
+    }
+    pad_to(&w, int(sig_off))
+
+    sig := sign(w, ident, text_filesize)
+    sure u64(len(sig)) == sig_size
+    for x in sig {
+        push(&w, x)
+    }
+    ret w
+}

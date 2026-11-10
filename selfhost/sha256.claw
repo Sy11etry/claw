@@ -1,0 +1,132 @@
+// SHA-256 (FIPS 180-4), for the code signature.
+
+fn table() [64]u32 {
+    ret [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+}
+
+fn rotr(x u32, n u32) u32 {
+    ret (x >> n) | (x << (32 - n))
+}
+
+fn compress(h &[8]u32, block []u8, at int, k [64]u32) {
+    mut w [64]u32 = [0...]
+    for i in 0..16 {
+        p := at + i * 4
+        w[i] = u32(block[p]) << 24 | u32(block[p + 1]) << 16 | u32(block[p + 2]) << 8 | u32(block[p + 3])
+    }
+    for i in 16..64 {
+        s0 := rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
+        s1 := rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1
+    }
+    mut a := h[0]
+    mut b := h[1]
+    mut c := h[2]
+    mut d := h[3]
+    mut e := h[4]
+    mut f := h[5]
+    mut g := h[6]
+    mut hh := h[7]
+    for i in 0..64 {
+        s1 := rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+        ch := (e & f) ^ (~e & g)
+        t1 := hh + s1 + ch + k[i] + w[i]
+        s0 := rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+        maj := (a & b) ^ (a & c) ^ (b & c)
+        t2 := s0 + maj
+        hh = g
+        g = f
+        f = e
+        e = d + t1
+        d = c
+        c = b
+        b = a
+        a = t1 + t2
+    }
+    h[0] += a
+    h[1] += b
+    h[2] += c
+    h[3] += d
+    h[4] += e
+    h[5] += f
+    h[6] += g
+    h[7] += hh
+}
+
+pub fn sum(data []u8) [32]u8 +mem {
+    k := table()
+    mut h [8]u32 = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+    blocks := len(data) / 64
+    for b in 0..blocks {
+        compress(&h, data, b * 64, k)
+    }
+    rest := len(data) - blocks * 64
+    mut tail []u8 = []
+    for i in 0..rest {
+        push(&tail, data[blocks * 64 + i])
+    }
+    push(&tail, 0x80)
+    total := if_small(rest)
+    for len(tail) < total - 8 {
+        push(&tail, 0)
+    }
+    bits := u64(len(data)) * 8
+    for i in 0..8 {
+        push(&tail, u8((bits >> u64(56 - i * 8)) & 255))
+    }
+    for b in 0..total / 64 {
+        compress(&h, tail, b * 64, k)
+    }
+    mut out [32]u8 = [0...]
+    for w, i in h {
+        out[i * 4] = u8(w >> 24)
+        out[i * 4 + 1] = u8((w >> 16) & 255)
+        out[i * 4 + 2] = u8((w >> 8) & 255)
+        out[i * 4 + 3] = u8(w & 255)
+    }
+    ret out
+}
+
+fn if_small(rest int) int {
+    if rest < 56 { ret 64 }
+    ret 128
+}
+
+fn hex(b [32]u8) str {
+    digits := "0123456789abcdef"
+    mut out := ""
+    for x in b {
+        hi := int(x >> 4)
+        lo := int(x & 15)
+        out = "{out}{digits[hi..hi + 1]}{digits[lo..lo + 1]}"
+    }
+    ret out
+}
+
+fn repeat_a(n int) []u8 {
+    mut a []u8 = []
+    for _ in 0..n {
+        push(&a, 'a')
+    }
+    ret a
+}
+
+test "known vectors" {
+    e []u8 = []
+    sure hex(sum(e)) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    abc []u8 = ['a', 'b', 'c']
+    sure hex(sum(abc)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    sure hex(sum(repeat_a(1000000))) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+    sure hex(sum(repeat_a(55))) == "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"
+    sure hex(sum(repeat_a(56))) == "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"
+    sure hex(sum(repeat_a(64))) == "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
+}

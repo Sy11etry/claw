@@ -1,0 +1,551 @@
+// CIR, the Claw intermediate representation: typed instructions over virtual registers,
+// grouped into basic blocks. A register holds a scalar (integers kept sign- or zero-extended
+// to 64 bits, floats as raw bits) or the address of an aggregate.
+//
+// A register, block, function and object is an `int`. "No register" (`Option<VReg>` in Rust)
+// is -1, and so is "no bits" in `CArg.float` and "not variadic" in `CallC.variadic`.
+
+pub type Loc { line int, col int, file int }
+
+// `checked`: false once the optimizer has proved the operation cannot trap.
+pub type Num { bits int, signed bool, checked bool }
+
+pub type Mem = I8 | I16 | I32 | U8 | U16 | U32 | X64
+
+pub type Arith = Add | Sub | Mul | Div | Rem | And | Or | Xor | Shl | Shr
+
+// Exact arithmetic inside contracts, on 128-bit (lo, hi) pairs.
+pub type WideOp = WideAdd | WideSub | WideMul
+
+pub type FArith = FAdd | FSub | FMul | FDiv
+
+pub type Cc = Eq | Ne | Lt | Le | Gt | Ge
+
+// `float`: the bits of a float, which travels in a d-register, otherwise -1.
+pub type CArg { v int, float int, size int }
+
+pub type CRet = CRetNone | CRetInt{m Mem} | CRetFloat{bits int}
+
+// `Phi` and `Pi` live only inside the optimizer; `DataAddr`, `ConstRef`, `Line` and `Note` only
+// in computed `const`s and in code for the interpreter. This compiler has none of those.
+pub type Inst = Const{d int, v int} |
+    Mov{d int, s int} |
+    Bin{op Arith, d int, a int, b int, num Num, loc Loc} |
+    Neg{d int, s int, num Num, loc Loc} |
+    BitNot{d int, s int, num Num} |
+    BoolNot{d int, s int} |
+    Cmp{cc Cc, d int, a int, b int, unsigned bool} |
+    FBin{op FArith, d int, a int, b int, bits int} |
+    FNeg{d int, s int, bits int} |
+    FCmp{cc Cc, d int, a int, b int, bits int} |
+    IntCast{d int, s int, from Num, to Num, loc Loc} |
+    IntToFloat{d int, s int, signed bool, bits int} |
+    FloatToInt{d int, s int, bits int, to Num, loc Loc} |
+    FloatCast{d int, s int, to_bits int} |
+    Call{d int, f int, args []int} |
+    // A call through a function value.
+    CallInd{d int, callee int, args []int} |
+    // A function as a value.
+    FuncAddr{d int, f int} |
+    ObjAddr{d int, obj int} |
+    AddImm{d int, s int, imm u64} |
+    Load{d int, p int, off u64, mem Mem} |
+    Store{p int, off u64, s int, mem Mem} |
+    MemCopy{dst int, src int, size u64} |
+    MemCopyDyn{dst int, src int, n int} |
+    IndexAddr{d int, base int, idx int, size u64} |
+    Bounds{idx int, len u64, loc Loc} |
+    BoundsDyn{idx int, len int, loc Loc} |
+    // `malloc` of `n` items, trapping on a bad size or on failure.
+    Alloc{d int, n int, elem u64, loc Loc} |
+    Free{p int} |
+    // The address of NUL-terminated bytes, for handing to C.
+    StrAddr{d int, text str} |
+    CallC{d int, sym str, args []CArg, variadic int, ret_kind CRet} |
+    BufStr{text str} |
+    BufInt{s int, signed bool} |
+    BufPtr{p int, n int} |
+    // From here on the output buffer collects a string instead of printing.
+    CaptureStart |
+    CaptureTake{ptr int, len int} |
+    BufBool{s int} |
+    BufFloat{s int, bits int} |
+    Flush{fd int} |
+    Exit{code int} |
+    WideBin{op WideOp, dlo int, dhi int, alo int, ahi int, blo int, bhi int, loc Loc} |
+    WideCmp{cc Cc, d int, alo int, ahi int, blo int, bhi int} |
+    // The address of the runtime's words: 0 is the contract guard, 1 the current site.
+    RtState{d int} |
+    // Remembers where the next allocation or release comes from.
+    SetSite{text str}
+
+pub type Term = Jmp{b int} |
+    Br{c int, t int, f int} |
+    Ret{v int} |
+    // Control cannot get here; sema guarantees it.
+    Unreachable
+
+// `Func` and `Block` of Rust: same-named types in two modules break generics (see PORTING.md).
+pub type CirBlock { insts []Inst, term Term }
+
+// A stack object.
+pub type Obj { size u64, align u64 }
+
+// `params`: the registers holding the parameters, in order.
+// `is_claw`: written as `claw fn`: raw pointers may alias anything.
+// `optimized`: registers were allocated rather than every value living on the stack.
+// `dead`: nothing can reach it, so no code is generated.
+pub type CirFunc {
+    name str,
+    nparams int,
+    params []int,
+    is_claw bool,
+    optimized bool,
+    dead bool,
+    nvregs int,
+    objects []Obj,
+    blocks []CirBlock,
+}
+
+// The memory checker's entry points.
+pub type CheckRt { alloc int, free int, finish int }
+
+// (name, function) of a `test` block.
+pub type TestFn { name str, f int }
+
+// `check`: present in check mode. `tests`: in `claw test`.
+// `const_funcs`: the function computing each `const` that needs a call, in id order.
+pub type Module {
+    funcs []CirFunc,
+    main int,
+    check ?CheckRt,
+    tests []TestFn,
+    const_funcs []int,
+}
+
+// One register an instruction touches, and whether it writes it.
+pub type RegUse { v int, def bool }
+
+fn reg(out &[]RegUse, v int, def bool) {
+    push(&out, RegUse{v, def})
+}
+
+fn opt_def(out &[]RegUse, d int) {
+    if d != -1 { reg(&out, d, true) }
+}
+
+fn all_read(out &[]RegUse, args []int) {
+    for a in args {
+        reg(&out, a, false)
+    }
+}
+
+// Every register, in the order Rust's `Inst::each` visits them.
+pub fn each(i Inst) []RegUse +mem {
+    mut out []RegUse = []
+    match i {
+        Const{d, _}: reg(&out, d, true)
+        ObjAddr{d, _}: reg(&out, d, true)
+        StrAddr{d, _}: reg(&out, d, true)
+        RtState{d}: reg(&out, d, true)
+        FuncAddr{d, _}: reg(&out, d, true)
+        Mov{d, s}: use_def(&out, s, d)
+        BitNot{d, s, _}: use_def(&out, s, d)
+        BoolNot{d, s}: use_def(&out, s, d)
+        Neg{d, s, _, _}: use_def(&out, s, d)
+        FNeg{d, s, _}: use_def(&out, s, d)
+        IntCast{d, s, _, _, _}: use_def(&out, s, d)
+        IntToFloat{d, s, _, _}: use_def(&out, s, d)
+        FloatToInt{d, s, _, _, _}: use_def(&out, s, d)
+        FloatCast{d, s, _}: use_def(&out, s, d)
+        AddImm{d, s, _}: use_def(&out, s, d)
+        Bin{_, d, a, b, _, _}: two_def(&out, a, b, d)
+        Cmp{_, d, a, b, _}: two_def(&out, a, b, d)
+        FBin{_, d, a, b, _}: two_def(&out, a, b, d)
+        FCmp{_, d, a, b, _}: two_def(&out, a, b, d)
+        Call{d, _, args}: {
+            all_read(&out, args)
+            opt_def(&out, d)
+        }
+        CallInd{d, callee, args}: {
+            reg(&out, callee, false)
+            all_read(&out, args)
+            opt_def(&out, d)
+        }
+        CallC{d, _, args, _, _}: {
+            for a in args {
+                reg(&out, a.v, false)
+            }
+            opt_def(&out, d)
+        }
+        Load{d, p, _, _}: use_def(&out, p, d)
+        Store{p, _, s, _}: {
+            reg(&out, p, false)
+            reg(&out, s, false)
+        }
+        MemCopy{dst, src, _}: {
+            reg(&out, dst, false)
+            reg(&out, src, false)
+        }
+        MemCopyDyn{dst, src, n}: {
+            reg(&out, dst, false)
+            reg(&out, src, false)
+            reg(&out, n, false)
+        }
+        IndexAddr{d, base, idx, _}: two_def(&out, base, idx, d)
+        Bounds{idx, _, _}: reg(&out, idx, false)
+        BoundsDyn{idx, n, _}: {
+            reg(&out, idx, false)
+            reg(&out, n, false)
+        }
+        Alloc{d, n, _, _}: use_def(&out, n, d)
+        Free{p}: reg(&out, p, false)
+        BufInt{s, _}: reg(&out, s, false)
+        BufBool{s}: reg(&out, s, false)
+        BufFloat{s, _}: reg(&out, s, false)
+        BufPtr{p, n}: {
+            reg(&out, p, false)
+            reg(&out, n, false)
+        }
+        CaptureTake{ptr, n}: {
+            reg(&out, ptr, true)
+            reg(&out, n, true)
+        }
+        WideBin{_, dlo, dhi, alo, ahi, blo, bhi, _}: {
+            reg(&out, alo, false)
+            reg(&out, ahi, false)
+            reg(&out, blo, false)
+            reg(&out, bhi, false)
+            reg(&out, dlo, true)
+            reg(&out, dhi, true)
+        }
+        WideCmp{_, d, alo, ahi, blo, bhi}: {
+            reg(&out, alo, false)
+            reg(&out, ahi, false)
+            reg(&out, blo, false)
+            reg(&out, bhi, false)
+            reg(&out, d, true)
+        }
+        _: {}
+    }
+    ret out
+}
+
+fn use_def(out &[]RegUse, s int, d int) {
+    reg(&out, s, false)
+    reg(&out, d, true)
+}
+
+fn two_def(out &[]RegUse, a int, b int, d int) {
+    reg(&out, a, false)
+    reg(&out, b, false)
+    reg(&out, d, true)
+}
+
+// The one register this writes, for instructions that write exactly one; -1 otherwise.
+pub fn def_of(i Inst) int +mem {
+    mut out := -1
+    mut n := 0
+    for u in each(i) {
+        if u.def {
+            out = u.v
+            n += 1
+        }
+    }
+    if n == 1 { ret out }
+    ret -1
+}
+
+// Can a call's register rules touch this? Then x0-x7 are not safe across or into it.
+pub fn is_call(i Inst) bool {
+    match i {
+        Call{_, _, _}: ret true
+        CallInd{_, _, _}: ret true
+        CallC{_, _, _, _, _}: ret true
+        MemCopyDyn{_, _, _}: ret true
+        Alloc{_, _, _, _}: ret true
+        Free{_}: ret true
+        BufStr{_}: ret true
+        BufInt{_, _}: ret true
+        BufPtr{_, _}: ret true
+        CaptureTake{_, _}: ret true
+        BufBool{_}: ret true
+        BufFloat{_, _}: ret true
+        Flush{_}: ret true
+        Exit{_}: ret true
+        MemCopy{_, _, size}: ret size > 64
+        _: ret false
+    }
+}
+
+fn add(o &[]u8, s str) {
+    for c in s {
+        push(&o, c)
+    }
+}
+
+fn add_hex(o &[]u8, v int) {
+    digits := "0123456789abcdef"
+    mut shift := 60
+    mut started := false
+    for shift >= 0 {
+        n := (v >> shift) & 15
+        if n != 0 or started or shift == 0 {
+            push(&o, digits[n])
+            started = true
+        }
+        shift -= 4
+    }
+}
+
+// Rust's `{:?}` of a string. Non-ASCII text is written as it is, except the C1 controls; Rust
+// also escapes the rest of what its tables call unprintable, and combining marks.
+fn add_debug(o &[]u8, s str) {
+    push(&o, '"')
+    mut i := 0
+    for i < len(s) {
+        c := s[i]
+        i += 1
+        if c == '"' {
+            add(&o, "\\\"")
+        } else if c == '\\' {
+            add(&o, "\\\\")
+        } else if c == '\n' {
+            add(&o, "\\n")
+        } else if c == '\t' {
+            add(&o, "\\t")
+        } else if c == '\r' {
+            add(&o, "\\r")
+        } else if c == 0 {
+            add(&o, "\\0")
+        } else if c < 32 or c == 127 {
+            add(&o, "\\u{{")
+            add_hex(&o, int(c))
+            push(&o, '}')
+        } else if c == 0xC2 and i < len(s) and s[i] >= 0x80 and s[i] <= 0x9F {
+            add(&o, "\\u{{")
+            add_hex(&o, int(s[i]))
+            push(&o, '}')
+            i += 1
+        } else {
+            push(&o, c)
+        }
+    }
+    push(&o, '"')
+}
+
+fn mem_text(m Mem) str {
+    match m {
+        I8: ret "I8"
+        I16: ret "I16"
+        I32: ret "I32"
+        U8: ret "U8"
+        U16: ret "U16"
+        U32: ret "U32"
+        X64: ret "X64"
+    }
+}
+
+fn arith_text(op Arith) str {
+    match op {
+        Add: ret "Add"
+        Sub: ret "Sub"
+        Mul: ret "Mul"
+        Div: ret "Div"
+        Rem: ret "Rem"
+        And: ret "And"
+        Or: ret "Or"
+        Xor: ret "Xor"
+        Shl: ret "Shl"
+        Shr: ret "Shr"
+    }
+}
+
+fn wide_text(op WideOp) str {
+    match op {
+        WideAdd: ret "Add"
+        WideSub: ret "Sub"
+        WideMul: ret "Mul"
+    }
+}
+
+fn farith_text(op FArith) str {
+    match op {
+        FAdd: ret "Add"
+        FSub: ret "Sub"
+        FMul: ret "Mul"
+        FDiv: ret "Div"
+    }
+}
+
+fn cc_text(cc Cc) str {
+    match cc {
+        Eq: ret "Eq"
+        Ne: ret "Ne"
+        Lt: ret "Lt"
+        Le: ret "Le"
+        Gt: ret "Gt"
+        Ge: ret "Ge"
+    }
+}
+
+fn num_text(n Num) str {
+    ret "Num {{ bits: {n.bits}, signed: {n.signed}, checked: {n.checked} }}"
+}
+
+fn loc_text(x Loc) str {
+    ret "Loc {{ line: {x.line}, col: {x.col}, file: {x.file} }}"
+}
+
+fn opt_text(v int) str {
+    if v == -1 { ret "None" }
+    ret "Some({v})"
+}
+
+fn add_ints(o &[]u8, a []int) {
+    push(&o, '[')
+    for v, i in a {
+        if i > 0 { add(&o, ", ") }
+        add(&o, "{v}")
+    }
+    push(&o, ']')
+}
+
+fn add_carg(o &[]u8, a CArg) {
+    add(&o, "CArg {{ v: {a.v}, float: {opt_text(a.float)}, size: {a.size} }}")
+}
+
+fn cret_text(r CRet) str {
+    match r {
+        CRetNone: ret "None"
+        CRetInt{m}: ret "Int({mem_text(m)})"
+        CRetFloat{bits}: ret "Float({bits})"
+    }
+}
+
+fn add_inst(o &[]u8, i Inst) {
+    match i {
+        Const{d, v}: add(&o, "Const {{ d: {d}, v: {v} }}")
+        Mov{d, s}: add(&o, "Mov {{ d: {d}, s: {s} }}")
+        Bin{op, d, a, b, num, loc}: add(&o, "Bin {{ op: {arith_text(op)}, d: {d}, a: {a}, b: {b}, num: {num_text(num)}, loc: {loc_text(loc)} }}")
+        Neg{d, s, num, loc}: add(&o, "Neg {{ d: {d}, s: {s}, num: {num_text(num)}, loc: {loc_text(loc)} }}")
+        BitNot{d, s, num}: add(&o, "BitNot {{ d: {d}, s: {s}, num: {num_text(num)} }}")
+        BoolNot{d, s}: add(&o, "BoolNot {{ d: {d}, s: {s} }}")
+        Cmp{cc, d, a, b, unsigned}: add(&o, "Cmp {{ cc: {cc_text(cc)}, d: {d}, a: {a}, b: {b}, unsigned: {unsigned} }}")
+        FBin{op, d, a, b, bits}: add(&o, "FBin {{ op: {farith_text(op)}, d: {d}, a: {a}, b: {b}, bits: {bits} }}")
+        FNeg{d, s, bits}: add(&o, "FNeg {{ d: {d}, s: {s}, bits: {bits} }}")
+        FCmp{cc, d, a, b, bits}: add(&o, "FCmp {{ cc: {cc_text(cc)}, d: {d}, a: {a}, b: {b}, bits: {bits} }}")
+        IntCast{d, s, from, to, loc}: add(&o, "IntCast {{ d: {d}, s: {s}, from: {num_text(from)}, to: {num_text(to)}, loc: {loc_text(loc)} }}")
+        IntToFloat{d, s, signed, bits}: add(&o, "IntToFloat {{ d: {d}, s: {s}, signed: {signed}, bits: {bits} }}")
+        FloatToInt{d, s, bits, to, loc}: add(&o, "FloatToInt {{ d: {d}, s: {s}, bits: {bits}, to: {num_text(to)}, loc: {loc_text(loc)} }}")
+        FloatCast{d, s, to_bits}: add(&o, "FloatCast {{ d: {d}, s: {s}, to_bits: {to_bits} }}")
+        Call{d, f, args}: {
+            add(&o, "Call {{ d: {opt_text(d)}, f: {f}, args: ")
+            add_ints(&o, args)
+            add(&o, " }}")
+        }
+        CallInd{d, callee, args}: {
+            add(&o, "CallInd {{ d: {opt_text(d)}, callee: {callee}, args: ")
+            add_ints(&o, args)
+            add(&o, " }}")
+        }
+        FuncAddr{d, f}: add(&o, "FuncAddr {{ d: {d}, f: {f} }}")
+        ObjAddr{d, obj}: add(&o, "ObjAddr {{ d: {d}, obj: {obj} }}")
+        AddImm{d, s, imm}: add(&o, "AddImm {{ d: {d}, s: {s}, imm: {imm} }}")
+        Load{d, p, off, mem}: add(&o, "Load {{ d: {d}, p: {p}, off: {off}, mem: {mem_text(mem)} }}")
+        Store{p, off, s, mem}: add(&o, "Store {{ p: {p}, off: {off}, s: {s}, mem: {mem_text(mem)} }}")
+        MemCopy{dst, src, size}: add(&o, "MemCopy {{ dst: {dst}, src: {src}, size: {size} }}")
+        MemCopyDyn{dst, src, n}: add(&o, "MemCopyDyn {{ dst: {dst}, src: {src}, n: {n} }}")
+        IndexAddr{d, base, idx, size}: add(&o, "IndexAddr {{ d: {d}, base: {base}, idx: {idx}, size: {size} }}")
+        Bounds{idx, n, loc}: add(&o, "Bounds {{ idx: {idx}, len: {n}, loc: {loc_text(loc)} }}")
+        BoundsDyn{idx, n, loc}: add(&o, "BoundsDyn {{ idx: {idx}, len: {n}, loc: {loc_text(loc)} }}")
+        Alloc{d, n, elem, loc}: add(&o, "Alloc {{ d: {d}, n: {n}, elem: {elem}, loc: {loc_text(loc)} }}")
+        Free{p}: add(&o, "Free {{ p: {p} }}")
+        StrAddr{d, text}: {
+            add(&o, "StrAddr {{ d: {d}, text: ")
+            add_debug(&o, text)
+            add(&o, " }}")
+        }
+        CallC{d, sym, args, variadic, ret_kind}: {
+            add(&o, "CallC {{ d: {opt_text(d)}, sym: ")
+            add_debug(&o, sym)
+            add(&o, ", args: [")
+            for a, n in args {
+                if n > 0 { add(&o, ", ") }
+                add_carg(&o, a)
+            }
+            add(&o, "], variadic: {opt_text(variadic)}, ret: {cret_text(ret_kind)} }}")
+        }
+        BufStr{text}: {
+            add(&o, "BufStr {{ text: ")
+            add_debug(&o, text)
+            add(&o, " }}")
+        }
+        BufInt{s, signed}: add(&o, "BufInt {{ s: {s}, signed: {signed} }}")
+        BufPtr{p, n}: add(&o, "BufPtr {{ p: {p}, n: {n} }}")
+        CaptureStart: add(&o, "CaptureStart")
+        CaptureTake{ptr, n}: add(&o, "CaptureTake {{ ptr: {ptr}, len: {n} }}")
+        BufBool{s}: add(&o, "BufBool {{ s: {s} }}")
+        BufFloat{s, bits}: add(&o, "BufFloat {{ s: {s}, bits: {bits} }}")
+        Flush{fd}: add(&o, "Flush {{ fd: {fd} }}")
+        Exit{code}: add(&o, "Exit {{ code: {code} }}")
+        WideBin{op, dlo, dhi, alo, ahi, blo, bhi, loc}: add(&o, "WideBin {{ op: {wide_text(op)}, dlo: {dlo}, dhi: {dhi}, alo: {alo}, ahi: {ahi}, blo: {blo}, bhi: {bhi}, loc: {loc_text(loc)} }}")
+        WideCmp{cc, d, alo, ahi, blo, bhi}: add(&o, "WideCmp {{ cc: {cc_text(cc)}, d: {d}, alo: {alo}, ahi: {ahi}, blo: {blo}, bhi: {bhi} }}")
+        RtState{d}: add(&o, "RtState {{ d: {d} }}")
+        SetSite{text}: {
+            add(&o, "SetSite {{ text: ")
+            add_debug(&o, text)
+            add(&o, " }}")
+        }
+    }
+}
+
+fn add_term(o &[]u8, t Term) {
+    match t {
+        Jmp{b}: add(&o, "Jmp({b})")
+        Br{c, x, y}: add(&o, "Br {{ c: {c}, t: {x}, f: {y} }}")
+        Ret{v}: add(&o, "Ret({opt_text(v)})")
+        Unreachable: add(&o, "Unreachable")
+    }
+}
+
+// The whole module as Rust's `cir::dump` prints it.
+pub fn dump(m Module, o &[]u8) +mem {
+    for f in m.funcs {
+        if f.dead { continue }
+        add(&o, "fn {f.name} params={f.nparams} vregs={f.nvregs} objects=[")
+        for x, n in f.objects {
+            if n > 0 { add(&o, ", ") }
+            add(&o, "({x.size}, {x.align})")
+        }
+        add(&o, "]\n")
+        for b, i in f.blocks {
+            add(&o, "  b{i}:\n")
+            for x in b.insts {
+                add(&o, "    ")
+                add_inst(&o, x)
+                push(&o, '\n')
+            }
+            add(&o, "    ")
+            add_term(&o, b.term)
+            push(&o, '\n')
+        }
+    }
+}
+
+// What `each`, `def_of` and `is_call` say about each instruction, as `claw __cir --regs` prints it.
+pub fn reg_dump(m Module, o &[]u8) +mem {
+    for f in m.funcs {
+        add(&o, "fn {f.name}\n")
+        for b in f.blocks {
+            for x in b.insts {
+                push(&o, '[')
+                for u, n in each(x) {
+                    if n > 0 { add(&o, ", ") }
+                    add(&o, "({u.v}, {u.def})")
+                }
+                add(&o, "] {opt_text(def_of(x))} {is_call(x)}\n")
+            }
+        }
+    }
+}

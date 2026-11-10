@@ -1,0 +1,529 @@
+// The type table: every type is interned, so equal types have equal ids. A type is an index.
+
+use rt
+
+pub type Kind = Int{bits int, signed bool} |
+    Float{bits int} |
+    Bool |
+    Void |
+    StrLit |
+    Err |
+    Struct{id int} |
+    Enum{id int} |
+    Array{elem int, n int} |
+    Pointer{inner int} |
+    // A growable array, or a read-only view of part of one.
+    Slice{elem int} |
+    Str |
+    // A `&T` parameter.
+    Ref{inner int} |
+    Option{inner int} |
+    Result{ok int, err int} |
+    // A function as a value: an index into `Types.fns`.
+    Fn{id int}
+
+pub const mem_effect = 1
+pub const io_effect = 2
+
+// The two effects as written in a signature.
+pub fn spell_effects(mask int) str +mem {
+    mut parts []str = []
+    if mask & mem_effect != 0 { push(&parts, "+mem") }
+    if mask & io_effect != 0 { push(&parts, "+io") }
+    ret join(parts, " ")
+}
+
+pub type FnType { params []int, owned []bool, ret_ty int, effects int }
+
+pub const t_i8 = 0
+pub const t_i16 = 1
+pub const t_i32 = 2
+pub const t_int = 3
+pub const t_u8 = 4
+pub const t_u16 = 5
+pub const t_u32 = 6
+pub const t_u64 = 7
+pub const t_f32 = 8
+pub const t_f64 = 9
+pub const t_bool = 10
+pub const t_void = 11
+pub const t_strlit = 12
+pub const t_err = 13
+pub const t_str = 14
+
+pub type Field { name str, ty int, offset u64 }
+
+// `module`: the one that declared it, for finding its functions.
+// `state`: layout progress: 0 not started, 1 in progress, 2 done.
+pub type StructDef { name str, fields []Field, size u64, align u64, module int, state int }
+
+// Offsets are from the start of the value, after the 8-byte tag.
+pub type Variant { name str, fields []Field }
+
+pub type EnumDef { name str, variants []Variant, size u64, module int, state int }
+
+pub const tag_size u64 = 8
+
+// `table`: where each kind sits in `kinds`, plus one; 0 is empty.
+// `user_drop`: types with a user-written `drop`, and the function that does it.
+pub type Types {
+    kinds []Kind,
+    table []int,
+    structs []StructDef,
+    enums []EnumDef,
+    user_drop Map[int, str],
+    fns []FnType,
+}
+
+// `[]T` and `str` in memory: pointer, length, capacity.
+pub const seq_size u64 = 24
+pub const seq_ptr u64 = 0
+pub const seq_len u64 = 8
+pub const seq_cap u64 = 16
+
+pub fn align_up(v u64, a u64) u64 {
+    ret (v + a - 1) & ~(a - 1)
+}
+
+pub fn new_types() Types +mem {
+    mut t := Types{[], [], [], [], new_map[int, str](hash_int), []}
+    _ = intern(&t, Int{8, true})
+    _ = intern(&t, Int{16, true})
+    _ = intern(&t, Int{32, true})
+    _ = intern(&t, Int{64, true})
+    _ = intern(&t, Int{8, false})
+    _ = intern(&t, Int{16, false})
+    _ = intern(&t, Int{32, false})
+    _ = intern(&t, Int{64, false})
+    _ = intern(&t, Float{32})
+    _ = intern(&t, Float{64})
+    _ = intern(&t, Bool)
+    _ = intern(&t, Void)
+    _ = intern(&t, StrLit)
+    _ = intern(&t, Err)
+    _ = intern(&t, Str)
+    ret t
+}
+
+fn kind_tag(k Kind) int {
+    match k {
+        Int{_, _}: ret 0
+        Float{_}: ret 1
+        Bool: ret 2
+        Void: ret 3
+        StrLit: ret 4
+        Err: ret 5
+        Struct{_}: ret 6
+        Enum{_}: ret 7
+        Array{_, _}: ret 8
+        Pointer{_}: ret 9
+        Slice{_}: ret 10
+        Str: ret 11
+        Ref{_}: ret 12
+        Option{_}: ret 13
+        Result{_, _}: ret 14
+        Fn{_}: ret 15
+    }
+}
+
+// The two numbers a kind carries.
+fn kind_a(k Kind) int {
+    match k {
+        Int{bits, _}: ret bits
+        Float{bits}: ret bits
+        Struct{id}: ret id
+        Enum{id}: ret id
+        Array{elem, _}: ret elem
+        Pointer{inner}: ret inner
+        Slice{elem}: ret elem
+        Ref{inner}: ret inner
+        Option{inner}: ret inner
+        Result{ok, _}: ret ok
+        Fn{id}: ret id
+        _: ret 0
+    }
+}
+
+fn kind_b(k Kind) int {
+    match k {
+        Int{_, signed}: {
+            if signed { ret 1 }
+            ret 0
+        }
+        Array{_, n}: ret n
+        Result{_, err}: ret err
+        _: ret 0
+    }
+}
+
+fn kind_eq(a Kind, b Kind) bool {
+    ret kind_tag(a) == kind_tag(b) and kind_a(a) == kind_a(b) and kind_b(a) == kind_b(b)
+}
+
+fn kind_hash(k Kind) u64 {
+    h := (u64(kind_tag(k)) + 1) * 11400714819323198485
+    h2 := (h ^ u64(kind_a(k))) * 11400714819323198485
+    h3 := (h2 ^ u64(kind_b(k))) * 11400714819323198485
+    ret h3 ^ (h3 >> 29)
+}
+
+fn rehash(t &Types, want int) {
+    mut fresh []int = []
+    reserve(&fresh, want)
+    for _ in 0..want {
+        push(&fresh, 0)
+    }
+    mask := want - 1
+    for k, n in t.kinds {
+        mut i := int(kind_hash(k) & u64(mask))
+        for fresh[i] != 0 {
+            i = (i + 1) & mask
+        }
+        fresh[i] = n + 1
+    }
+    t.table = fresh
+}
+
+pub fn intern(t &Types, k Kind) int +mem {
+    if (len(t.kinds) + 1) * 4 > len(t.table) * 3 {
+        mut grown := len(t.table) * 2
+        if grown < 64 { grown = 64 }
+        rehash(&t, grown)
+    }
+    mask := len(t.table) - 1
+    mut i := int(kind_hash(k) & u64(mask))
+    for t.table[i] != 0 {
+        if kind_eq(t.kinds[t.table[i] - 1], k) { ret t.table[i] - 1 }
+        i = (i + 1) & mask
+    }
+    push(&t.kinds, k)
+    t.table[i] = len(t.kinds)
+    ret len(t.kinds) - 1
+}
+
+fn same_fn(a FnType, b FnType) bool {
+    if a.ret_ty != b.ret_ty or a.effects != b.effects or len(a.params) != len(b.params) or len(a.owned) != len(b.owned) { ret false }
+    for p, i in a.params {
+        if p != b.params[i] { ret false }
+    }
+    for o, i in a.owned {
+        if o != b.owned[i] { ret false }
+    }
+    ret true
+}
+
+pub fn fn_type(t &Types, own f FnType) int +mem {
+    mut id := -1
+    for x, i in t.fns {
+        if same_fn(x, f) {
+            id = i
+            break
+        }
+    }
+    if id == -1 {
+        push(&t.fns, f)
+        id = len(t.fns) - 1
+    }
+    ret intern(&t, Fn{id})
+}
+
+pub fn kind(t Types, ty int) Kind {
+    ret t.kinds[ty]
+}
+
+pub fn count(t Types) int {
+    ret len(t.kinds)
+}
+
+pub fn is_int(t Types, ty int) bool {
+    match kind(t, ty) {
+        Int{_, _}: ret true
+        _: ret false
+    }
+}
+
+pub fn is_float(t Types, ty int) bool {
+    match kind(t, ty) {
+        Float{_}: ret true
+        _: ret false
+    }
+}
+
+pub fn is_ref(t Types, ty int) bool {
+    match kind(t, ty) {
+        Ref{_}: ret true
+        _: ret false
+    }
+}
+
+pub fn is_ptr(t Types, ty int) bool {
+    match kind(t, ty) {
+        Pointer{_}: ret true
+        _: ret false
+    }
+}
+
+pub fn is_num(t Types, ty int) bool {
+    ret is_int(t, ty) or is_float(t, ty)
+}
+
+// Lives in memory and is handled by address.
+pub fn is_aggregate(t Types, ty int) bool {
+    match kind(t, ty) {
+        Struct{_}: ret true
+        Enum{_}: ret true
+        Array{_, _}: ret true
+        Slice{_}: ret true
+        Str: ret true
+        Option{_}: ret true
+        Result{_, _}: ret true
+        _: ret false
+    }
+}
+
+// Owns something that must be released when it goes away.
+pub fn needs_drop(t Types, ty int) bool {
+    match kind(t, ty) {
+        Slice{_}: ret true
+        Str: ret true
+        Struct{id}: {
+            if has_key(t.user_drop, ty) { ret true }
+            for f in t.structs[id].fields {
+                if needs_drop(t, f.ty) { ret true }
+            }
+            ret false
+        }
+        Enum{id}: {
+            for v in t.enums[id].variants {
+                for f in v.fields {
+                    if needs_drop(t, f.ty) { ret true }
+                }
+            }
+            ret false
+        }
+        Array{elem, _}: ret needs_drop(t, elem)
+        Option{inner}: ret needs_drop(t, inner)
+        Result{ok, err}: ret needs_drop(t, ok) or needs_drop(t, err)
+        _: ret false
+    }
+}
+
+// Somewhere inside is a type whose copy the compiler cannot write for itself.
+pub fn has_user_drop(t Types, ty int) bool +mem {
+    mut seen []int = []
+    ret user_drop_in(t, ty, &seen)
+}
+
+// Every user-written `drop` that releasing a `ty` could run.
+pub fn user_drops(t Types, ty int) []str +mem {
+    mut out []str = []
+    mut seen []int = []
+    collect_drops(t, ty, &out, &seen)
+    ret out
+}
+
+// What a value of this type directly holds.
+fn parts_of(t Types, ty int) []int {
+    mut out []int = []
+    match kind(t, ty) {
+        Struct{id}: {
+            for f in t.structs[id].fields {
+                push(&out, f.ty)
+            }
+        }
+        Enum{id}: {
+            for v in t.enums[id].variants {
+                for f in v.fields {
+                    push(&out, f.ty)
+                }
+            }
+        }
+        Array{elem, _}: push(&out, elem)
+        Option{inner}: push(&out, inner)
+        Slice{elem}: push(&out, elem)
+        Result{ok, err}: {
+            push(&out, ok)
+            push(&out, err)
+        }
+        _: {}
+    }
+    ret out
+}
+
+fn collect_drops(t Types, ty int, out &[]str, seen &[]int) {
+    if has(seen, ty) { ret }
+    push(&seen, ty)
+    d := get(t.user_drop, ty) else ""
+    if len(d) > 0 { push(&out, d) }
+    for f in parts_of(t, ty) {
+        collect_drops(t, f, &out, &seen)
+    }
+}
+
+// `[]Tree` inside `Tree` is legal, so remember what has been looked at.
+fn user_drop_in(t Types, ty int, seen &[]int) bool {
+    if has(seen, ty) { ret false }
+    push(&seen, ty)
+    match kind(t, ty) {
+        Struct{_}: {
+            if has_key(t.user_drop, ty) { ret true }
+        }
+        Enum{_}: {}
+        Array{_, _}: {}
+        Option{_}: {}
+        Slice{_}: {}
+        Result{_, _}: {}
+        _: ret false
+    }
+    for f in parts_of(t, ty) {
+        if user_drop_in(t, f, &seen) { ret true }
+    }
+    ret false
+}
+
+// Can a value of `ty` hold another value of `ty`, through `[]`?
+pub fn contains_itself(t Types, ty int) bool +mem {
+    mut path []int = []
+    ret reaches_itself(t, ty, &path)
+}
+
+fn reaches_itself(t Types, ty int, path &[]int) bool {
+    if has(path, ty) { ret true }
+    match kind(t, ty) {
+        Struct{_}: {}
+        Enum{_}: {}
+        Array{_, _}: {}
+        Option{_}: {}
+        Slice{_}: {}
+        Result{_, _}: {}
+        _: ret false
+    }
+    parts := parts_of(t, ty)
+    push(&path, ty)
+    mut found := false
+    for p in parts {
+        if reaches_itself(t, p, &path) {
+            found = true
+            break
+        }
+    }
+    _ = pop(&path)
+    ret found
+}
+
+pub type Layout { size u64, align u64 }
+
+pub fn size(t Types, ty int) u64 {
+    ret layout(t, ty).size
+}
+
+pub fn layout(t Types, ty int) Layout {
+    match kind(t, ty) {
+        Int{bits, _}: ret Layout{u64(bits) / 8, u64(bits) / 8}
+        Float{bits}: ret Layout{u64(bits) / 8, u64(bits) / 8}
+        Bool: ret Layout{1, 1}
+        Void: ret Layout{0, 1}
+        StrLit: ret Layout{0, 1}
+        Err: ret Layout{0, 1}
+        Pointer{_}: ret Layout{8, 8}
+        Ref{_}: ret Layout{8, 8}
+        Fn{_}: ret Layout{8, 8}
+        Slice{_}: ret Layout{seq_size, 8}
+        Str: ret Layout{seq_size, 8}
+        Struct{id}: ret Layout{t.structs[id].size, t.structs[id].align}
+        Enum{id}: ret Layout{t.enums[id].size, 8}
+        Array{elem, n}: {
+            inner := layout(t, elem)
+            ret Layout{inner.size * u64(n), inner.align}
+        }
+        Option{inner}: ret Layout{tag_size + align_up(size(t, inner), 8), 8}
+        Result{ok, err}: {
+            mut most := size(t, ok)
+            if size(t, err) > most { most = size(t, err) }
+            ret Layout{tag_size + align_up(most, 8), 8}
+        }
+    }
+}
+
+// Writes into one buffer: a type can nest thousands deep (`[2][2]...`), and building each
+// layer's string from the one inside it would be quadratic.
+pub fn name(t Types, ty int) str +mem {
+    mut o []u8 = []
+    name_into(t, ty, &o)
+    ret rt.text(o)
+}
+
+fn add(o &[]u8, s str) +mem {
+    for c in s {
+        push(&o, c)
+    }
+}
+
+fn name_into(t Types, ty int, o &[]u8) +mem {
+    match kind(t, ty) {
+        Int{bits, signed}: {
+            if bits == 64 and signed {
+                add(&o, "int")
+            } else if signed {
+                add(&o, "i{bits}")
+            } else {
+                add(&o, "u{bits}")
+            }
+        }
+        Float{bits}: add(&o, "f{bits}")
+        Bool: add(&o, "bool")
+        Void: add(&o, "nothing")
+        StrLit: add(&o, "string literal")
+        Err: add(&o, "<error>")
+        Struct{id}: add(&o, t.structs[id].name)
+        Enum{id}: add(&o, t.enums[id].name)
+        Array{elem, n}: {
+            add(&o, "[{n}]")
+            name_into(t, elem, &o)
+        }
+        Pointer{inner}: {
+            push(&o, '*')
+            name_into(t, inner, &o)
+        }
+        Slice{elem}: {
+            add(&o, "[]")
+            name_into(t, elem, &o)
+        }
+        Str: add(&o, "str")
+        Ref{inner}: {
+            push(&o, '&')
+            name_into(t, inner, &o)
+        }
+        Option{inner}: {
+            push(&o, '?')
+            name_into(t, inner, &o)
+        }
+        Fn{id}: {
+            f := t.fns[id]
+            add(&o, "fn(")
+            for p, i in f.params {
+                if i > 0 { add(&o, ", ") }
+                if f.owned[i] { add(&o, "own ") }
+                name_into(t, p, &o)
+            }
+            push(&o, ')')
+            if f.ret_ty != t_void {
+                push(&o, ' ')
+                name_into(t, f.ret_ty, &o)
+            }
+            if f.effects != 0 {
+                push(&o, ' ')
+                add(&o, spell_effects(f.effects))
+            }
+        }
+        Result{ok, err}: {
+            if ok == t_void {
+                add(&o, "! ")
+            } else {
+                name_into(t, ok, &o)
+                add(&o, " ! ")
+            }
+            name_into(t, err, &o)
+        }
+    }
+}

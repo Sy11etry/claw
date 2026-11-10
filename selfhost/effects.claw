@@ -1,0 +1,424 @@
+// Checks what signatures promise: `+mem` (allocates) and `+io` (touches the world).
+// Private functions have their effects worked out; declared ones are an upper bound.
+
+use ast
+use diag
+use modules
+use sema
+use types
+
+fn mask_of(names []str) int {
+    mut m := 0
+    for n in names {
+        if n == "mem" {
+            m = m | types.mem_effect
+        } else {
+            m = m | types.io_effect
+        }
+    }
+    ret m
+}
+
+// `core.push[int]` is `push` to the person reading the message.
+pub fn short_name(full str) str +mem {
+    mut end := len(full)
+    for i in 0..len(full) {
+        if full[i] == '[' {
+            end = i
+            break
+        }
+    }
+    mut start := 0
+    for i in 0..end {
+        if full[i] == '.' { start = i + 1 }
+    }
+    ret copy(full[start..end])
+}
+
+// One thing a function does that may have an effect. `callee`: "" when there is none.
+// `from_drop`: comes from a type's `drop`, not from the function's own code.
+type Use { effect int, callee str, span diag.Span, what str, from_drop bool }
+
+// Functions used as values: (function, what the value's type allows, where).
+type ValueUse { full str, allowed int, span diag.Span }
+
+type Scan { uses []Use, statements [][]Use, values []ValueUse }
+
+fn direct(s &Scan, effect int, span diag.Span, what str) {
+    push(&s.uses, Use{effect, "", span, copy(what), false})
+}
+
+fn drops(c sema.Checked, s &Scan, t int, span diag.Span) {
+    for d in types.user_drops(c.types, t) {
+        push(&s.uses, Use{0, copy(d), span, "releasing this value", true})
+    }
+}
+
+fn through_value(c sema.Checked, s &Scan, callee int, result int, span diag.Span) {
+    match types.kind(c.types, callee) {
+        Fn{id}: direct(&s, c.types.fns[id].effects, span, "this call through a value")
+        _: {}
+    }
+    drops(c, &s, result, span)
+}
+
+fn node_scan(l modules.Loaded, c sema.Checked, s &Scan, x int) {
+    ty := l.a.exprs[x].ty
+    span := l.a.exprs[x].span
+    match l.a.exprs[x].kind {
+        Var{_}: value_of(c, &s, l.a.exprs[x].res, ty, span)
+        Field{_, _, _}: value_of(c, &s, l.a.exprs[x].res, ty, span)
+        CallValue{f, _}: through_value(c, &s, l.a.exprs[f].ty, ty, span)
+        Call{_, name, _, _, _, _}: {
+            match l.a.exprs[x].res {
+                ResValue{t}: through_value(c, &s, t, ty, span)
+                ResFunc{full}: {
+                    what := short_name(full)
+                    push(&s.uses, Use{0, copy(full), span, "`{what}`", false})
+                    drops(c, &s, ty, span)
+                }
+                ResConst{_, _}: {}
+                _: {
+                    if name == "print" {
+                        direct(&s, types.io_effect, span, "`print`")
+                    } else if name == "alloc" {
+                        direct(&s, types.mem_effect, span, "`alloc`")
+                    } else if name == "copy" and types.needs_drop(c.types, ty) {
+                        direct(&s, types.mem_effect, span, "`copy`")
+                    }
+                }
+            }
+        }
+        ArrayLit{items}: {
+            match types.kind(c.types, ty) {
+                Slice{_}: {
+                    if len(items) != 0 { direct(&s, types.mem_effect, span, "this array") }
+                }
+                _: {}
+            }
+        }
+        Interp{_}: {
+            if ty == types.t_str { direct(&s, types.mem_effect, span, "this string") }
+        }
+        StructLit{_, _, _, _, _}: drops(c, &s, ty, span)
+        _: {}
+    }
+}
+
+fn value_of(c sema.Checked, s &Scan, res ast.Res, ty int, span diag.Span) {
+    match res {
+        ResFunc{full}: {
+            match types.kind(c.types, ty) {
+                Fn{id}: push(&s.values, ValueUse{copy(full), c.types.fns[id].effects, span})
+                _: {}
+            }
+        }
+        _: {}
+    }
+}
+
+fn scan_expr(l modules.Loaded, c sema.Checked, s &Scan, e int) {
+    mut nodes []int = []
+    sema.walk(l, e, &nodes)
+    mut blocks []int = []
+    for x in nodes {
+        node_scan(l, c, &s, x)
+        match l.a.exprs[x].kind {
+            Else{_, handler}: {
+                match handler {
+                    ElseBlock{_, b}: push(&blocks, b)
+                    _: {}
+                }
+            }
+            _: {}
+        }
+    }
+    for b in blocks {
+        scan_block(l, c, &s, b)
+    }
+}
+
+fn scan_pure(l modules.Loaded, c sema.Checked, s &Scan, e int) []Use {
+    mut saved []Use = []
+    swap(&saved, &s.uses)
+    scan_expr(l, c, &s, e)
+    swap(&saved, &s.uses)
+    ret saved
+}
+
+fn scan_block(l modules.Loaded, c sema.Checked, s &Scan, b int) {
+    for x in l.a.blocks[b].stmts {
+        scan_stmt(l, c, &s, x)
+    }
+}
+
+fn scan_stmt(l modules.Loaded, c sema.Checked, s &Scan, x int) {
+    match l.a.stmts[x].kind {
+        Let{_, _, _, _, init}: {
+            scan_expr(l, c, &s, init)
+            drops(c, &s, l.a.exprs[init].ty, l.a.exprs[init].span)
+        }
+        Assign{target, _, value}: {
+            scan_expr(l, c, &s, target)
+            scan_expr(l, c, &s, value)
+        }
+        Discard{e}: scan_expr(l, c, &s, e)
+        ExprStmt{e}: scan_expr(l, c, &s, e)
+        Fail{e}: scan_expr(l, c, &s, e)
+        Ret{e}: {
+            if e != -1 { scan_expr(l, c, &s, e) }
+        }
+        If{cond, then, els}: {
+            scan_expr(l, c, &s, cond)
+            scan_block(l, c, &s, then)
+            o := els else ast.ElseIf{-1}
+            match o {
+                ElseBlockOf{b}: scan_block(l, c, &s, b)
+                ElseIf{i}: {
+                    if i != -1 { scan_stmt(l, c, &s, i) }
+                }
+            }
+        }
+        ForRange{_, _, start, end, body}: {
+            scan_expr(l, c, &s, start)
+            scan_expr(l, c, &s, end)
+            scan_block(l, c, &s, body)
+        }
+        ForIn{_, _, _, subject, body}: {
+            scan_expr(l, c, &s, subject)
+            scan_block(l, c, &s, body)
+        }
+        ForCond{cond, body}: {
+            scan_expr(l, c, &s, cond)
+            scan_block(l, c, &s, body)
+        }
+        ForEver{body}: scan_block(l, c, &s, body)
+        Defer{body}: scan_block(l, c, &s, body)
+        Match{subject, arms}: {
+            scan_expr(l, c, &s, subject)
+            for a in arms {
+                scan_block(l, c, &s, a.body)
+            }
+        }
+        Sure{e, _}: {
+            uses := scan_pure(l, c, &s, e)
+            push(&s.statements, uses)
+        }
+        Break: {}
+        Continue: {}
+    }
+}
+
+// `declared`: -1 means worked out from the body.
+// `pure`: what each contract and `sure` statement does; contracts must do nothing.
+type Node { full str, is_template bool, sig_end diag.Span, declared int, uses []Use, pure [][]Use, values []ValueUse }
+
+fn build_node(l modules.Loaded, c sema.Checked, own full str, f ast.Func, is_entry bool) Node {
+    mut scan := Scan{[], [], []}
+    scan_block(l, c, &scan, f.body)
+    at := get(c.sigs, full) else -1
+    if at != -1 {
+        for p, i in f.params {
+            if i >= len(c.sig_list[at].params) { break }
+            if p.is_own { drops(c, &scan, c.sig_list[at].params[i], p.span) }
+        }
+    }
+    mut pure [][]Use = []
+    for x in f.contracts {
+        uses := scan_pure(l, c, &scan, x.e)
+        push(&pure, uses)
+    }
+    if is_plain_fn(f) {
+        for st in scan.statements {
+            push(&pure, copy(st))
+        }
+    }
+    mut declared := -1
+    if is_entry {
+        declared = types.mem_effect | types.io_effect
+    } else if f.public or len(f.effects) != 0 {
+        declared = mask_of(f.effects)
+    }
+    ret Node{full, len(f.tparams) != 0, f.sig_end, declared, copy(scan.uses), pure, copy(scan.values)}
+}
+
+fn is_plain_fn(f ast.Func) bool {
+    _ = copy(f.test_name) else { ret true }
+    ret false
+}
+
+// Is there a call to an ordinary function in this expression?
+pub fn has_call(l modules.Loaded, e int) bool +mem {
+    mut nodes []int = []
+    sema.walk(l, e, &nodes)
+    for x in nodes {
+        match l.a.exprs[x].kind {
+            CallValue{_, _}: ret true
+            Call{_, _, _, _, _, _}: {
+                match l.a.exprs[x].res {
+                    ResFunc{_}: ret true
+                    ResValue{_}: ret true
+                    _: {}
+                }
+            }
+            _: {}
+        }
+    }
+    ret false
+}
+
+fn count_stmts(l modules.Loaded, b int, n &int) {
+    for s in l.a.blocks[b].stmts {
+        count_stmt(l, s, &n)
+    }
+}
+
+fn count_stmt(l modules.Loaded, s int, n &int) {
+    match l.a.stmts[s].kind {
+        Sure{e, _}: {
+            if has_call(l, e) { n += 1 }
+        }
+        If{_, then, els}: {
+            count_stmts(l, then, &n)
+            o := els else ast.ElseIf{-1}
+            match o {
+                ElseBlockOf{b}: count_stmts(l, b, &n)
+                ElseIf{i}: {
+                    if i != -1 { count_stmt(l, i, &n) }
+                }
+            }
+        }
+        ForRange{_, _, _, _, body}: count_stmts(l, body, &n)
+        ForIn{_, _, _, _, body}: count_stmts(l, body, &n)
+        ForCond{_, body}: count_stmts(l, body, &n)
+        ForEver{body}: count_stmts(l, body, &n)
+        Match{_, arms}: {
+            for a in arms {
+                count_stmts(l, a.body, &n)
+            }
+        }
+        _: {}
+    }
+}
+
+// What the effect check learned about the program.
+// `slow`: how many checks only run in check mode.
+pub type Report { slow int, known Map[str, int] }
+
+// What this function does, for a signature that does not say.
+pub fn effects(r Report, full str) int +mem {
+    ret get(r.known, full) else 0
+}
+
+// Does this function, or anything it calls, touch the world?
+pub fn has_io(r Report, full str) bool +mem {
+    v := get(r.known, full) else -1
+    ret v == -1 or v & types.io_effect != 0
+}
+
+fn callee_effect(u Use, known Map[str, int]) int {
+    if len(u.callee) == 0 { ret 0 }
+    ret get(known, u.callee) else 0
+}
+
+fn total(uses []Use, known Map[str, int]) int {
+    mut m := 0
+    for u in uses {
+        m = m | u.effect | callee_effect(u, known)
+    }
+    ret m
+}
+
+// Reports every broken promise.
+pub fn check(l modules.Loaded, c sema.Checked, diags &[]diag.Diag) Report +mem {
+    root := len(l.units) - 1
+    mut nodes []Node = []
+    mut slow := 0
+    for i in 0..len(l.units) {
+        u := l.units[i]
+        for f in u.program.funcs {
+            if len(f.tparams) != 0 { continue }
+            is_entry := (i == root and f.name == "main") or not is_plain_fn(f)
+            push(&nodes, build_node(l, c, "{u.prefix}{f.name}", f, is_entry))
+            if not u.is_std and is_plain_fn(f) {
+                for x in f.contracts {
+                    if has_call(l, x.e) { slow += 1 }
+                }
+                count_stmts(l, f.body, &slow)
+            }
+        }
+    }
+    for f in c.instances {
+        push(&nodes, build_node(l, c, copy(f.name), f, false))
+    }
+
+    // Private functions: repeat until the call graph stops adding anything.
+    mut known := new_map[str, int](hash_str)
+    for n in nodes {
+        mut start := n.declared
+        if start == -1 { start = 0 }
+        put(&known, copy(n.full), start)
+    }
+    for {
+        mut changed := false
+        for n in nodes {
+            mut now := 0
+            if n.declared == -1 {
+                now = total(n.uses, known)
+            } else if n.is_template {
+                // A template promises for its own code; what `T`'s `drop` does belongs to `T`.
+                now = n.declared
+                for u in n.uses {
+                    if u.from_drop { now = now | callee_effect(u, known) }
+                }
+            } else {
+                now = n.declared
+            }
+            had := get(known, n.full) else 0
+            if (had | now) != had {
+                put(&known, copy(n.full), had | now)
+                changed = true
+            }
+        }
+        if not changed { break }
+    }
+
+    for n in nodes {
+        display := short_name(n.full)
+        if n.declared != -1 {
+            mut told := 0
+            for u in n.uses {
+                if u.from_drop and n.is_template { continue }
+                has_it := u.effect | callee_effect(u, known)
+                missing := has_it & ~n.declared & ~told
+                if missing != 0 {
+                    told = told | missing
+                    word := types.spell_effects(missing)
+                    push(&diags, diag.fixed("E0160", u.span, "`{display}` does not declare `{word}`, but {u.what} has it", "add `{word}` to the signature"))
+                }
+            }
+        }
+        for v in n.values {
+            extra := (get(known, v.full) else 0) & ~v.allowed
+            if extra != 0 {
+                word := types.spell_effects(extra)
+                push(&diags, diag.new("E0178", v.span, "`{short_name(v.full)}` is `{word}`, which this function type does not allow; add `{word}` to the type"))
+            }
+        }
+        for uses in n.pure {
+            for u in uses {
+                has_it := u.effect | callee_effect(u, known)
+                if has_it != 0 {
+                    push(&diags, diag.new("E0161", u.span, "a contract cannot have side effects, but {u.what} is `{types.spell_effects(has_it)}`"))
+                }
+            }
+        }
+    }
+    for x in c.computed {
+        v := get(known, x.full) else 0
+        if v & types.io_effect != 0 {
+            push(&diags, diag.new("E0171", x.span, "`{x.name}` is computed while compiling, so it cannot use `+io`"))
+        }
+    }
+    ret Report{slow, known}
+}

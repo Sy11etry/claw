@@ -1,0 +1,657 @@
+// `dump_ast file`: the syntax tree as text, to compare with `claw __ast`.
+// `dump_ast --load file`: the same for every unit `modules.load` finds.
+use ast
+use diag
+use lexer
+use modules
+use parser
+use rt
+
+fn write(o &[]u8, s str) {
+    for c in s {
+        push(&o, c)
+    }
+}
+
+fn atom(o &[]u8, s str) {
+    push(&o, ' ')
+    write(&o, s)
+}
+
+fn open(o &[]u8, name str) {
+    write(&o, " (")
+    write(&o, name)
+}
+
+fn close(o &[]u8) {
+    push(&o, ')')
+}
+
+fn flag(o &[]u8, v bool) {
+    if v {
+        atom(&o, "t")
+    } else {
+        atom(&o, "f")
+    }
+}
+
+fn number(o &[]u8, n ast.Num) {
+    if n.big {
+        if n.neg {
+            atom(&o, "-big")
+        } else {
+            atom(&o, "big")
+        }
+    } else if n.neg {
+        atom(&o, "-{n.value}")
+    } else {
+        atom(&o, "{n.value}")
+    }
+}
+
+fn span(o &[]u8, s diag.Span) {
+    write(&o, " @{s.start},{s.stop},{s.line},{s.col}")
+}
+
+fn hex(v u8) u8 {
+    if v < 10 { ret '0' + v }
+    ret 'a' + v - 10
+}
+
+fn quote(o &[]u8, s str) {
+    write(&o, " \"")
+    for c in s {
+        if c == '"' {
+            write(&o, "\\\"")
+        } else if c == '\\' {
+            write(&o, "\\\\")
+        } else if c == '\n' {
+            write(&o, "\\n")
+        } else if c == '\t' {
+            write(&o, "\\t")
+        } else if c == '\r' {
+            write(&o, "\\r")
+        } else if c < 0x20 or c == 0x7f {
+            write(&o, "\\x")
+            push(&o, hex(c >> 4))
+            push(&o, hex(c & 15))
+        } else {
+            push(&o, c)
+        }
+    }
+    push(&o, '"')
+}
+
+fn opt_str(o &[]u8, s ?str) {
+    v := copy(s) else {
+        atom(&o, "-")
+        ret
+    }
+    quote(&o, v)
+}
+
+fn bind(o &[]u8, b ast.Binding) {
+    quote(&o, b.name)
+    span(&o, b.span)
+}
+
+fn opt_bind(o &[]u8, b ?ast.Binding) {
+    v := copy(b) else {
+        atom(&o, "-")
+        ret
+    }
+    bind(&o, v)
+}
+
+fn strs(o &[]u8, name str, items []str) {
+    open(&o, name)
+    for s in items {
+        quote(&o, s)
+    }
+    close(&o)
+}
+
+fn binds(o &[]u8, name str, items []ast.Binding) {
+    open(&o, name)
+    for b in items {
+        bind(&o, b)
+    }
+    close(&o)
+}
+
+fn ty(o &[]u8, a ast.Ast, t int) {
+    match a.tys[t].kind {
+        TName{module, name, targs}: {
+            open(&o, "name")
+            opt_str(&o, module)
+            quote(&o, name)
+            types(&o, a, targs)
+        }
+        TPointer{x}: {
+            open(&o, "ptr")
+            ty(&o, a, x)
+        }
+        TRef{x}: {
+            open(&o, "ref")
+            ty(&o, a, x)
+        }
+        TSlice{x}: {
+            open(&o, "slice")
+            ty(&o, a, x)
+        }
+        TArray{size, x}: {
+            open(&o, "array")
+            match size {
+                SizeLit{v}: number(&o, v)
+                SizeName{n}: quote(&o, n)
+            }
+            ty(&o, a, x)
+        }
+        TOption{x}: {
+            open(&o, "opt")
+            ty(&o, a, x)
+        }
+        TResult{ok, e}: {
+            open(&o, "result")
+            opt_ty(&o, a, ok)
+            ty(&o, a, e)
+        }
+        TFn{ps, ret_ty, effects}: {
+            open(&o, "fnty")
+            open(&o, "params")
+            for p in ps {
+                flag(&o, p.is_own)
+                ty(&o, a, p.ty)
+            }
+            close(&o)
+            opt_ty(&o, a, ret_ty)
+            strs(&o, "effects", effects)
+        }
+    }
+    span(&o, a.tys[t].span)
+    close(&o)
+}
+
+fn types(o &[]u8, a ast.Ast, items []int) {
+    open(&o, "targs")
+    for t in items {
+        ty(&o, a, t)
+    }
+    close(&o)
+}
+
+fn opt_ty(o &[]u8, a ast.Ast, t int) {
+    if t == -1 {
+        atom(&o, "-")
+    } else {
+        ty(&o, a, t)
+    }
+}
+
+fn exprs(o &[]u8, a ast.Ast, items []int) {
+    open(&o, "args")
+    for e in items {
+        expr(&o, a, e)
+    }
+    close(&o)
+}
+
+fn opt_expr(o &[]u8, a ast.Ast, e int) {
+    if e == -1 {
+        atom(&o, "-")
+    } else {
+        expr(&o, a, e)
+    }
+}
+
+claw fn f64_bits(v f64) u64 {
+    mut x := v
+    p := cast[*u64](&x)
+    ret *p
+}
+
+fn expr(o &[]u8, a ast.Ast, x int) {
+    match a.exprs[x].kind {
+        Int{v}: {
+            open(&o, "int")
+            number(&o, v)
+        }
+        Float{v}: {
+            open(&o, "float")
+            atom(&o, "{f64_bits(v)}")
+        }
+        Char{c}: {
+            open(&o, "char")
+            atom(&o, "{c}")
+        }
+        Bool{v}: {
+            open(&o, "bool")
+            flag(&o, v)
+        }
+        Str{s}: {
+            open(&o, "str")
+            quote(&o, s)
+        }
+        Interp{parts}: {
+            open(&o, "interp")
+            for p in parts {
+                match p {
+                    PartLit{s}: quote(&o, s)
+                    PartExpr{e}: expr(&o, a, e)
+                }
+            }
+        }
+        None: open(&o, "none")
+        RetVal: open(&o, "retval")
+        Old{e}: {
+            open(&o, "old")
+            expr(&o, a, e)
+        }
+        Var{n}: {
+            open(&o, "var")
+            quote(&o, n)
+        }
+        Unary{op, e}: {
+            open(&o, "unary")
+            match op {
+                Neg: atom(&o, "neg")
+                BitNot: atom(&o, "bitnot")
+                Not: atom(&o, "not")
+            }
+            expr(&o, a, e)
+        }
+        Binary{op, l, r}: {
+            open(&o, "binary")
+            atom(&o, ast.binop_text(op))
+            expr(&o, a, l)
+            expr(&o, a, r)
+        }
+        Call{module, name, name_span, targs, args, via}: {
+            open(&o, "call")
+            opt_str(&o, module)
+            quote(&o, name)
+            span(&o, name_span)
+            types(&o, a, targs)
+            exprs(&o, a, args)
+            opt_expr(&o, a, via)
+        }
+        CallValue{f, args}: {
+            open(&o, "callvalue")
+            expr(&o, a, f)
+            exprs(&o, a, args)
+        }
+        StructLit{module, name, name_span, targs, args}: {
+            open(&o, "structlit")
+            opt_str(&o, module)
+            quote(&o, name)
+            span(&o, name_span)
+            types(&o, a, targs)
+            exprs(&o, a, args)
+        }
+        AddrOf{e}: {
+            open(&o, "addrof")
+            expr(&o, a, e)
+        }
+        Deref{e}: {
+            open(&o, "deref")
+            expr(&o, a, e)
+        }
+        ArrayLit{items}: {
+            open(&o, "arraylit")
+            exprs(&o, a, items)
+        }
+        ArrayFill{e}: {
+            open(&o, "arrayfill")
+            expr(&o, a, e)
+        }
+        Field{e, name, name_span}: {
+            open(&o, "field")
+            expr(&o, a, e)
+            quote(&o, name)
+            span(&o, name_span)
+        }
+        Index{e, i}: {
+            open(&o, "index")
+            expr(&o, a, e)
+            expr(&o, a, i)
+        }
+        Slice{e, lo, hi}: {
+            open(&o, "slice")
+            expr(&o, a, e)
+            opt_expr(&o, a, lo)
+            opt_expr(&o, a, hi)
+        }
+        Try{e}: {
+            open(&o, "try")
+            expr(&o, a, e)
+        }
+        Else{e, handler}: {
+            open(&o, "else")
+            expr(&o, a, e)
+            match handler {
+                ElseValue{v}: {
+                    open(&o, "value")
+                    expr(&o, a, v)
+                    close(&o)
+                }
+                ElseBlock{b, body}: {
+                    open(&o, "handler")
+                    opt_bind(&o, b)
+                    block(&o, a, body)
+                    close(&o)
+                }
+            }
+        }
+    }
+    span(&o, a.exprs[x].span)
+    close(&o)
+}
+
+fn block(o &[]u8, a ast.Ast, b int) {
+    open(&o, "block")
+    for s in a.blocks[b].stmts {
+        stmt(&o, a, s)
+    }
+    span(&o, a.blocks[b].end)
+    close(&o)
+}
+
+fn opt_op(o &[]u8, op ?ast.BinOp) {
+    v := copy(op) else {
+        atom(&o, "-")
+        ret
+    }
+    atom(&o, ast.binop_text(v))
+}
+
+fn pat(o &[]u8, p ast.Pat) {
+    match p {
+        PatWild: atom(&o, "_")
+        PatVariant{name, b}: {
+            open(&o, "variant")
+            quote(&o, name)
+            binds(&o, "binds", b)
+            close(&o)
+        }
+        PatInt{v}: {
+            open(&o, "pint")
+            number(&o, v)
+            close(&o)
+        }
+        PatBool{v}: {
+            open(&o, "pbool")
+            flag(&o, v)
+            close(&o)
+        }
+    }
+}
+
+fn stmt(o &[]u8, a ast.Ast, x int) {
+    push(&o, '\n')
+    match a.stmts[x].kind {
+        Let{mutable, name, name_span, t, init}: {
+            open(&o, "let")
+            flag(&o, mutable)
+            quote(&o, name)
+            span(&o, name_span)
+            opt_ty(&o, a, t)
+            expr(&o, a, init)
+        }
+        Assign{target, op, value}: {
+            open(&o, "assign")
+            expr(&o, a, target)
+            opt_op(&o, op)
+            expr(&o, a, value)
+        }
+        Discard{e}: {
+            open(&o, "discard")
+            expr(&o, a, e)
+        }
+        ExprStmt{e}: {
+            open(&o, "expr")
+            expr(&o, a, e)
+        }
+        If{cond, then, els}: {
+            open(&o, "if")
+            expr(&o, a, cond)
+            block(&o, a, then)
+            else_of(&o, a, els)
+        }
+        ForRange{v, var_span, start, end, body}: {
+            open(&o, "forrange")
+            quote(&o, v)
+            span(&o, var_span)
+            expr(&o, a, start)
+            expr(&o, a, end)
+            block(&o, a, body)
+        }
+        ForIn{elem, elem_span, index, subject, body}: {
+            open(&o, "forin")
+            quote(&o, elem)
+            span(&o, elem_span)
+            opt_bind(&o, index)
+            expr(&o, a, subject)
+            block(&o, a, body)
+        }
+        ForCond{cond, body}: {
+            open(&o, "forcond")
+            expr(&o, a, cond)
+            block(&o, a, body)
+        }
+        ForEver{body}: {
+            open(&o, "forever")
+            block(&o, a, body)
+        }
+        Match{subject, arms}: {
+            open(&o, "match")
+            expr(&o, a, subject)
+            for arm in arms {
+                open(&o, "arm")
+                pat(&o, arm.pat)
+                span(&o, arm.span)
+                block(&o, a, arm.body)
+                close(&o)
+            }
+        }
+        Ret{e}: {
+            open(&o, "ret")
+            opt_expr(&o, a, e)
+        }
+        Fail{e}: {
+            open(&o, "fail")
+            expr(&o, a, e)
+        }
+        Defer{b}: {
+            open(&o, "defer")
+            block(&o, a, b)
+        }
+        Sure{e, text}: {
+            open(&o, "sure")
+            expr(&o, a, e)
+            quote(&o, text)
+        }
+        Break: open(&o, "break")
+        Continue: open(&o, "continue")
+    }
+    span(&o, a.stmts[x].span)
+    close(&o)
+}
+
+fn else_of(o &[]u8, a ast.Ast, els ?ast.ElseStmt) {
+    v := copy(els) else {
+        atom(&o, "-")
+        ret
+    }
+    match v {
+        ElseBlockOf{b}: block(&o, a, b)
+        ElseIf{s}: stmt(&o, a, s)
+    }
+}
+
+fn fields(o &[]u8, a ast.Ast, items []ast.FieldDecl) {
+    open(&o, "fields")
+    for f in items {
+        quote(&o, f.name)
+        span(&o, f.span)
+        ty(&o, a, f.ty)
+    }
+    close(&o)
+}
+
+fn params(o &[]u8, a ast.Ast, items []ast.Param) {
+    open(&o, "params")
+    for p in items {
+        flag(&o, p.is_own)
+        quote(&o, p.name)
+        span(&o, p.span)
+        ty(&o, a, p.ty)
+    }
+    close(&o)
+}
+
+fn func(o &[]u8, a ast.Ast, f ast.Func) {
+    open(&o, "fn")
+    quote(&o, f.name)
+    span(&o, f.name_span)
+    flag(&o, f.public)
+    flag(&o, f.is_claw)
+    binds(&o, "tparams", f.tparams)
+    params(&o, a, f.params)
+    opt_ty(&o, a, f.ret_ty)
+    open(&o, "contracts")
+    for c in f.contracts {
+        flag(&o, c.is_sure)
+        expr(&o, a, c.e)
+        quote(&o, c.text)
+    }
+    close(&o)
+    strs(&o, "effects", f.effects)
+    span(&o, f.sig_end)
+    opt_str(&o, f.test_name)
+    block(&o, a, f.body)
+    close(&o)
+    push(&o, '\n')
+}
+
+fn program(o &[]u8, a ast.Ast, p ast.Program) {
+    for u in p.uses {
+        open(&o, "use")
+        strs(&o, "path", u.path)
+        span(&o, u.span)
+        close(&o)
+        push(&o, '\n')
+    }
+    for e in p.externs {
+        open(&o, "extern")
+        opt_str(&o, e.symbol)
+        quote(&o, e.name)
+        span(&o, e.span)
+        flag(&o, e.public)
+        params(&o, a, e.params)
+        flag(&o, e.variadic)
+        opt_ty(&o, a, e.ret_ty)
+        close(&o)
+        push(&o, '\n')
+    }
+    for t in p.types {
+        open(&o, "type")
+        quote(&o, t.name)
+        span(&o, t.span)
+        flag(&o, t.public)
+        binds(&o, "tparams", t.tparams)
+        match t.body {
+            Struct{f}: fields(&o, a, f)
+            Variants{vs}: {
+                open(&o, "variants")
+                for v in vs {
+                    open(&o, "variant")
+                    quote(&o, v.name)
+                    span(&o, v.span)
+                    fields(&o, a, v.fields)
+                    close(&o)
+                }
+                close(&o)
+            }
+        }
+        close(&o)
+        push(&o, '\n')
+    }
+    for c in p.consts {
+        open(&o, "const")
+        quote(&o, c.name)
+        span(&o, c.span)
+        flag(&o, c.public)
+        opt_ty(&o, a, c.ty)
+        expr(&o, a, c.value)
+        flag(&o, c.computed)
+        quote(&o, c.text)
+        close(&o)
+        push(&o, '\n')
+    }
+    for f in p.funcs {
+        func(&o, a, f)
+    }
+}
+
+fn diagnostics(o &[]u8, diags []diag.Diag) {
+    for d in diags {
+        write(&o, "{d.code} {d.span.line}:{d.span.col} {d.msg}\n")
+    }
+}
+
+fn one(path str) {
+    src := modules.read_source(path) else {
+        print("unreadable")
+        ret
+    }
+    mut a := ast.new_ast()
+    mut diags []diag.Diag = []
+    toks := lexer.lex(src, 0, &diags)
+    p := parser.parse_file(toks, src, &a, &diags)
+    mut o []u8 = []
+    program(&o, a, p)
+    diagnostics(&o, diags)
+    print(rt.text(o))
+}
+
+fn all(path str) {
+    mut o []u8 = []
+    l := modules.load(path, true) else err {
+        diagnostics(&o, err.diags)
+        for f in err.files {
+            write(&o, "file {f}\n")
+        }
+        print(rt.text(o))
+        ret
+    }
+    for u, i in l.units {
+        write(&o, "unit {i} \"{u.prefix}\" {u.is_std}\n")
+        mut names []str = []
+        for e in u.imports.items {
+            push(&names, copy(e.key))
+        }
+        sort(&names)
+        for n in names {
+            at := get(u.imports, n) else 0
+            write(&o, "import {n} {at}")
+            s := get(u.import_spans, n) else { continue }
+            span(&o, s)
+            push(&o, '\n')
+        }
+        program(&o, l.a, u.program)
+    }
+    write(&o, "core {l.core}\n")
+    for f, i in l.files {
+        write(&o, "file {f} {l.base_names[i]}\n")
+    }
+    print(rt.text(o))
+}
+
+fn main() {
+    args := rt.args()
+    if len(args) > 2 and args[1] == "--load" {
+        all(args[2])
+    } else {
+        one(args[1])
+    }
+}
