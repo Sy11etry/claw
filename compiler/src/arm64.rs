@@ -399,6 +399,85 @@ pub fn fmov_d_x(rd: Reg, rn: Reg) -> u32 {
     0x9E67_0000 | (rn << 5) | rd
 }
 
+// ---- NEON: 128-bit vectors of two doubles, four floats or four 32-bit integers.
+
+/// Which vector shape: the `size` bit of float operations and of integer ones.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Arr {
+    D2,
+    S4,
+}
+
+fn fsz(a: Arr) -> u32 {
+    if a == Arr::D2 { 1 << 22 } else { 0 }
+}
+
+/// `ldr qt, [xn, #off]`
+pub fn ldr_q(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0x3DC0_0000, rt, rn, off / 16)
+}
+/// `str qt, [xn, #off]`
+pub fn str_q(rt: Reg, rn: Reg, off: u32) -> u32 {
+    ls(0x3D80_0000, rt, rn, off / 16)
+}
+/// `eor vd.16b, vn.16b, vm.16b`
+pub fn veor(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x6E20_1C00, rd, rn, rm)
+}
+/// `mov vd.16b, vn.16b`
+pub fn mov_v(rd: Reg, rn: Reg) -> u32 {
+    rrr(0x4EA0_1C00, rd, rn, rn)
+}
+pub fn vfadd(rd: Reg, rn: Reg, rm: Reg, a: Arr) -> u32 {
+    rrr(0x4E20_D400 | fsz(a), rd, rn, rm)
+}
+pub fn vfsub(rd: Reg, rn: Reg, rm: Reg, a: Arr) -> u32 {
+    rrr(0x4EA0_D400 | fsz(a), rd, rn, rm)
+}
+pub fn vfmul(rd: Reg, rn: Reg, rm: Reg, a: Arr) -> u32 {
+    rrr(0x6E20_DC00 | fsz(a), rd, rn, rm)
+}
+pub fn vfdiv(rd: Reg, rn: Reg, rm: Reg, a: Arr) -> u32 {
+    rrr(0x6E20_FC00 | fsz(a), rd, rn, rm)
+}
+/// `fmla vd, vn, vm`: `vd += vn * vm`, fused.
+pub fn vfmla(rd: Reg, rn: Reg, rm: Reg, a: Arr) -> u32 {
+    rrr(0x4E20_CC00 | fsz(a), rd, rn, rm)
+}
+pub fn vfneg(rd: Reg, rn: Reg, a: Arr) -> u32 {
+    0x6EA0_F800 | fsz(a) | (rn << 5) | rd
+}
+/// Integer lanes of 32 bits.
+pub fn vadd4s(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x4EA0_8400, rd, rn, rm)
+}
+pub fn vsub4s(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x6EA0_8400, rd, rn, rm)
+}
+pub fn vmul4s(rd: Reg, rn: Reg, rm: Reg) -> u32 {
+    rrr(0x4EA0_9C00, rd, rn, rm)
+}
+pub fn vneg4s(rd: Reg, rn: Reg) -> u32 {
+    0x6EA0_B800 | (rn << 5) | rd
+}
+/// `dup vd.2d, xn` or `dup vd.4s, wn`: a general register into every lane.
+pub fn vdup_x(rd: Reg, rn: Reg, a: Arr) -> u32 {
+    (if a == Arr::D2 { 0x4E08_0C00 } else { 0x4E04_0C00 }) | (rn << 5) | rd
+}
+/// `dup vd.2d, vn.d[0]` or `dup vd.4s, vn.s[0]`: a floating-point register into every lane.
+pub fn vdup_lane0(rd: Reg, rn: Reg, a: Arr) -> u32 {
+    (if a == Arr::D2 { 0x4E08_0400 } else { 0x4E04_0400 }) | (rn << 5) | rd
+}
+/// `dup dd, vn.d[lane]` (or `sd` with `s[lane]`): one lane as a scalar float.
+pub fn vdup_scalar(rd: Reg, rn: Reg, lane: u32, a: Arr) -> u32 {
+    let imm5 = if a == Arr::D2 { (lane << 4) | 8 } else { (lane << 3) | 4 };
+    0x5E00_0400 | (imm5 << 16) | (rn << 5) | rd
+}
+/// `smov xd, vn.s[lane]`: one 32-bit lane, sign-extended into a general register.
+pub fn vsmov_s(rd: Reg, rn: Reg, lane: u32) -> u32 {
+    0x4E00_2C00 | (((lane << 3) | 4) << 16) | (rn << 5) | rd
+}
+
 // Branch encoders take the displacement in instructions, not bytes.
 pub const B: u32 = 0x1400_0000;
 pub const BL: u32 = 0x9400_0000;
@@ -586,5 +665,34 @@ pub fn golden() -> Vec<(u32, String)> {
                 ]
             }),
     )
+    .chain([
+        (ldr_q(9, SP, 32), "ldr q9, [sp, #32]"),
+        (str_q(17, X10, 0), "str q17, [x10]"),
+        (mov_v(18, 19), "mov v18.16b, v19.16b"),
+        (veor(16, 16, 16), "eor v16.16b, v16.16b, v16.16b"),
+        (vfadd(16, 17, 18, Arr::D2), "fadd v16.2d, v17.2d, v18.2d"),
+        (vfadd(0, 1, 2, Arr::S4), "fadd v0.4s, v1.4s, v2.4s"),
+        (vfsub(16, 17, 18, Arr::D2), "fsub v16.2d, v17.2d, v18.2d"),
+        (vfsub(3, 4, 5, Arr::S4), "fsub v3.4s, v4.4s, v5.4s"),
+        (vfmul(16, 17, 18, Arr::D2), "fmul v16.2d, v17.2d, v18.2d"),
+        (vfmul(6, 7, 8, Arr::S4), "fmul v6.4s, v7.4s, v8.4s"),
+        (vfdiv(16, 17, 18, Arr::D2), "fdiv v16.2d, v17.2d, v18.2d"),
+        (vfdiv(9, 10, 11, Arr::S4), "fdiv v9.4s, v10.4s, v11.4s"),
+        (vfmla(16, 17, 18, Arr::D2), "fmla v16.2d, v17.2d, v18.2d"),
+        (vfmla(12, 13, 14, Arr::S4), "fmla v12.4s, v13.4s, v14.4s"),
+        (vfneg(16, 17, Arr::D2), "fneg v16.2d, v17.2d"),
+        (vfneg(1, 2, Arr::S4), "fneg v1.4s, v2.4s"),
+        (vadd4s(16, 17, 18), "add v16.4s, v17.4s, v18.4s"),
+        (vsub4s(16, 17, 18), "sub v16.4s, v17.4s, v18.4s"),
+        (vmul4s(16, 17, 18), "mul v16.4s, v17.4s, v18.4s"),
+        (vneg4s(16, 17), "neg v16.4s, v17.4s"),
+        (vdup_x(16, X9, Arr::D2), "dup v16.2d, x9"),
+        (vdup_x(17, X9, Arr::S4), "dup v17.4s, w9"),
+        (vdup_lane0(16, 2, Arr::D2), "dup v16.2d, v2.d[0]"),
+        (vdup_lane0(17, 3, Arr::S4), "dup v17.4s, v3.s[0]"),
+        (vdup_scalar(0, 16, 1, Arr::D2), "mov d0, v16.d[1]"),
+        (vdup_scalar(1, 17, 3, Arr::S4), "mov s1, v17.s[3]"),
+        (vsmov_s(X9, 16, 2), "smov x9, v16.s[2]"),
+    ].into_iter().map(|(w, t)| (w, t.to_string())))
     .collect()
 }

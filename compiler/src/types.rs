@@ -26,6 +26,57 @@ pub enum Kind {
     Result(Ty, Ty),
     /// A function as a value: an index into `Types::fns`.
     Fn(usize),
+    /// A 128-bit SIMD value; it lives in a vector register and only exists inside `claw fn`.
+    Vec(Vk),
+}
+
+/// The three SIMD types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Vk {
+    F64x2,
+    F32x4,
+    I32x4,
+}
+
+impl Vk {
+    pub const ALL: [Vk; 3] = [Vk::F64x2, Vk::F32x4, Vk::I32x4];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Vk::F64x2 => "f64x2",
+            Vk::F32x4 => "f32x4",
+            Vk::I32x4 => "i32x4",
+        }
+    }
+
+    pub fn lanes(self) -> u32 {
+        match self {
+            Vk::F64x2 => 2,
+            Vk::F32x4 | Vk::I32x4 => 4,
+        }
+    }
+
+    /// The type of one lane.
+    pub fn elem(self) -> Ty {
+        match self {
+            Vk::F64x2 => F64,
+            Vk::F32x4 => F32,
+            Vk::I32x4 => I32,
+        }
+    }
+
+    pub fn is_float(self) -> bool {
+        self != Vk::I32x4
+    }
+
+    pub fn from_name(n: &str) -> Option<Vk> {
+        Vk::ALL.into_iter().find(|v| v.name() == n)
+    }
+
+    /// The vector whose lanes are `t`, for `vload` and `vstore`.
+    pub fn of_elem(t: Ty) -> Option<Vk> {
+        Vk::ALL.into_iter().find(|v| v.elem() == t)
+    }
 }
 
 pub const MEM: u8 = 1;
@@ -188,6 +239,51 @@ impl Types {
         matches!(self.kind(t), Kind::Float { .. })
     }
 
+    pub fn is_vec(&self, t: Ty) -> bool {
+        matches!(self.kind(t), Kind::Vec(_))
+    }
+
+    /// Whether a SIMD value is, or sits inside, `t`.
+    pub fn holds_vec(&self, t: Ty) -> bool {
+        self.holds_vec_seen(t, &mut Vec::new())
+    }
+
+    /// `seen` only holds named types: they are the only way back to a type already being
+    /// looked at. Arrays of arrays of arrays (a template that keeps wrapping its argument)
+    /// stay linear.
+    fn holds_vec_seen(&self, t: Ty, seen: &mut Vec<(bool, usize)>) -> bool {
+        match self.kind(t) {
+            Kind::Vec(_) => true,
+            Kind::Array(e, _) | Kind::Slice(e) | Kind::Option(e) | Kind::Pointer(e) | Kind::Ref(e) => self.holds_vec_seen(e, seen),
+            Kind::Result(a, b) => self.holds_vec_seen(a, seen) || self.holds_vec_seen(b, seen),
+            Kind::Struct(id) => {
+                if seen.contains(&(false, id)) {
+                    return false;
+                }
+                seen.push((false, id));
+                self.structs[id].fields.iter().any(|f| self.holds_vec_seen(f.ty, seen))
+            }
+            Kind::Enum(id) => {
+                if seen.contains(&(true, id)) {
+                    return false;
+                }
+                seen.push((true, id));
+                self.enums[id].variants.iter().any(|v| v.fields.iter().any(|f| self.holds_vec_seen(f.ty, seen)))
+            }
+            Kind::Fn(id) => self.fns[id].params.iter().any(|p| self.holds_vec_seen(*p, seen)) || self.holds_vec_seen(self.fns[id].ret, seen),
+            _ => false,
+        }
+    }
+
+    /// How many array, slice, option, pointer and result layers `t` is wrapped in.
+    pub fn nest(&self, t: Ty) -> u32 {
+        match self.kind(t) {
+            Kind::Array(e, _) | Kind::Slice(e) | Kind::Option(e) | Kind::Pointer(e) | Kind::Ref(e) => 1 + self.nest(e),
+            Kind::Result(a, b) => 1 + self.nest(a).max(self.nest(b)),
+            _ => 0,
+        }
+    }
+
     pub fn is_ref(&self, t: Ty) -> bool {
         matches!(self.kind(t), Kind::Ref(_))
     }
@@ -292,6 +388,7 @@ impl Types {
         match self.kind(t) {
             Kind::Int { bits, .. } | Kind::Float { bits } => ((bits / 8) as u64, (bits / 8) as u64),
             Kind::Bool => (1, 1),
+            Kind::Vec(_) => (16, 16),
             Kind::Void | Kind::StrLit | Kind::Err => (0, 1),
             Kind::Pointer(_) | Kind::Ref(_) | Kind::Fn(_) => (8, 8),
             Kind::Slice(_) | Kind::Str => (SEQ_SIZE, 8),
@@ -312,6 +409,7 @@ impl Types {
             Kind::Int { bits, signed } => format!("{}{}", if signed { "i" } else { "u" }, bits),
             Kind::Float { bits } => format!("f{bits}"),
             Kind::Bool => "bool".to_string(),
+            Kind::Vec(v) => v.name().to_string(),
             Kind::Void => "nothing".to_string(),
             Kind::StrLit => "string literal".to_string(),
             Kind::Err => "<error>".to_string(),

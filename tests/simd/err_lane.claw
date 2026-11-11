@@ -1,0 +1,10 @@
+// error: E0908
+claw fn demo(i int) {
+    p := alloc[f64](2)
+    defer free(p)
+    v := vload(p)
+    print(lane(v, i))
+}
+
+fn main() {
+}

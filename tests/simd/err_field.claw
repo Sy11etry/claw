@@ -1,0 +1,5 @@
+// error: E0906
+type Pair { a f32x4, b int }
+
+fn main() {
+}

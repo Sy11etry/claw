@@ -1,0 +1,10 @@
+// error: E0104
+claw fn demo() {
+    a := f64x2(1.0)
+    b := f32x4(1.0)
+    c := a + b
+    print(lane(c, 0))
+}
+
+fn main() {
+}

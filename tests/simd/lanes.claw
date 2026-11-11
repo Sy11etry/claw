@@ -1,0 +1,56 @@
+// expect: 1.5 2.5 3.5 4.5
+// expect: 11 22 33 44
+// expect: 1 -2 3 -4
+// expect: 8 12 22 16
+// expect: -3.25
+claw fn show4(p *f32) {
+    print("{p[0]} {p[1]} {p[2]} {p[3]}")
+}
+
+claw fn demo() {
+    f := alloc[f32](4)
+    defer free(f)
+    for i in 0..4 { f[i] = f32(i) + 1.0 }
+    a := vload(f)
+    b := a + f32x4(0.5) - f32x4(0.5) + f32x4(0.5)
+    vstore(f, b)
+    show4(f)
+
+    k := alloc[i32](4)
+    defer free(k)
+    for i in 0..4 { k[i] = i32(i + 1) }
+    c := vload(k)
+    d := c * i32x4(10) + c
+    vstore(k, d)
+    print("{k[0]} {k[1]} {k[2]} {k[3]}")
+
+    e := vload(k)
+    n := alloc[i32](4)
+    defer free(n)
+    vstore(n, -(e - e - i32x4(0)) + vload(k) - vload(k))   // all zero first
+    n[0] = 1
+    n[1] = 2
+    n[2] = 3
+    n[3] = 4
+    x := vload(n)
+    y := x * i32x4(-1)
+    z := x + y + x      // = x
+    w := alloc[i32](4)
+    defer free(w)
+    vstore(w, z * i32x4(1))
+    print("{w[0]} {-w[1]} {w[2]} {-w[3]}")
+
+    g := alloc[f64](4)
+    defer free(g)
+    for i in 0..4 { g[i] = f64(i * 2) }
+    p := vload(g)
+    q := vload(g + 2)
+    r := p + q + f64x2(4.0) - f64x2(4.0) + f64x2(4.0)
+    vstore(g, r)
+    print("{g[0] + 0.0} {g[1] + 0.0} {g[1] * 2.0 - 4.0 + 2.0} {g[1] + 4.0}")
+    print(lane(fma(f64x2(-1.5), f64x2(2.5), f64x2(0.5)), 1))
+}
+
+fn main() {
+    demo()
+}

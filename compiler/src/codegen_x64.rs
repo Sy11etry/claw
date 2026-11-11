@@ -1087,6 +1087,9 @@ impl Gen {
             }
             Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("gone before code generation"),
             Inst::ConstRef { .. } | Inst::Line { .. } | Inst::Note { .. } => unreachable!("only the interpreter sees these"),
+            Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VStore { .. } | Inst::VLane { .. } => {
+                unreachable!("`generate` refuses SIMD code before it gets here")
+            }
             Inst::DataAddr { d, bytes } => {
                 let off = self.add_str(bytes);
                 self.lea_data(RAX, off);
@@ -1650,6 +1653,9 @@ impl Gen {
 }
 
 pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<ObjectX64, String> {
+    if m.funcs.iter().filter(|f| !f.dead).any(|f| f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VStore { .. } | Inst::VLane { .. })))) {
+        return Err("E0907 SIMD vectors are not available on x86_64 yet; build for arm64".to_string());
+    }
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
     for f in m.funcs.iter().filter(|f| !f.dead) {
         for b in &f.blocks {

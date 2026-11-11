@@ -1021,7 +1021,9 @@ impl<'a, 'i> FnLower<'a, 'i> {
     }
 
     fn store(&mut self, addr: VReg, off: u64, v: VReg, ty: Ty) {
-        if self.t().is_aggregate(ty) {
+        if self.t().is_vec(ty) {
+            self.emit(Inst::VStore { p: addr, off, s: v });
+        } else if self.t().is_aggregate(ty) {
             let dst = self.offset_addr(addr, off);
             self.emit(Inst::MemCopy { dst, src: v, size: self.t().size(ty) });
         } else {
@@ -1034,6 +1036,10 @@ impl<'a, 'i> FnLower<'a, 'i> {
             return self.offset_addr(addr, off);
         }
         let d = self.vreg();
+        if self.t().is_vec(ty) {
+            self.emit(Inst::VLoad { d, p: addr, off });
+            return d;
+        }
         self.emit(Inst::Load { d, p: addr, off, mem: self.mem_of(ty) });
         d
     }
@@ -1663,6 +1669,17 @@ impl<'a, 'i> FnLower<'a, 'i> {
             return self.pointer_step(op, a, b, ty);
         }
         let d = self.vreg();
+        if let Kind::Vec(vk) = self.t().kind(ty) {
+            let fop = match op {
+                BinOp::Add => FArith::Add,
+                BinOp::Sub => FArith::Sub,
+                BinOp::Mul => FArith::Mul,
+                BinOp::Div => FArith::Div,
+                _ => unreachable!("sema rejects this vector operator"),
+            };
+            self.emit(Inst::VBin { op: fop, d, a, b, ty: vk });
+            return d;
+        }
         if let Some(bits) = self.float_bits(ty) {
             let fop = match op {
                 BinOp::Add => FArith::Add,
@@ -1936,6 +1953,10 @@ impl<'a, 'i> FnLower<'a, 'i> {
         match op {
             UnOp::Not => self.emit(Inst::BoolNot { d, s }),
             UnOp::BitNot => self.emit(Inst::BitNot { d, s, num: self.num_of(ty) }),
+            UnOp::Neg if self.t().is_vec(ty) => {
+                let Kind::Vec(vk) = self.t().kind(ty) else { unreachable!() };
+                self.emit(Inst::VNeg { d, s, ty: vk })
+            }
             UnOp::Neg => match self.float_bits(ty) {
                 Some(bits) => self.emit(Inst::FNeg { d, s, bits }),
                 None => self.emit(Inst::Neg { d, s, num: self.num_of(ty), loc: loc(span) }),
@@ -2030,6 +2051,44 @@ impl<'a, 'i> FnLower<'a, 'i> {
     fn builtin_call(&mut self, e: &'a Expr, name: &str, args: &'a [Expr]) -> Option<VReg> {
         let ty = e.ty.get();
         match name {
+            "f64x2" | "f32x4" | "i32x4" => {
+                let Kind::Vec(vk) = self.t().kind(ty) else { unreachable!("sema made this a vector") };
+                let s = self.expr_value(&args[0]);
+                let d = self.vreg();
+                self.emit(Inst::VSplat { d, s, ty: vk });
+                Some(d)
+            }
+            "vload" => {
+                let p = self.expr_value(&args[0]);
+                self.guard_mem(p, 16, args[0].span);
+                let d = self.vreg();
+                self.emit(Inst::VLoad { d, p, off: 0 });
+                Some(d)
+            }
+            "vstore" => {
+                let p = self.expr_value(&args[0]);
+                let s = self.expr_value(&args[1]);
+                self.guard_mem(p, 16, args[0].span);
+                self.emit(Inst::VStore { p, off: 0, s });
+                None
+            }
+            "lane" => {
+                let Kind::Vec(vk) = self.t().kind(args[0].ty.get()) else { unreachable!("sema made this a vector") };
+                let ExprKind::Int(n) = args[1].kind else { unreachable!("sema wanted a literal lane") };
+                let s = self.expr_value(&args[0]);
+                let d = self.vreg();
+                self.emit(Inst::VLane { d, s, lane: n as u8, ty: vk });
+                Some(d)
+            }
+            "fma" => {
+                let Kind::Vec(vk) = self.t().kind(ty) else { unreachable!("sema made this a vector") };
+                let a = self.expr_value(&args[0]);
+                let b = self.expr_value(&args[1]);
+                let c = self.expr_value(&args[2]);
+                let d = self.vreg();
+                self.emit(Inst::VFma { d, a, b, c, ty: vk });
+                Some(d)
+            }
             "print" => {
                 self.print(&args[0]);
                 None
@@ -2346,6 +2405,8 @@ impl<'a, 'i> FnLower<'a, 'i> {
             Kind::Pointer(_) => self.emit(Inst::BufInt { s: v, signed: false }),
             Kind::Bool => self.emit(Inst::BufBool { s: v }),
             Kind::Float { bits } => self.emit(Inst::BufFloat { s: v, bits }),
+            // `print` of a SIMD value is refused by the checker.
+            Kind::Vec(_) => {}
             Kind::Struct(id) => {
                 let def = self.t().structs[id].clone();
                 self.print_fields(&def.name, v, &def.fields);

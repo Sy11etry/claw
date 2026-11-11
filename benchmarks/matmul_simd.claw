@@ -1,0 +1,35 @@
+// The same product with two doubles at a time (`f64x2`) and fused multiply-add.
+claw fn work() int {
+    n := 1024
+    a := alloc[f64](n * n)
+    b := alloc[f64](n * n)
+    c := alloc[f64](n * n)
+    defer free(a)
+    defer free(b)
+    defer free(c)
+    for i in 0..n * n {
+        a[i] = f64(i % 7 + 1)
+        b[i] = f64(i % 5 + 1)
+        c[i] = 0.0
+    }
+    for i in 0..n {
+        for k in 0..n {
+            x := f64x2(a[i * n + k])
+            mut j := 0
+            for j < n {
+                p := c + (i * n + j)
+                q := b + (k * n + j)
+                vstore(p, fma(x, vload(q), vload(p)))
+                vstore(p + 2, fma(x, vload(q + 2), vload(p + 2)))
+                j += 4
+            }
+        }
+    }
+    mut sum := 0.0
+    for i in 0..n * n { sum += c[i] }
+    ret int(sum)
+}
+
+fn main() {
+    print(work())
+}

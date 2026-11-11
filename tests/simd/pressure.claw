@@ -1,0 +1,92 @@
+// Twenty-two vectors live at once do not fit in the registers: the extra ones are spilled, and everything still adds up.
+// expect: 946
+// expect: 946
+// expect: 7
+// expect: 8
+// expect: 3416
+// expect: 21
+claw fn noise(x int) int {
+    print(x)
+    ret x
+}
+
+claw fn total(a *f64, b *f64) f64 {
+    ret a[0] + a[1] + b[0] + b[1]
+}
+
+claw fn run() {
+    m := alloc[f64](64)
+    defer free(m)
+    for i in 0..64 { m[i] = f64(i) }
+    v0 := vload(m + 0)
+    v1 := vload(m + 2)
+    v2 := vload(m + 4)
+    v3 := vload(m + 6)
+    v4 := vload(m + 8)
+    v5 := vload(m + 10)
+    v6 := vload(m + 12)
+    v7 := vload(m + 14)
+    v8 := vload(m + 16)
+    v9 := vload(m + 18)
+    v10 := vload(m + 20)
+    v11 := vload(m + 22)
+    v12 := vload(m + 24)
+    v13 := vload(m + 26)
+    v14 := vload(m + 28)
+    v15 := vload(m + 30)
+    v16 := vload(m + 32)
+    v17 := vload(m + 34)
+    v18 := vload(m + 36)
+    v19 := vload(m + 38)
+    v20 := vload(m + 40)
+    v21 := vload(m + 42)
+    s := v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12 + v13 + v14 + v15 + v16 + v17 + v18 + v19 + v20 + v21
+    out := alloc[f64](2)
+    defer free(out)
+    vstore(out, s)
+    print(int(out[0] + out[1]))
+    r := v21 + v20 + v19 + v18 + v17 + v16 + v15 + v14 + v13 + v12 + v11 + v10 + v9 + v8 + v7 + v6 + v5 + v4 + v3 + v2 + v1 + v0
+    vstore(out, r)
+    print(int(out[0] + out[1]))
+}
+
+// A vector kept across calls goes to the stack and comes back unchanged.
+claw fn across() {
+    m := alloc[f64](8)
+    defer free(m)
+    for i in 0..8 { m[i] = f64(i * i) }
+    a := vload(m)
+    b := vload(m + 2)
+    c := vload(m + 4)
+    k := noise(7) + noise(8) * 0
+    d := a * b + c + f64x2(f64(k) * 0.0)
+    vstore(m, d)
+    print(int(m[0] + m[1] * 100.0 + m[2] * 0.0) + 7373 - 7373 + 0)
+}
+
+// An accumulator in a loop, a vector of floats against the same sum done lane by lane.
+claw fn loop() {
+    n := 1000
+    x := alloc[f64](n)
+    defer free(x)
+    for i in 0..n { x[i] = f64(i % 7) }
+    mut acc := f64x2(0.0)
+    mut i := 0
+    for i < n {
+        acc = acc + vload(x + i) * f64x2(2.0)
+        i += 2
+    }
+    mut lanes := 0.0
+    mut j := 0
+    for j < n {
+        lanes += x[j] * 2.0
+        j += 1
+    }
+    print(int(lane(acc, 0) + lane(acc, 1) - lanes) + 21)
+}
+
+fn main() {
+    run()
+    across()
+    loop()
+}

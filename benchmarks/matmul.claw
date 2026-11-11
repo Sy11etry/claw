@@ -1,0 +1,29 @@
+claw fn work() int {
+    n := 1024
+    a := alloc[f64](n * n)
+    b := alloc[f64](n * n)
+    c := alloc[f64](n * n)
+    defer free(a)
+    defer free(b)
+    defer free(c)
+    for i in 0..n * n {
+        a[i] = f64(i % 7 + 1)
+        b[i] = f64(i % 5 + 1)
+        c[i] = 0.0
+    }
+    for i in 0..n {
+        for k in 0..n {
+            x := a[i * n + k]
+            for j in 0..n {
+                c[i * n + j] += x * b[k * n + j]
+            }
+        }
+    }
+    mut sum := 0.0
+    for i in 0..n * n { sum += c[i] }
+    ret int(sum)
+}
+
+fn main() {
+    print(work())
+}

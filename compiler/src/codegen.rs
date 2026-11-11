@@ -8,6 +8,12 @@
 use crate::arm64::*;
 use crate::cir::*;
 use crate::regalloc::{self, Alloc, Place};
+use crate::types::Vk;
+
+/// Scratch vector registers; v31 is kept free of values when a function uses vectors.
+const V0: Reg = 0;
+const V1: Reg = 1;
+const V2: Reg = 31;
 
 const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"];
 const IMP_WRITE: usize = 0;
@@ -180,6 +186,8 @@ enum Pending {
 }
 
 struct Frame {
+    /// Which values are 128-bit vectors (empty when the function uses none).
+    vec: Vec<bool>,
     objects: Vec<u64>,
     alloc: Alloc,
     /// Where spilled values start in the frame.
@@ -195,6 +203,10 @@ impl Frame {
 
     fn slot(&self, n: u32) -> u32 {
         self.spill_base + n * 8
+    }
+
+    fn is_vec(&self, v: VReg) -> bool {
+        self.vec.get(v as usize).copied().unwrap_or(false)
     }
 }
 
@@ -272,6 +284,60 @@ impl Gen {
         match f.place(v) {
             Place::Fpr(d) => d,
             _ => scratch,
+        }
+    }
+
+    /// A vector register holding `v`: its own, or `scratch` after loading the spill slot.
+    fn vuse(&mut self, f: &Frame, v: VReg, scratch: Reg) -> Reg {
+        match f.place(v) {
+            Place::Fpr(d) => d,
+            Place::Slot(n) => {
+                self.vslot(f.slot(n), scratch, true);
+                scratch
+            }
+            // Never written: zero, like a variable nobody set.
+            _ => {
+                self.e(veor(scratch, scratch, scratch));
+                scratch
+            }
+        }
+    }
+
+    fn vdef(&self, f: &Frame, v: VReg, scratch: Reg) -> Reg {
+        match f.place(v) {
+            Place::Fpr(d) => d,
+            _ => scratch,
+        }
+    }
+
+    /// Writes the result in `r` to where `v` lives.
+    fn vdone(&mut self, f: &Frame, r: Reg, v: VReg) {
+        match f.place(v) {
+            Place::Slot(n) => self.vslot(f.slot(n), r, false),
+            Place::Fpr(d) if d != r => self.e(mov_v(d, r)),
+            _ => {}
+        }
+    }
+
+    /// The base register and offset for a 16-byte access at `[p + off]`.
+    fn vaddr(&mut self, f: &Frame, p: VReg, off: u64) -> (Reg, u32) {
+        let base = self.use_x(f, p, X9);
+        if off % 16 == 0 && off <= 65520 {
+            return (base, off as u32);
+        }
+        self.mov_imm(X10, off as i64);
+        self.e(add(X10, base, X10));
+        (X10, 0)
+    }
+
+    /// A 16-byte load or store at `[sp + off]`.
+    fn vslot(&mut self, off: u32, r: Reg, load: bool) {
+        if off <= 65520 {
+            self.e(if load { ldr_q(r, SP, off) } else { str_q(r, SP, off) });
+        } else {
+            self.mov_imm(X16, off as i64);
+            self.e(add_ext(X16, SP, X16));
+            self.e(if load { ldr_q(r, X16, 0) } else { str_q(r, X16, 0) });
         }
     }
 
@@ -674,7 +740,11 @@ impl Gen {
         }
         let alloc = if f.optimized { regalloc::allocate(f) } else { regalloc::naive(f) };
         let save_base = outgoing;
-        let spill_base = save_base + (alloc.saved_x.len() + alloc.saved_d.len()) as u32 * 8;
+        let mut spill_base = save_base + (alloc.saved_x.len() + alloc.saved_d.len()) as u32 * 8;
+        if alloc.vec_slots {
+            spill_base = (spill_base + 15) & !15;
+        }
+        let vec = if alloc.vec_slots { regalloc::vec_classes(f) } else { Vec::new() };
         let mut off = (spill_base + alloc.slots * 8) as u64;
         let mut objects = Vec::with_capacity(f.objects.len());
         for (size, align) in &f.objects {
@@ -688,7 +758,7 @@ impl Gen {
             return;
         }
         let size = size as u32;
-        let fr = Frame { objects, alloc, spill_base, save_base };
+        let fr = Frame { vec, objects, alloc, spill_base, save_base };
 
         self.e(stp_pre(FP, LR, SP, -16));
         self.e(mov_sp(FP, SP));
@@ -961,6 +1031,14 @@ impl Gen {
                     self.store(fr, X9, *d);
                 }
             }
+            Inst::Mov { d, s } if fr.is_vec(*d) => {
+                let rs = self.vuse(fr, *s, V0);
+                let rd = self.vdef(fr, *d, V0);
+                if rd != rs {
+                    self.e(mov_v(rd, rs));
+                }
+                self.vdone(fr, rd, *d);
+            }
             Inst::Mov { d, s } => {
                 if let Place::Fpr(x) = fr.place(*d) {
                     self.fload(fr, x, *s, 64);
@@ -1042,6 +1120,91 @@ impl Gen {
                 self.store(fr, X11, *d);
             }
             Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("gone before code generation"),
+            Inst::VBin { op, d, a, b, ty } => {
+                let ra = self.vuse(fr, *a, V0);
+                let rb = self.vuse(fr, *b, V1);
+                let rd = self.vdef(fr, *d, V0);
+                self.e(match (ty, op) {
+                    (Vk::F64x2, FArith::Add) => vfadd(rd, ra, rb, Arr::D2),
+                    (Vk::F64x2, FArith::Sub) => vfsub(rd, ra, rb, Arr::D2),
+                    (Vk::F64x2, FArith::Mul) => vfmul(rd, ra, rb, Arr::D2),
+                    (Vk::F64x2, FArith::Div) => vfdiv(rd, ra, rb, Arr::D2),
+                    (Vk::F32x4, FArith::Add) => vfadd(rd, ra, rb, Arr::S4),
+                    (Vk::F32x4, FArith::Sub) => vfsub(rd, ra, rb, Arr::S4),
+                    (Vk::F32x4, FArith::Mul) => vfmul(rd, ra, rb, Arr::S4),
+                    (Vk::F32x4, FArith::Div) => vfdiv(rd, ra, rb, Arr::S4),
+                    (Vk::I32x4, FArith::Add) => vadd4s(rd, ra, rb),
+                    (Vk::I32x4, FArith::Sub) => vsub4s(rd, ra, rb),
+                    (Vk::I32x4, FArith::Mul) => vmul4s(rd, ra, rb),
+                    (Vk::I32x4, FArith::Div) => unreachable!("the checker refuses `/` on i32x4"),
+                });
+                self.vdone(fr, rd, *d);
+            }
+            Inst::VFma { d, a, b, c, ty } => {
+                let ra = self.vuse(fr, *a, V0);
+                let rb = self.vuse(fr, *b, V1);
+                let rc = self.vuse(fr, *c, V2);
+                // Fused multiply-add accumulates into its destination, which must not be an operand.
+                let rd = match fr.place(*d) {
+                    Place::Fpr(x) if x != ra && x != rb => x,
+                    _ => V2,
+                };
+                if rd != rc {
+                    self.e(mov_v(rd, rc));
+                }
+                self.e(vfmla(rd, ra, rb, if *ty == Vk::F64x2 { Arr::D2 } else { Arr::S4 }));
+                self.vdone(fr, rd, *d);
+            }
+            Inst::VNeg { d, s, ty } => {
+                let rs = self.vuse(fr, *s, V0);
+                let rd = self.vdef(fr, *d, V0);
+                self.e(match ty {
+                    Vk::F64x2 => vfneg(rd, rs, Arr::D2),
+                    Vk::F32x4 => vfneg(rd, rs, Arr::S4),
+                    Vk::I32x4 => vneg4s(rd, rs),
+                });
+                self.vdone(fr, rd, *d);
+            }
+            Inst::VSplat { d, s, ty } => {
+                let rd = self.vdef(fr, *d, V0);
+                match ty {
+                    Vk::F64x2 | Vk::F32x4 => {
+                        let rs = self.use_d(fr, *s, D0, if *ty == Vk::F64x2 { 64 } else { 32 });
+                        self.e(vdup_lane0(rd, rs, if *ty == Vk::F64x2 { Arr::D2 } else { Arr::S4 }));
+                    }
+                    Vk::I32x4 => {
+                        let rs = self.use_x(fr, *s, X9);
+                        self.e(vdup_x(rd, rs, Arr::S4));
+                    }
+                }
+                self.vdone(fr, rd, *d);
+            }
+            Inst::VLoad { d, p, off, .. } => {
+                let rp = self.vaddr(fr, *p, *off);
+                let rd = self.vdef(fr, *d, V0);
+                self.e(ldr_q(rd, rp.0, rp.1));
+                self.vdone(fr, rd, *d);
+            }
+            Inst::VStore { p, off, s, .. } => {
+                let rs = self.vuse(fr, *s, V0);
+                let rp = self.vaddr(fr, *p, *off);
+                self.e(str_q(rs, rp.0, rp.1));
+            }
+            Inst::VLane { d, s, lane, ty } => {
+                let rs = self.vuse(fr, *s, V0);
+                match ty {
+                    Vk::F64x2 | Vk::F32x4 => {
+                        let rd = self.def_d(fr, *d, D0);
+                        self.e(vdup_scalar(rd, rs, *lane as u32, if *ty == Vk::F64x2 { Arr::D2 } else { Arr::S4 }));
+                        self.fstore(fr, rd, *d, if *ty == Vk::F64x2 { 64 } else { 32 });
+                    }
+                    Vk::I32x4 => {
+                        let rd = self.def_x(fr, *d, X9);
+                        self.e(vsmov_s(rd, rs, *lane as u32));
+                        self.done_x(fr, rd, *d);
+                    }
+                }
+            }
             Inst::Line { loc } => {
                 // The first line of a function covers its prologue too.
                 let at = self.func_first.take().unwrap_or_else(|| self.here());
@@ -1483,6 +1646,11 @@ impl Gen {
 
     /// `normalize`, for a result that is not in x11.
     fn normalize_in(&mut self, num: Num, loc: Loc, traps: &mut Traps, r: Reg) {
+        // A 64-bit result without a check needs nothing: do not shuttle it through x11 for no reason.
+        let emits = if num.signed { num.bits < 64 && num.checked } else { num.bits < 64 };
+        if !emits {
+            return;
+        }
         if r != X11 {
             self.e(mov(X11, r));
         }

@@ -1,0 +1,7 @@
+// error: E0909
+claw fn demo() {
+    print(f64x2(1.0))
+}
+
+fn main() {
+}

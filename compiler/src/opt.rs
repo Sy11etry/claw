@@ -908,7 +908,7 @@ fn licm(f: &mut Func) {
             let old = std::mem::take(&mut f.blocks[b].insts);
             let mut keep = Vec::with_capacity(old.len());
             for i in old {
-                let movable = i.removable() && !matches!(i, Inst::Phi { .. } | Inst::Pi { .. } | Inst::Load { .. } | Inst::Cmp { .. } | Inst::FCmp { .. } | Inst::ObjAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::Mov { .. });
+                let movable = i.removable() && !matches!(i, Inst::Phi { .. } | Inst::Pi { .. } | Inst::Load { .. } | Inst::VLoad { .. } | Inst::Cmp { .. } | Inst::FCmp { .. } | Inst::ObjAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::Mov { .. });
                 // A float constant costs two instructions each time; an integer one is usually an immediate.
                 let movable = movable || matches!(&i, Inst::Const { d, v } if float[*d as usize] || !crate::regalloc::cheap_const(*v));
                 let mut inside = false;

@@ -8,7 +8,8 @@ import time
 HERE = pathlib.Path(__file__).resolve().parent
 OUT = HERE / "out"
 CLAW = HERE.parent / "compiler/target/release/claw"
-BENCHES = ["fib", "primes", "collatz", "sieve", "mandel", "list", "vec"]
+# (name, the C program to compare with): the SIMD version answers the same question as the plain one.
+BENCHES = [(b, b) for b in ["fib", "primes", "collatz", "sieve", "mandel", "list", "vec", "matmul"]] + [("matmul_simd", "matmul")]
 RUNS = 5
 
 
@@ -48,11 +49,11 @@ def measure_compile_speed():
 def main():
     OUT.mkdir(exist_ok=True)
     rows = []
-    for b in BENCHES:
+    for b, c in BENCHES:
         subprocess.run([CLAW, "build", HERE / f"{b}.claw", "-o", OUT / f"{b}_claw"], check=True)
         subprocess.run([CLAW, "build", HERE / f"{b}.claw", "-o", OUT / f"{b}_fast", "--fast"], check=True)
         for opt in ["O0", "O2"]:
-            subprocess.run(["clang", f"-{opt}", HERE / f"{b}.c", "-o", OUT / f"{b}_{opt}"], check=True)
+            subprocess.run(["clang", f"-{opt}", HERE / f"{c}.c", "-o", OUT / f"{b}_{opt}"], check=True)
         claw = median_run(OUT / f"{b}_claw")
         fast = median_run(OUT / f"{b}_fast")
         o0 = median_run(OUT / f"{b}_O0")

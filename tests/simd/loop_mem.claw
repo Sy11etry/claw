@@ -1,0 +1,37 @@
+// expect: 1024
+// expect: 1024
+// expect: 27
+// A vector load must not move out of a loop that stores to the same memory.
+claw fn doubling(p *f64, n int) {
+    for _ in 0..n {
+        v := vload(p)
+        vstore(p, v + v)
+    }
+}
+
+claw fn prefix(p *f64, n int) {
+    for i in 0..n - 2 {
+        v := vload(p + i)
+        w := f64x2(1.0)
+        vstore(p + i + 1, v + w)
+    }
+}
+
+claw fn main_simd() {
+    a := alloc[f64](8)
+    defer free(a)
+    a[0] = 1.0
+    a[1] = 1.0
+    doubling(a, 10)
+    print(int(a[0]))
+    print(int(a[1]))
+    for i in 0..8 { a[i] = 0.0 }
+    prefix(a, 8)
+    mut s := 0.0
+    for i in 0..8 { s += a[i] }
+    print(int(s))
+}
+
+fn main() {
+    main_simd()
+}

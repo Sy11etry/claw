@@ -3,7 +3,7 @@
 //! A vreg holds a scalar (integers kept sign- or zero-extended to 64 bits, floats
 //! as raw bits) or the address of an aggregate.
 
-use crate::types::Ty;
+use crate::types::{Ty, Vk};
 
 pub type VReg = u32;
 pub type BlockId = usize;
@@ -155,6 +155,17 @@ pub enum Inst {
     Line { loc: Loc },
     /// Only in code for the interpreter: variable `name` now holds `v`.
     Note { name: String, v: VReg, show: Show },
+    /// SIMD, from `claw fn` only: a 128-bit value in one vector register. `Add Sub Mul`, and `Div` on floats.
+    VBin { op: FArith, d: VReg, a: VReg, b: VReg, ty: Vk },
+    /// `d = a * b + c`, fused.
+    VFma { d: VReg, a: VReg, b: VReg, c: VReg, ty: Vk },
+    VNeg { d: VReg, s: VReg, ty: Vk },
+    /// Every lane gets the scalar `s`.
+    VSplat { d: VReg, s: VReg, ty: Vk },
+    VLoad { d: VReg, p: VReg, off: u64 },
+    VStore { p: VReg, off: u64, s: VReg },
+    /// One lane as a scalar of the lane type (an `i32x4` lane is sign-extended to 64 bits).
+    VLane { d: VReg, s: VReg, lane: u8, ty: Vk },
 }
 
 /// How a variable's value reads in a report.
@@ -239,6 +250,7 @@ macro_rules! walk_inst {
         match $i {
             Inst::Const { d, .. } | Inst::ObjAddr { d, .. } | Inst::StrAddr { d, .. } | Inst::RtState { d } | Inst::DataAddr { d, .. } | Inst::ConstRef { d, .. } | Inst::FuncAddr { d, .. } => $f(d, true),
             Inst::Mov { d, s } | Inst::BitNot { d, s, .. } | Inst::BoolNot { d, s } | Inst::Neg { d, s, .. } | Inst::FNeg { d, s, .. }
+            | Inst::VNeg { d, s, .. } | Inst::VSplat { d, s, .. } | Inst::VLane { d, s, .. }
             | Inst::IntCast { d, s, .. } | Inst::IntToFloat { d, s, .. } | Inst::FloatToInt { d, s, .. } | Inst::FloatCast { d, s, .. }
             | Inst::AddImm { d, s, .. } => {
                 $f(s, false);
@@ -255,10 +267,24 @@ macro_rules! walk_inst {
                 }
                 $f(d, true);
             }
-            Inst::Bin { d, a, b, .. } | Inst::Cmp { d, a, b, .. } | Inst::FBin { d, a, b, .. } | Inst::FCmp { d, a, b, .. } => {
+            Inst::Bin { d, a, b, .. } | Inst::Cmp { d, a, b, .. } | Inst::FBin { d, a, b, .. } | Inst::FCmp { d, a, b, .. } | Inst::VBin { d, a, b, .. } => {
                 $f(a, false);
                 $f(b, false);
                 $f(d, true);
+            }
+            Inst::VFma { d, a, b, c, .. } => {
+                $f(a, false);
+                $f(b, false);
+                $f(c, false);
+                $f(d, true);
+            }
+            Inst::VLoad { d, p, .. } => {
+                $f(p, false);
+                $f(d, true);
+            }
+            Inst::VStore { p, s, .. } => {
+                $f(p, false);
+                $f(s, false);
             }
             Inst::Call { d, args, .. } => {
                 for a in args {
@@ -388,7 +414,7 @@ impl Inst {
     /// If the result is unused, may this instruction simply disappear?
     pub fn removable(&self) -> bool {
         match self {
-            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } | Inst::DataAddr { .. } | Inst::FuncAddr { .. } => true,
+            Inst::Const { .. } | Inst::Mov { .. } | Inst::Phi { .. } | Inst::Pi { .. } | Inst::BitNot { .. } | Inst::BoolNot { .. } | Inst::Cmp { .. } | Inst::FBin { .. } | Inst::FNeg { .. } | Inst::FCmp { .. } | Inst::IntToFloat { .. } | Inst::FloatCast { .. } | Inst::ObjAddr { .. } | Inst::AddImm { .. } | Inst::Load { .. } | Inst::IndexAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::WideCmp { .. } | Inst::DataAddr { .. } | Inst::FuncAddr { .. } | Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VLane { .. } => true,
             Inst::Bin { op, num, .. } => match op {
                 Arith::And | Arith::Or | Arith::Xor => true,
                 Arith::Add | Arith::Sub | Arith::Mul => !num.signed || !num.checked,

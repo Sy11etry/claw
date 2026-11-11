@@ -23,6 +23,7 @@ tools/fuzz_opt.py  random programs: optimized and unoptimized builds must agree.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
 tests/par/*.claw  tasks: checked run and real threads must print the same; err_*.claw must be rejected.
 tests/debug/*.claw  lldb stops at the right line.
+tests/simd/*.claw  SIMD vectors: checked run, three build modes and the interpreter agree; err_*.claw must be rejected.
 Linux target: the ELF is checked, and with qemu and an Alpine image the programs run there too.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
@@ -411,6 +412,28 @@ def linux_test(tmp):
     return None, True
 
 
+def simd_test(path, tmp):
+    """SIMD vectors: the checked run, all three build modes and the interpreter must print the same."""
+    text = path.read_text()
+    want = headers(text, "expect")
+    runs = [([CLAW, "run", path], "claw run"), ([CLAW, "__interp", path], "interpreter")]
+    for mode in ([], ["--no-opt"], ["--fast"]):
+        exe = tmp / ("simd_" + path.stem + "".join(mode))
+        b = child([CLAW, "build", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode != 0:
+            return f"compile {mode} failed:\n{b.stderr}"
+        runs.append(([exe], f"build {' '.join(mode)}".strip()))
+    for cmd, what in runs:
+        r = child(cmd, capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+        if r.returncode != 0 or r.stdout.splitlines() != want:
+            return f"{what}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
+    # The x86-64 back end has no vector code yet: it must say so, not miscompile.
+    x = child([CLAW, "build", "--target", "x86_64", path, "-o", tmp / "simd_x86"], capture_output=True, text=True, env={"PATH": ""})
+    if x.returncode == 0 or "E0907" not in x.stderr:
+        return f"--target x86_64 should refuse SIMD with E0907, got exit {x.returncode}: {x.stderr}"
+    return None
+
+
 def err_test(path):
     text = path.read_text()
     want = sorted(c.strip() for c in headers(text, "error"))
@@ -528,6 +551,12 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL par/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/simd").glob("*.claw")):
+            total += 1
+            msg = err_test(path) if path.name.startswith("err_") else simd_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL simd/{path.name}: {msg}")
         total += 1
         msg, ran = linux_test(tmp)
         if msg:

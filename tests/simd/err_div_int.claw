@@ -1,0 +1,9 @@
+// error: E0909
+claw fn demo() {
+    a := i32x4(8)
+    b := a / i32x4(2)
+    print(lane(b, 0))
+}
+
+fn main() {
+}

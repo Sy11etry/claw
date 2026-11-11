@@ -653,6 +653,7 @@ fn kind_text(k: Kind) -> String {
         Kind::Option(p) => format!("opt {}", p.0),
         Kind::Result(a, b) => format!("result {} {}", a.0, b.0),
         Kind::Fn(id) => format!("fn {id}"),
+        Kind::Vec(v) => format!("vec {}", v.name()),
     }
 }
 

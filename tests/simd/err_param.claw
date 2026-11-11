@@ -1,0 +1,7 @@
+// error: E0906
+claw fn twice(v f64x2) f64x2 {
+    ret v + v
+}
+
+fn main() {
+}

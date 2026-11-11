@@ -1,0 +1,8 @@
+// error: E0906
+claw fn demo() {
+    xs [4]i32x4 = [i32x4(0)...]
+    print(len(xs))
+}
+
+fn main() {
+}

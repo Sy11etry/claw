@@ -123,6 +123,9 @@ struct Global<'a> {
 
 const MAX_INSTANCE_DEPTH: u32 = 32;
 const MAX_INSTANCES: usize = 20_000;
+/// A template that keeps wrapping its argument (`f([x, x])` inside `f`) is caught here
+/// long before it makes 20,000 ever-longer type names.
+const MAX_TYPE_NEST: u32 = 64;
 
 fn private_msg(name: &str) -> String {
     format!("`{name}` is private to its module; mark it `pub` there")
@@ -148,6 +151,16 @@ impl<'a> Global<'a> {
     }
 
     fn resolve(&mut self, t: &TypeExpr, diags: &mut Vec<Diag>) -> Ty {
+        let r = self.resolve_kind(t, diags);
+        // A SIMD value is a register: it cannot sit inside anything or be reached through a pointer.
+        if r != ERR && !self.types.is_vec(r) && self.types.holds_vec(r) && !matches!(self.types.kind(r), Kind::Struct(_) | Kind::Enum(_)) {
+            diags.push(Diag::new("E0906", t.span, "a SIMD value lives in a register: it cannot be an element, option, pointer target or part of a function type; use a pointer to its lanes and `vload`/`vstore`"));
+            return ERR;
+        }
+        r
+    }
+
+    fn resolve_kind(&mut self, t: &TypeExpr, diags: &mut Vec<Diag>) -> Ty {
         match &t.kind {
             TypeKind::Name { module, name, targs } => self.resolve_name(t.span, module.as_deref(), name, targs, diags),
             TypeKind::Pointer(inner) => {
@@ -234,6 +247,9 @@ impl<'a> Global<'a> {
             }
             if let Some(p) = prim(name) {
                 return p;
+            }
+            if let Some(v) = Vk::from_name(name) {
+                return self.types.intern(Kind::Vec(v));
             }
             if name == "str" {
                 return STR;
@@ -403,6 +419,10 @@ impl<'a> Global<'a> {
                 self.types.structs[id].state = 1;
                 let fields = self.types.structs[id].fields.clone();
                 for f in &fields {
+                    if self.types.holds_vec(f.ty) {
+                        let span = self.spans.get(&t).copied().unwrap_or_default();
+                        diags.push(Diag::new("E0906", span, "a SIMD value cannot be a field; keep the lanes in an array and use `vload`/`vstore`"));
+                    }
                     self.ensure_layout(f.ty, diags);
                 }
                 let (placed, end, al) = self.place_fields(&fields, 0);
@@ -470,7 +490,7 @@ impl<'a> Global<'a> {
             n += 1;
             full = format!("{base}#{n}");
         }
-        if self.work.len() >= MAX_INSTANCES || self.sigs.len() >= MAX_INSTANCES {
+        if self.work.len() >= MAX_INSTANCES || self.sigs.len() >= MAX_INSTANCES || targs.iter().any(|t| self.types.nest(*t) > MAX_TYPE_NEST) {
             if !std::mem::replace(&mut self.too_many, true) {
                 diags.push(Diag::new("E0145", f.name_span, format!("`{}` keeps instantiating itself with new types", f.name)));
             }
@@ -483,6 +503,10 @@ impl<'a> Global<'a> {
         let ret = f.ret.as_ref().map(|t| self.resolve(t, diags)).unwrap_or(VOID);
         self.tenv = saved_env;
         self.cur = saved_cur;
+        let params: Vec<Ty> = params;
+        if params.iter().any(|t| self.types.holds_vec(*t)) || self.types.holds_vec(ret) {
+            diags.push(Diag::new("E0906", f.name_span, "a SIMD value cannot be a parameter or a result, also not through a template argument"));
+        }
         let own = f.params.iter().map(|p| p.own).collect();
         let has_need = f.contracts.iter().any(|c| !c.sure);
         self.sigs.insert(full.clone(), FnSig { params, own, ret, ext: None, variadic: false, has_need });
@@ -859,6 +883,9 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
             if let Some(span) = bad.or(if g.types.is_ptr(ret) { Some(f.name_span) } else { None }) {
                 diags.push(Diag::new("E0140", span, "pointers only exist inside `claw fn`").suggest(Span { start: f.name_span.start.saturating_sub(3), end: f.name_span.start.saturating_sub(3), ..f.name_span }, "claw ", "make it a `claw fn`"));
             }
+        }
+        if let Some(span) = f.params.iter().zip(&params).find(|(_, t)| g.types.holds_vec(**t)).map(|(x, _)| x.span).or(if g.types.holds_vec(ret) { Some(f.name_span) } else { None }) {
+            diags.push(Diag::new("E0906", span, "a SIMD value cannot be a parameter or a result; pass a pointer to its lanes and use `vload`/`vstore`"));
         }
         g.mods[g.cur].funcs.insert(f.name.clone(), (None, f.public));
         let own = f.params.iter().map(|p| p.own).collect();
@@ -1380,6 +1407,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
         self.value_type(span, ty);
         if matches!(self.kind(ty), Kind::Fn(_)) {
             self.err("E0104", span, "a function has nothing to print");
+        }
+        if let Kind::Vec(v) = self.kind(ty) {
+            self.err("E0909", span, format!("`print` does not take a {}; print its lanes with `lane(v, i)`", v.name()));
         }
         if self.g.types.contains_itself(ty) {
             let n = self.tname(ty);
@@ -2334,7 +2364,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             UnOp::Neg => {
                 let t = self.expr(inner, hint);
                 match self.kind(t) {
-                    Kind::Int { signed: true, .. } | Kind::Float { .. } | Kind::Err => t,
+                    Kind::Int { signed: true, .. } | Kind::Float { .. } | Kind::Vec(_) | Kind::Err => t,
                     _ => {
                         let n = self.tname(t);
                         self.err("E0104", e.span, format!("`-` needs a signed number, found {n}"))
@@ -2409,6 +2439,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     return ERR;
                 }
                 let int_only = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
+                if let Kind::Vec(v) = self.kind(a) {
+                    if int_only || (op == BinOp::Div && !v.is_float()) {
+                        return self.err("E0909", l.span, format!("`{}` is not available on {}: vectors have `+ - *`, and `/` on float lanes", op.text(), v.name()));
+                    }
+                    return a;
+                }
                 let ok = if int_only { self.g.types.is_int(a) } else { self.g.types.is_num(a) };
                 if !ok && a != ERR {
                     let n = self.tname(a);
@@ -2466,6 +2502,24 @@ impl<'a, 'b> Ctx<'a, 'b> {
                         self.err("E0104", args[0].span, format!("`len` needs an array, found {n}"))
                     }
                 }
+            }
+            // SIMD, `claw fn` only. A function of the same name in the program wins.
+            "f64x2" | "f32x4" | "i32x4" => {
+                if !self.func.claw {
+                    return Some(self.err("E0905", span, "SIMD vectors only exist inside `claw fn`"));
+                }
+                let vk = Vk::from_name(name)?;
+                if args.len() != 1 {
+                    return Some(self.err("E0106", span, format!("`{name}(x)` fills every lane with 1 value, found {}", args.len())));
+                }
+                self.check(&args[0], vk.elem());
+                self.g.types.intern(Kind::Vec(vk))
+            }
+            "vload" | "vstore" | "lane" | "fma" if !self.g.mods[self.g.cur].funcs.contains_key(name) => {
+                if !self.func.claw {
+                    return Some(self.err("E0905", span, "SIMD vectors only exist inside `claw fn`"));
+                }
+                self.simd(name, span, args)
             }
             "__state" if self.g.mods[self.g.cur].prefix == "__check." => self.g.types.intern(Kind::Pointer(INT)),
             // For `std/par.claw` only: whether tasks must run one after another, and where a task's thread starts.
@@ -2563,6 +2617,67 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 target
             }
         })
+    }
+
+    /// `vload(p)`, `vstore(p, v)`, `lane(v, i)` and `fma(a, b, c)`.
+    fn simd(&mut self, name: &str, span: Span, args: &[Expr]) -> Ty {
+        let want = match name {
+            "vload" => 1,
+            "lane" | "vstore" => 2,
+            _ => 3,
+        };
+        if args.len() != want {
+            for a in args {
+                self.expr(a, None);
+            }
+            return self.err("E0106", span, format!("`{name}` takes {want} values, found {}", args.len()));
+        }
+        match name {
+            "vload" => {
+                let t = self.expr(&args[0], None);
+                match self.kind(t) {
+                    Kind::Pointer(e) => match Vk::of_elem(e) {
+                        Some(v) => self.g.types.intern(Kind::Vec(v)),
+                        None => self.err("E0908", args[0].span, "`vload` needs a pointer to `f64`, `f32` or `i32`"),
+                    },
+                    Kind::Err => ERR,
+                    _ => self.err("E0908", args[0].span, "`vload` needs a pointer to `f64`, `f32` or `i32`"),
+                }
+            }
+            "vstore" => {
+                let t = self.expr(&args[0], None);
+                let v = self.expr(&args[1], None);
+                match (self.kind(t), self.kind(v)) {
+                    (Kind::Pointer(e), Kind::Vec(vk)) if vk.elem() == e => VOID,
+                    (Kind::Err, _) | (_, Kind::Err) => VOID,
+                    _ => self.err("E0908", span, "`vstore(p, v)` needs a vector and a pointer to its lane type"),
+                }
+            }
+            "lane" => {
+                let v = self.expr(&args[0], None);
+                let at = match &args[1].kind {
+                    ExprKind::Int(n) => Some(*n),
+                    _ => None,
+                };
+                self.expr(&args[1], Some(INT));
+                match (self.kind(v), at) {
+                    (Kind::Vec(vk), Some(n)) if n >= 0 && n < vk.lanes() as i128 => vk.elem(),
+                    (Kind::Vec(vk), _) => self.err("E0908", args[1].span, format!("`lane(v, i)` needs a number literal from 0 to {}", vk.lanes() - 1)),
+                    (Kind::Err, _) => ERR,
+                    _ => self.err("E0908", args[0].span, "`lane` needs a vector"),
+                }
+            }
+            _ => {
+                let a = self.expr(&args[0], None);
+                self.check(&args[1], a);
+                self.check(&args[2], a);
+                match self.kind(a) {
+                    Kind::Vec(vk) if vk.is_float() => a,
+                    Kind::Err => ERR,
+                    _ => self.err("E0908", args[0].span, "`fma(a, b, c)` computes `a * b + c` on `f64x2` or `f32x4`"),
+                }
+            }
+        }
     }
 
     fn one_targ(&mut self, name: &str, span: Span, targs: &[TypeExpr]) -> Option<Ty> {

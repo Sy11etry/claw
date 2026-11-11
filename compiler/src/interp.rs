@@ -3,6 +3,7 @@
 //! each value remembers the last event that made it, so a failure can be walked backwards.
 
 use crate::cir::*;
+use crate::types::Vk;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 
@@ -238,6 +239,8 @@ pub struct Machine<'m> {
     quarantine: VecDeque<u32>,
     frames: Vec<Frame>,
     regs: Vec<u64>,
+    /// The upper 64 bits of 128-bit vector values, parallel to `regs`.
+    hi: Vec<u64>,
     objs: Vec<u64>,
     /// Bytes in live heap blocks.
     used: u64,
@@ -342,6 +345,58 @@ fn compare<T: PartialOrd>(cc: Cc, a: T, b: T) -> u64 {
         Cc::Gt => a > b,
         Cc::Ge => a >= b,
     }) as u64
+}
+
+/// A vector as its four 32-bit or two 64-bit lanes, low lane first.
+fn lanes32(v: (u64, u64)) -> [u32; 4] {
+    [v.0 as u32, (v.0 >> 32) as u32, v.1 as u32, (v.1 >> 32) as u32]
+}
+
+fn from_lanes32(l: [u32; 4]) -> (u64, u64) {
+    (l[0] as u64 | (l[1] as u64) << 32, l[2] as u64 | (l[3] as u64) << 32)
+}
+
+fn vec_bin(op: FArith, ty: Vk, a: (u64, u64), b: (u64, u64)) -> (u64, u64) {
+    match ty {
+        Vk::F64x2 => (float_bin(op, a.0, b.0, 64), float_bin(op, a.1, b.1, 64)),
+        Vk::F32x4 => {
+            let (x, y) = (lanes32(a), lanes32(b));
+            from_lanes32(std::array::from_fn(|i| float_bin(op, x[i] as u64, y[i] as u64, 32) as u32))
+        }
+        Vk::I32x4 => {
+            let (x, y) = (lanes32(a), lanes32(b));
+            from_lanes32(std::array::from_fn(|i| match op {
+                FArith::Add => x[i].wrapping_add(y[i]),
+                FArith::Sub => x[i].wrapping_sub(y[i]),
+                _ => x[i].wrapping_mul(y[i]),
+            }))
+        }
+    }
+}
+
+fn vec_fma(ty: Vk, a: (u64, u64), b: (u64, u64), c: (u64, u64)) -> (u64, u64) {
+    let f64s = |x: u64, y: u64, z: u64| f64::from_bits(x).mul_add(f64::from_bits(y), f64::from_bits(z)).to_bits();
+    match ty {
+        Vk::F64x2 => (f64s(a.0, b.0, c.0), f64s(a.1, b.1, c.1)),
+        _ => {
+            let (x, y, z) = (lanes32(a), lanes32(b), lanes32(c));
+            from_lanes32(std::array::from_fn(|i| f32::from_bits(x[i]).mul_add(f32::from_bits(y[i]), f32::from_bits(z[i])).to_bits()))
+        }
+    }
+}
+
+fn vec_neg(ty: Vk, a: (u64, u64)) -> (u64, u64) {
+    match ty {
+        Vk::F64x2 => (a.0 ^ (1 << 63), a.1 ^ (1 << 63)),
+        Vk::F32x4 => {
+            let x = lanes32(a);
+            from_lanes32(std::array::from_fn(|i| x[i] ^ 0x8000_0000))
+        }
+        Vk::I32x4 => {
+            let x = lanes32(a);
+            from_lanes32(std::array::from_fn(|i| (x[i] as i32).wrapping_neg() as u32))
+        }
+    }
 }
 
 fn float_bin(op: FArith, a: u64, b: u64, bits: u8) -> u64 {
@@ -507,6 +562,7 @@ impl<'m> Machine<'m> {
             quarantine: VecDeque::new(),
             frames: Vec::new(),
             regs: Vec::new(),
+            hi: Vec::new(),
             objs: Vec::new(),
             used: 0,
             steps: 0,
@@ -819,6 +875,7 @@ impl<'m> Machine<'m> {
         let f = &self.m.funcs[func];
         let base = self.regs.len();
         self.regs.resize(base + f.nvregs as usize, 0);
+        self.hi.resize(base + f.nvregs as usize, 0);
         let obj_base = self.objs.len();
         self.objs.resize(obj_base + f.objects.len(), 0);
         let ctrl_base = self.trace.branches.len();
@@ -841,6 +898,7 @@ impl<'m> Machine<'m> {
         }
         self.objs.truncate(fr.obj_base);
         self.regs.truncate(fr.base);
+        self.hi.truncate(fr.base);
         if self.cfg.trace {
             self.trace.regs.truncate(fr.base);
             self.trace.branches.truncate(fr.ctrl_base);
@@ -1013,8 +1071,64 @@ impl<'m> Machine<'m> {
                     }
                     match inst {
                         Inst::Const { d, v } => r!(*d) = *v as u64,
-                        Inst::Mov { d, s } => r!(*d) = r!(*s),
+                        Inst::Mov { d, s } => {
+                            r!(*d) = r!(*s);
+                            self.hi[base + *d as usize] = self.hi[base + *s as usize];
+                        }
                         Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("the interpreter runs code before SSA"),
+                        Inst::VBin { op, d, a, b: c, ty } => {
+                            let (x, y) = ((r!(*a), self.hi[base + *a as usize]), (r!(*c), self.hi[base + *c as usize]));
+                            let (lo, hi) = vec_bin(*op, *ty, x, y);
+                            r!(*d) = lo;
+                            self.hi[base + *d as usize] = hi;
+                        }
+                        Inst::VFma { d, a, b: c, c: acc, ty } => {
+                            let get = |m: &Self, v: VReg| (m.regs[base + v as usize], m.hi[base + v as usize]);
+                            let (x, y, z) = (get(self, *a), get(self, *c), get(self, *acc));
+                            let (lo, hi) = vec_fma(*ty, x, y, z);
+                            r!(*d) = lo;
+                            self.hi[base + *d as usize] = hi;
+                        }
+                        Inst::VNeg { d, s, ty } => {
+                            let x = (r!(*s), self.hi[base + *s as usize]);
+                            let (lo, hi) = vec_neg(*ty, x);
+                            r!(*d) = lo;
+                            self.hi[base + *d as usize] = hi;
+                        }
+                        Inst::VSplat { d, s, ty } => {
+                            let x = r!(*s);
+                            let (lo, hi) = match ty {
+                                Vk::F64x2 => (x, x),
+                                Vk::F32x4 | Vk::I32x4 => {
+                                    let w = (x & 0xFFFF_FFFF) * 0x1_0000_0001;
+                                    (w, w)
+                                }
+                            };
+                            r!(*d) = lo;
+                            self.hi[base + *d as usize] = hi;
+                        }
+                        Inst::VLoad { d, p, off, .. } => {
+                            let a = r!(*p).wrapping_add(*off);
+                            let lo = mem!(self.load(a, Mem::X64), &[*p]);
+                            let hi = mem!(self.load(a.wrapping_add(8), Mem::X64), &[*p]);
+                            r!(*d) = lo;
+                            self.hi[base + *d as usize] = hi;
+                        }
+                        Inst::VStore { p, off, s, .. } => {
+                            let a = r!(*p).wrapping_add(*off);
+                            let (lo, hi) = (r!(*s), self.hi[base + *s as usize]);
+                            mem!(self.store(a, lo, Mem::X64), &[*p]);
+                            mem!(self.store(a.wrapping_add(8), hi, Mem::X64), &[*p]);
+                        }
+                        Inst::VLane { d, s, lane, ty } => {
+                            let (lo, hi) = (r!(*s), self.hi[base + *s as usize]);
+                            let word = if (*lane as u32) < ty.lanes() / 2 { lo } else { hi };
+                            r!(*d) = match ty {
+                                Vk::F64x2 => word,
+                                Vk::F32x4 => (word >> (32 * (*lane as u32 % 2))) & 0xFFFF_FFFF,
+                                Vk::I32x4 => (((word >> (32 * (*lane as u32 % 2))) as u32) as i32) as i64 as u64,
+                            };
+                        }
                         Inst::Bin { op, d, a, b: c, num, loc } => {
                             let (x, y) = (r!(*a), r!(*c));
                             match arith(*op, x, y, *num) {

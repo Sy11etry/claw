@@ -4,7 +4,7 @@
 usage: linux_check.py [--iso path/to/alpine-virt-aarch64.iso] [--keep] [--cmd 'shell commands to try first'] [test.claw ...]
 Needs qemu-system-aarch64 (HVF) and an Alpine "virt" aarch64 ISO. Nothing is installed: the ISO boots as a live
 system in RAM, the programs arrive on a second raw disk as a tar archive, and the output comes back on the serial line.
-With no test files it takes every program in tests/run, tests/own and tests/par that has no `// exit:` or
+With no test files it takes every program in tests/run, tests/own, tests/par and tests/simd that has no `// exit:` or
 `// build-only:` header. Output and exit code 0 must match the `// expect:` lines.
 """
 import glob
@@ -101,6 +101,7 @@ def main():
         sorted((ROOT / "tests/run").glob("*.claw"))
         + sorted((ROOT / "tests/own").glob("*.claw"))
         + [p for p in sorted((ROOT / "tests/par").glob("*.claw")) if not p.name.startswith("err_")]
+        + [p for p in sorted((ROOT / "tests/simd").glob("*.claw")) if not p.name.startswith("err_")]
     )
     work = pathlib.Path(tempfile.mkdtemp(prefix="claw-linux-"))
     built = []

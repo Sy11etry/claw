@@ -20,11 +20,32 @@ pub struct Alloc {
     pub saved_x: Vec<u32>,
     pub saved_d: Vec<u32>,
     pub slots: u32,
+    /// Some spilled value is a 128-bit vector: spills start on a 16-byte boundary.
+    pub vec_slots: bool,
 }
 
 /// Every value on the stack: the unoptimized build's simple, predictable layout.
 pub fn naive(f: &Func) -> Alloc {
-    Alloc { places: (0..f.nvregs).map(Place::Slot).collect(), saved_x: Vec::new(), saved_d: Vec::new(), slots: f.nvregs }
+    let vec = vec_classes(f);
+    if !vec.iter().any(|v| *v) {
+        return Alloc { places: (0..f.nvregs).map(Place::Slot).collect(), saved_x: Vec::new(), saved_d: Vec::new(), slots: f.nvregs, vec_slots: false };
+    }
+    // A vector takes two slots, the first at an even index.
+    let mut n = 0u32;
+    let places = vec
+        .iter()
+        .map(|v| {
+            if *v {
+                n = (n + 1) & !1;
+                n += 2;
+                Place::Slot(n - 2)
+            } else {
+                n += 1;
+                Place::Slot(n - 1)
+            }
+        })
+        .collect();
+    Alloc { places, saved_x: Vec::new(), saved_d: Vec::new(), slots: n, vec_slots: true }
 }
 
 const LOW_X: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -40,6 +61,9 @@ struct Interval {
     start: u32,
     end: u32,
     float: bool,
+    /// A 128-bit vector: it also counts as `float` (it lives in the same register file), but
+    /// no register survives a call, and a spill takes 16 bytes.
+    vec: bool,
     /// Live across a call: only callee-saved registers survive.
     crosses: bool,
     /// Touches a call or the entry: x0-x7 are in use around it.
@@ -57,6 +81,16 @@ pub fn cheap_const(v: i64) -> bool {
 }
 
 pub fn float_classes(f: &Func) -> Vec<bool> {
+    classes(f).0
+}
+
+/// The values that are 128-bit vectors.
+pub fn vec_classes(f: &Func) -> Vec<bool> {
+    classes(f).1
+}
+
+/// (float, vector) for every vreg. Values joined by `Mov`, `Phi` or `Pi` share a class; a vector is also float.
+fn classes(f: &Func) -> (Vec<bool>, Vec<bool>) {
     let n = f.nvregs as usize;
     let mut parent: Vec<u32> = (0..f.nvregs).collect();
     fn root(p: &mut [u32], mut x: u32) -> u32 {
@@ -67,6 +101,7 @@ pub fn float_classes(f: &Func) -> Vec<bool> {
         x
     }
     let mut float = vec![false; n];
+    let mut vecs = vec![false; n];
     for b in &f.blocks {
         for i in &b.insts {
             match i {
@@ -95,18 +130,52 @@ pub fn float_classes(f: &Func) -> Vec<bool> {
                 }
                 Inst::IntToFloat { d, .. } => float[*d as usize] = true,
                 Inst::FloatToInt { s, .. } | Inst::BufFloat { s, .. } => float[*s as usize] = true,
+                Inst::VBin { d, a, b, .. } => {
+                    for v in [d, a, b] {
+                        vecs[*v as usize] = true;
+                    }
+                }
+                Inst::VFma { d, a, b, c, .. } => {
+                    for v in [d, a, b, c] {
+                        vecs[*v as usize] = true;
+                    }
+                }
+                Inst::VNeg { d, s, .. } => {
+                    vecs[*d as usize] = true;
+                    vecs[*s as usize] = true;
+                }
+                Inst::VSplat { d, s, ty } => {
+                    vecs[*d as usize] = true;
+                    if ty.is_float() {
+                        float[*s as usize] = true;
+                    }
+                }
+                Inst::VLoad { d, .. } => vecs[*d as usize] = true,
+                Inst::VStore { s, .. } => vecs[*s as usize] = true,
+                Inst::VLane { d, s, ty, .. } => {
+                    vecs[*s as usize] = true;
+                    if ty.is_float() {
+                        float[*d as usize] = true;
+                    }
+                }
                 _ => {}
             }
         }
     }
     let mut group = vec![false; n];
+    let mut vgroup = vec![false; n];
     for v in 0..f.nvregs {
-        if float[v as usize] {
-            let r = root(&mut parent, v);
-            group[r as usize] = true;
+        let r = root(&mut parent, v) as usize;
+        if float[v as usize] || vecs[v as usize] {
+            group[r] = true;
+        }
+        if vecs[v as usize] {
+            vgroup[r] = true;
         }
     }
-    (0..f.nvregs).map(|v| group[root(&mut parent, v) as usize]).collect()
+    let fl = (0..f.nvregs).map(|v| group[root(&mut parent, v) as usize]).collect();
+    let ve = (0..f.nvregs).map(|v| vgroup[root(&mut parent, v) as usize]).collect();
+    (fl, ve)
 }
 
 pub fn allocate(f: &Func) -> Alloc {
@@ -114,7 +183,10 @@ pub fn allocate(f: &Func) -> Alloc {
     let mut places = vec![Place::None; n];
     let words = n.div_ceil(64).max(1);
     let nb = f.blocks.len();
-    let float = float_classes(f);
+    let (float, vecs) = classes(f);
+    let any_vec = vecs.iter().any(|v| *v);
+    // With vectors about, d31 is the third scratch register of the vector code.
+    let mid_d: &[u32] = if any_vec { &MID_D[..15] } else { &MID_D };
 
     // Single definitions by a constant or a stack address need no register.
     let mut defs = vec![0u32; n];
@@ -315,7 +387,7 @@ pub fn allocate(f: &Func) -> Alloc {
         let crosses = first_inside < calls.len() && calls[first_inside] < end[i];
         let arg_reg = call_arg[i].filter(|(_, p)| !float[i] && at < calls.len() && calls[at] == *p && *p == end[i] && *p != 0).map(|(k, _)| k);
         let ret_reg = !float[i] && !crosses && !x0_unsafe[i] && call_result[i] == Some(start[i]) && defs[i] == 1;
-        list.push(Interval { v, start: start[i], end: end[i], float: float[i], crosses, touches, arg_reg, ret_reg, weight: weight[i] / (end[i] - start[i] + 1) as f32 });
+        list.push(Interval { v, start: start[i], end: end[i], float: float[i], vec: vecs[i], crosses, touches, arg_reg, ret_reg, weight: weight[i] / (end[i] - start[i] + 1) as f32 });
     }
     list.sort_by_key(|x| x.start);
 
@@ -326,12 +398,17 @@ pub fn allocate(f: &Func) -> Alloc {
 
     let candidates = |iv: &Interval| -> Vec<u32> {
         let mut out = Vec::new();
-        if iv.float {
+        if iv.vec {
+            // Only the upper registers: v0-v7 carry call arguments, v8-v15 keep just their low half over a call.
+            if !iv.crosses {
+                out.extend_from_slice(mid_d);
+            }
+        } else if iv.float {
             if !iv.crosses {
                 if !iv.touches {
                     out.extend(LOW_D);
                 }
-                out.extend(MID_D);
+                out.extend_from_slice(mid_d);
             }
             out.extend(SAVED_D);
         } else {
@@ -384,8 +461,7 @@ pub fn allocate(f: &Func) -> Alloc {
                     .map(|(i, _)| i);
                 victim.map(|i| {
                     let (a, r) = active.swap_remove(i);
-                    places[a.v as usize] = Place::Slot(slots);
-                    slots += 1;
+                    places[a.v as usize] = Place::Slot(spill(&mut slots, a.vec));
                     r
                 })
             }
@@ -402,8 +478,7 @@ pub fn allocate(f: &Func) -> Alloc {
                 active.push((iv, r));
             }
             None => {
-                places[iv.v as usize] = Place::Slot(slots);
-                slots += 1;
+                places[iv.v as usize] = Place::Slot(spill(&mut slots, iv.vec));
             }
         }
     }
@@ -416,5 +491,17 @@ pub fn allocate(f: &Func) -> Alloc {
 
     let saved_x = SAVED_X.iter().copied().filter(|r| used_x >> r & 1 != 0).collect();
     let saved_d = SAVED_D.iter().copied().filter(|r| used_d >> r & 1 != 0).collect();
-    Alloc { places, saved_x, saved_d, slots }
+    Alloc { places, saved_x, saved_d, slots, vec_slots: any_vec }
+}
+
+/// The next spill slot; a vector takes two, starting at an even one.
+fn spill(slots: &mut u32, vec: bool) -> u32 {
+    if vec {
+        *slots = (*slots + 1) & !1;
+        *slots += 2;
+        *slots - 2
+    } else {
+        *slots += 1;
+        *slots - 1
+    }
 }
