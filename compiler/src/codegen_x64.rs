@@ -2,7 +2,9 @@
 //!
 //! Like the first arm64 back end this is deliberately naive: every virtual register is a
 //! stack slot at `[rbp - 8 * (v + 1)]`, each instruction loads its operands into rax/rcx/rdx,
-//! computes, and stores the result back. Optimized CIR gets the same treatment.
+//! computes, and stores the result back. Optimized CIR gets a little more: a value defined
+//! once by a constant or a stack address is written where it is read, and the five values
+//! used most (weighted by loop depth) live in rbx, r12-r15 for the whole function.
 //!
 //! Internal calling convention: every argument (floats as raw bits, aggregates as addresses)
 //! is stored in the caller's outgoing area at `[rsp + 8 * i]`; the callee finds it at
@@ -83,6 +85,97 @@ struct Gen {
     files: Vec<String>,
     imports: Vec<String>,
     too_large: Option<String>,
+    /// Where each virtual register of the function being generated lives.
+    pl: Vec<Place>,
+}
+
+/// Where a virtual register lives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Place {
+    /// Its stack slot.
+    Slot,
+    /// A callee-saved register, for the whole function.
+    Reg(Reg),
+    /// Defined once, by a constant: written where it is read.
+    Const(i64),
+    /// Defined once, as the address of a stack object `rbp - n`.
+    Obj(i32),
+}
+
+/// The registers values may live in: callee-saved, so calls leave them alone.
+const POOL: [Reg; 5] = [RBX, R12, R13, R14, R15];
+
+/// Decides where each register lives; `objects` are the stack objects' distances below rbp.
+/// Only optimized code gets anything but stack slots. Also returns the pool registers used.
+fn plan(f: &Func, objects: &[i32]) -> (Vec<Place>, Vec<Reg>) {
+    let n = f.nvregs as usize;
+    let mut places = vec![Place::Slot; n];
+    if !f.optimized {
+        return (places, Vec::new());
+    }
+    // A jump back to an earlier block closes a loop around the blocks in between.
+    let mut depth = vec![0u32; f.blocks.len()];
+    for (i, b) in f.blocks.iter().enumerate() {
+        let mut close = |t: BlockId| {
+            if t <= i {
+                for d in &mut depth[t..=i] {
+                    *d += 1;
+                }
+            }
+        };
+        match &b.term {
+            Term::Jmp(t) => close(*t),
+            Term::Br { t, f: e, .. } => {
+                close(*t);
+                close(*e);
+            }
+            _ => {}
+        }
+    }
+    let mut defs = vec![0u32; n];
+    let mut weight = vec![0u64; n];
+    let mut kind: Vec<Option<Place>> = vec![None; n];
+    for p in &f.params {
+        defs[*p as usize] += 1;
+    }
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let w = 8u64.pow(depth[bi].min(4));
+        for i in &b.insts {
+            i.each(&mut |v, def| {
+                weight[v as usize] += w;
+                if def {
+                    defs[v as usize] += 1;
+                }
+            });
+            match i {
+                Inst::Const { d, v } => kind[*d as usize] = Some(Place::Const(*v)),
+                Inst::ObjAddr { d, obj } => kind[*d as usize] = Some(Place::Obj(objects[*obj])),
+                _ => {}
+            }
+        }
+        match &b.term {
+            Term::Br { c, .. } => weight[*c as usize] += w,
+            Term::Ret(Some(v)) => weight[*v as usize] += w,
+            _ => {}
+        }
+    }
+    for v in 0..n {
+        if defs[v] == 1 {
+            if let Some(k) = kind[v] {
+                places[v] = k;
+            }
+        }
+    }
+    // Each register used costs a save and a restore, so a value must be worth a few accesses.
+    let mut best: Vec<usize> = (0..n).filter(|v| places[*v] == Place::Slot && weight[*v] >= 6).collect();
+    best.sort_by_key(|v| (std::cmp::Reverse(weight[*v]), *v));
+    best.truncate(POOL.len());
+    let mut used = Vec::new();
+    for (k, v) in best.iter().enumerate() {
+        places[*v] = Place::Reg(POOL[k]);
+        used.push(POOL[k]);
+    }
+    (places, used)
 }
 
 /// Where one C argument travels.
@@ -237,19 +330,151 @@ impl Gen {
     // ---- values ----
 
     fn ld(&mut self, r: Reg, v: VReg) {
-        mov_load(&mut self.c, r, slot(v));
+        match self.pl[v as usize] {
+            Place::Slot => mov_load(&mut self.c, r, slot(v)),
+            Place::Reg(x) => {
+                if x != r {
+                    mov(&mut self.c, reg(r), x);
+                }
+            }
+            Place::Const(c) => self.imm(r, c),
+            Place::Obj(off) => lea(&mut self.c, r, at(RBP, -off)),
+        }
     }
 
     fn st(&mut self, v: VReg, r: Reg) {
-        mov(&mut self.c, slot(v), r);
+        match self.pl[v as usize] {
+            Place::Slot => mov(&mut self.c, slot(v), r),
+            Place::Reg(x) => {
+                if x != r {
+                    mov(&mut self.c, reg(x), r);
+                }
+            }
+            // Defined once, by an instruction that is not generated.
+            Place::Const(_) | Place::Obj(_) => {}
+        }
     }
 
     fn fld(&mut self, x: Xmm, v: VReg, bits: u8) {
-        movs_load(&mut self.c, bits, x, slot(v));
+        match self.pl[v as usize] {
+            Place::Slot => movs_load(&mut self.c, bits, x, slot(v)),
+            Place::Reg(g) => self.movx(x, g, bits),
+            Place::Const(c) => {
+                self.imm(R11, c);
+                self.movx(x, R11, bits);
+            }
+            Place::Obj(_) => unreachable!("an address is not a float"),
+        }
     }
 
     fn fst(&mut self, v: VReg, x: Xmm, bits: u8) {
-        movs_store(&mut self.c, bits, slot(v), x);
+        match self.pl[v as usize] {
+            Place::Slot => movs_store(&mut self.c, bits, slot(v), x),
+            Place::Reg(g) => {
+                if bits == 64 {
+                    movq_rx(&mut self.c, g, x);
+                } else {
+                    movd_rx(&mut self.c, g, x);
+                }
+            }
+            Place::Const(_) | Place::Obj(_) => {}
+        }
+    }
+
+    /// General register to vector register: all 64 bits or the low 32.
+    fn movx(&mut self, x: Xmm, g: Reg, bits: u8) {
+        if bits == 64 {
+            movq_xr(&mut self.c, x, g);
+        } else {
+            movd_xr(&mut self.c, x, g);
+        }
+    }
+
+    /// An operand that reads `v` where it already is: its slot or its register.
+    /// A constant or an address is first put into `scratch`.
+    fn rm(&mut self, v: VReg, scratch: Reg) -> Op {
+        match self.pl[v as usize] {
+            Place::Slot => slot(v),
+            Place::Reg(x) => reg(x),
+            _ => {
+                self.ld(scratch, v);
+                reg(scratch)
+            }
+        }
+    }
+
+    /// Like `rm`, for the right-hand side of an SSE instruction.
+    fn fsrc(&mut self, v: VReg, bits: u8, scratch: Xmm) -> Op {
+        match self.pl[v as usize] {
+            Place::Slot => slot(v),
+            _ => {
+                self.fld(scratch, v, bits);
+                reg(scratch)
+            }
+        }
+    }
+
+    /// `v`, if it is a constant written where it is read.
+    fn const_of(&self, v: VReg) -> Option<i64> {
+        match self.pl[v as usize] {
+            Place::Const(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Compares `a` with `b`, setting the flags for `a cmp b`. Uses rax and rcx.
+    fn cmp_vals(&mut self, a: VReg, b: VReg) {
+        let lhs = match self.pl[a as usize] {
+            Place::Reg(x) => x,
+            _ => {
+                self.ld(RAX, a);
+                RAX
+            }
+        };
+        match self.const_of(b).and_then(|c| i32::try_from(c).ok()) {
+            Some(k) => alu_i(&mut self.c, Alu::Cmp, reg(lhs), k),
+            None => {
+                let o = self.rm(b, RCX);
+                alu_load(&mut self.c, Alu::Cmp, lhs, o);
+            }
+        }
+    }
+
+    /// Stores the call argument `v` at `[rsp + 8 * n]`.
+    fn store_arg(&mut self, n: usize, v: VReg) {
+        let to = at(RSP, 8 * n as i32);
+        match self.pl[v as usize] {
+            Place::Reg(x) => mov(&mut self.c, to, x),
+            Place::Const(c) if i32::try_from(c).is_ok() => mov_mi(&mut self.c, to, c as i32),
+            _ => {
+                self.ld(RAX, v);
+                mov(&mut self.c, to, RAX);
+            }
+        }
+    }
+
+    /// The memory at `p + off`. Uses rax, and rcx when the offset is far.
+    fn mem_at(&mut self, p: VReg, off: u64) -> Op {
+        if let Some(o) = Self::small(off) {
+            match self.pl[p as usize] {
+                Place::Reg(x) => return at(x, o),
+                Place::Obj(b) => {
+                    if let Ok(d) = i32::try_from(o as i64 - b as i64) {
+                        return at(RBP, d);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.ld(RAX, p);
+        match Self::small(off) {
+            Some(o) => at(RAX, o),
+            None => {
+                mov_ri64(&mut self.c, RCX, off as i64);
+                alu(&mut self.c, Alu::Add, reg(RAX), RCX);
+                at(RAX, 0)
+            }
+        }
     }
 
     fn imm(&mut self, r: Reg, v: i64) {
@@ -554,21 +779,38 @@ impl Gen {
             off = (off + size + align - 1) & !(align - 1);
             objects.push(off as i32);
         }
+        let (places, used) = plan(f, &objects);
+        // Callee-saved registers that hold values are kept in the frame while we use them.
+        let mut saves: Vec<(Reg, i32)> = Vec::new();
+        for r in used {
+            off += 8;
+            saves.push((r, off as i32));
+        }
         let size = (off + outgoing as u64 + 15) & !15;
         if size >= MAX_FRAME {
             self.too_large = Some(f.name.clone());
             return;
         }
         let fr = Frame { objects };
+        self.pl = places;
 
         push(&mut self.c, RBP);
         mov(&mut self.c, reg(RBP), RSP);
         if size > 0 {
             alu_i(&mut self.c, Alu::Sub, reg(RSP), size as i32);
         }
+        for (r, o) in &saves {
+            mov(&mut self.c, at(RBP, -o), *r);
+        }
         for (i, p) in f.params.iter().enumerate() {
-            mov_load(&mut self.c, RAX, at(RBP, 16 + 8 * i as i32));
-            self.st(*p, RAX);
+            let from = at(RBP, 16 + 8 * i as i32);
+            match self.pl[*p as usize] {
+                Place::Reg(x) => mov_load(&mut self.c, x, from),
+                _ => {
+                    mov_load(&mut self.c, RAX, from);
+                    self.st(*p, RAX);
+                }
+            }
         }
 
         let mut block_pos = vec![0usize; f.blocks.len()];
@@ -605,8 +847,7 @@ impl Gen {
             if fused {
                 let Term::Br { t, f: fb, .. } = b.term else { unreachable!() };
                 let Some(Inst::Cmp { cc, a, b: rhs, unsigned, .. }) = b.insts.last() else { unreachable!() };
-                self.ld(RAX, *a);
-                alu_load(&mut self.c, Alu::Cmp, RAX, slot(*rhs));
+                self.cmp_vals(*a, *rhs);
                 let cond = int_cond(*cc, *unsigned);
                 if t == next {
                     let at = self.jcc_fwd(cond.not());
@@ -629,7 +870,10 @@ impl Gen {
                     }
                 }
                 Term::Br { c, t, f: fb } => {
-                    alu_i(&mut self.c, Alu::Cmp, slot(*c), 0);
+                    match self.rm(*c, RAX) {
+                        Op::R(x) => test(&mut self.c, x, x),
+                        o => alu_i(&mut self.c, Alu::Cmp, o, 0),
+                    }
                     if *t == next {
                         let at = self.jcc_fwd(Cond::E);
                         pending.push((at, *fb));
@@ -645,6 +889,9 @@ impl Gen {
                 Term::Ret(v) => {
                     if let Some(v) = v {
                         self.ld(RAX, *v);
+                    }
+                    for (r, o) in &saves {
+                        mov_load(&mut self.c, *r, at(RBP, -o));
                     }
                     leave(&mut self.c);
                     ret(&mut self.c);
@@ -775,36 +1022,44 @@ impl Gen {
         i32::try_from(off).ok()
     }
 
-    /// An operand for `[rax + off]`; far offsets are added to rax first.
-    fn mem_at_rax(&mut self, off: u64) -> Op {
-        match Self::small(off) {
-            Some(o) => at(RAX, o),
-            None => {
-                mov_ri64(&mut self.c, RCX, off as i64);
-                alu(&mut self.c, Alu::Add, reg(RAX), RCX);
-                at(RAX, 0)
-            }
-        }
-    }
-
     fn inst(&mut self, fr: &Frame, i: &Inst, traps: &mut Traps, fmts: (usize, usize)) {
         match i {
-            Inst::Const { d, v } => {
-                if let Ok(small) = i32::try_from(*v) {
-                    mov_mi(&mut self.c, slot(*d), small);
-                } else {
-                    mov_ri64(&mut self.c, RAX, *v);
-                    self.st(*d, RAX);
+            Inst::Const { d, v } => match self.pl[*d as usize] {
+                Place::Const(_) => {}
+                Place::Reg(x) => self.imm(x, *v),
+                _ => {
+                    if let Ok(small) = i32::try_from(*v) {
+                        mov_mi(&mut self.c, slot(*d), small);
+                    } else {
+                        mov_ri64(&mut self.c, RAX, *v);
+                        self.st(*d, RAX);
+                    }
                 }
-            }
-            Inst::Mov { d, s } => {
-                self.ld(RAX, *s);
-                self.st(*d, RAX);
-            }
+            },
+            Inst::Mov { d, s } => match self.pl[*d as usize] {
+                Place::Reg(x) => self.ld(x, *s),
+                _ => {
+                    let r = match self.pl[*s as usize] {
+                        Place::Reg(x) => x,
+                        _ => {
+                            self.ld(RAX, *s);
+                            RAX
+                        }
+                    };
+                    self.st(*d, r);
+                }
+            },
             Inst::Bin { op, d, a, b, num, loc } => {
                 self.ld(RAX, *a);
-                self.ld(RCX, *b);
-                self.bin(*op, *num, *loc, traps);
+                // Adding, subtracting and the bit operations take a constant as it is.
+                let k = match op {
+                    Arith::Add | Arith::Sub | Arith::And | Arith::Or | Arith::Xor => self.const_of(*b).and_then(|c| i32::try_from(c).ok()),
+                    _ => None,
+                };
+                if k.is_none() {
+                    self.ld(RCX, *b);
+                }
+                self.bin(*op, *num, *loc, k, traps);
                 self.st(*d, RAX);
             }
             Inst::Neg { d, s, num, loc } => {
@@ -838,8 +1093,7 @@ impl Gen {
                 self.st(*d, RAX);
             }
             Inst::Cmp { cc, d, a, b, unsigned } => {
-                self.ld(RAX, *a);
-                alu_load(&mut self.c, Alu::Cmp, RAX, slot(*b));
+                self.cmp_vals(*a, *b);
                 mov_ri32(&mut self.c, RAX, 0);
                 setcc(&mut self.c, int_cond(*cc, *unsigned), RAX);
                 self.st(*d, RAX);
@@ -852,7 +1106,8 @@ impl Gen {
                     FArith::Mul => Sse::Mul,
                     FArith::Div => Sse::Div,
                 };
-                sse(&mut self.c, o, *bits, 0, slot(*b));
+                let rhs = self.fsrc(*b, *bits, 1);
+                sse(&mut self.c, o, *bits, 0, rhs);
                 self.fst(*d, 0, *bits);
             }
             Inst::FNeg { d, s, bits } => {
@@ -872,7 +1127,8 @@ impl Gen {
                 mov_ri32(&mut self.c, RAX, 0);
                 mov_ri32(&mut self.c, RCX, 0);
                 self.fld(0, x, *bits);
-                ucomis(&mut self.c, *bits, 0, slot(y));
+                let rhs = self.fsrc(y, *bits, 1);
+                ucomis(&mut self.c, *bits, 0, rhs);
                 match cc {
                     Cc::Gt | Cc::Lt => setcc(&mut self.c, Cond::A, RAX),
                     Cc::Ge | Cc::Le => setcc(&mut self.c, Cond::Ae, RAX),
@@ -955,8 +1211,7 @@ impl Gen {
             }
             Inst::Call { d, f, args } => {
                 for (n, a) in args.iter().enumerate() {
-                    self.ld(RAX, *a);
-                    mov(&mut self.c, at(RSP, 8 * n as i32), RAX);
+                    self.store_arg(n, *a);
                 }
                 self.call_to(Target::User(*f));
                 if let Some(d) = d {
@@ -965,8 +1220,7 @@ impl Gen {
             }
             Inst::CallInd { d, callee, args } => {
                 for (n, a) in args.iter().enumerate() {
-                    self.ld(RAX, *a);
-                    mov(&mut self.c, at(RSP, 8 * n as i32), RAX);
+                    self.store_arg(n, *a);
                 }
                 self.ld(R11, *callee);
                 call_r(&mut self.c, R11);
@@ -980,8 +1234,10 @@ impl Gen {
                 self.st(*d, RAX);
             }
             Inst::ObjAddr { d, obj } => {
-                lea(&mut self.c, RAX, at(RBP, -fr.objects[*obj]));
-                self.st(*d, RAX);
+                if !matches!(self.pl[*d as usize], Place::Obj(_)) {
+                    lea(&mut self.c, RAX, at(RBP, -fr.objects[*obj]));
+                    self.st(*d, RAX);
+                }
             }
             Inst::AddImm { d, s, imm } => {
                 self.ld(RAX, *s);
@@ -995,28 +1251,38 @@ impl Gen {
                 self.st(*d, RAX);
             }
             Inst::Load { d, p, off, mem } => {
-                self.ld(RAX, *p);
-                let m = self.mem_at_rax(*off);
+                let m = self.mem_at(*p, *off);
+                let to = match self.pl[*d as usize] {
+                    Place::Reg(x) => x,
+                    _ => RAX,
+                };
                 match mem {
-                    Mem::I8 => movsx8(&mut self.c, RAX, m),
-                    Mem::I16 => movsx16(&mut self.c, RAX, m),
-                    Mem::I32 => movsx32(&mut self.c, RAX, m),
-                    Mem::U8 => movzx8(&mut self.c, RAX, m),
-                    Mem::U16 => movzx16(&mut self.c, RAX, m),
-                    Mem::U32 => mov32_load(&mut self.c, RAX, m),
-                    Mem::X64 => mov_load(&mut self.c, RAX, m),
+                    Mem::I8 => movsx8(&mut self.c, to, m),
+                    Mem::I16 => movsx16(&mut self.c, to, m),
+                    Mem::I32 => movsx32(&mut self.c, to, m),
+                    Mem::U8 => movzx8(&mut self.c, to, m),
+                    Mem::U16 => movzx16(&mut self.c, to, m),
+                    Mem::U32 => mov32_load(&mut self.c, to, m),
+                    Mem::X64 => mov_load(&mut self.c, to, m),
                 }
-                self.st(*d, RAX);
+                if to == RAX {
+                    self.st(*d, RAX);
+                }
             }
             Inst::Store { p, off, s, mem } => {
-                self.ld(RAX, *p);
-                self.ld(RDX, *s);
-                let m = self.mem_at_rax(*off);
+                let m = self.mem_at(*p, *off);
+                let from = match self.pl[*s as usize] {
+                    Place::Reg(x) => x,
+                    _ => {
+                        self.ld(RDX, *s);
+                        RDX
+                    }
+                };
                 match mem {
-                    Mem::I8 | Mem::U8 => mov8(&mut self.c, m, RDX),
-                    Mem::I16 | Mem::U16 => mov16(&mut self.c, m, RDX),
-                    Mem::I32 | Mem::U32 => mov32(&mut self.c, m, RDX),
-                    Mem::X64 => mov(&mut self.c, m, RDX),
+                    Mem::I8 | Mem::U8 => mov8(&mut self.c, m, from),
+                    Mem::I16 | Mem::U16 => mov16(&mut self.c, m, from),
+                    Mem::I32 | Mem::U32 => mov32(&mut self.c, m, from),
+                    Mem::X64 => mov(&mut self.c, m, from),
                 }
             }
             Inst::MemCopy { dst, src, size } => self.mem_copy(*dst, *src, *size),
@@ -1027,8 +1293,7 @@ impl Gen {
                 self.call_to(Target::Import(IMP_MEMCPY));
             }
             Inst::BoundsDyn { idx, len, loc } => {
-                self.ld(RAX, *idx);
-                alu_load(&mut self.c, Alu::Cmp, RAX, slot(*len));
+                self.cmp_vals(*idx, *len);
                 // Unsigned compare: a negative index looks huge.
                 self.trap_if(Cond::Ae, Trap::Bounds, *loc, traps);
             }
@@ -1059,10 +1324,13 @@ impl Gen {
                 self.st(*d, RAX);
             }
             Inst::Bounds { idx, len, loc } => {
-                self.ld(RAX, *idx);
                 match i32::try_from(*len) {
-                    Ok(k) => alu_i(&mut self.c, Alu::Cmp, reg(RAX), k),
+                    Ok(k) => {
+                        let o = self.rm(*idx, RAX);
+                        alu_i(&mut self.c, Alu::Cmp, o, k);
+                    }
                     Err(_) => {
+                        self.ld(RAX, *idx);
                         mov_ri64(&mut self.c, RCX, *len as i64);
                         alu(&mut self.c, Alu::Cmp, reg(RAX), RCX);
                     }
@@ -1275,13 +1543,17 @@ impl Gen {
         }
     }
 
-    /// Operands are in rax and rcx; the result is left in rax. rdx and r11 are free to use.
-    fn bin(&mut self, op: Arith, num: Num, loc: Loc, traps: &mut Traps) {
+    /// Operands are in rax and rcx (or `k`, a constant, in place of rcx); the result is left in rax.
+    /// rdx and r11 are free to use.
+    fn bin(&mut self, op: Arith, num: Num, loc: Loc, k: Option<i32>, traps: &mut Traps) {
         let wide_signed = num.signed && num.bits == 64 && num.checked;
+        let flat = |g: &mut Gen, o: Alu| match k {
+            Some(k) => alu_i(&mut g.c, o, reg(RAX), k),
+            None => alu(&mut g.c, o, reg(RAX), RCX),
+        };
         match op {
             Arith::Add | Arith::Sub => {
-                let o = if op == Arith::Add { Alu::Add } else { Alu::Sub };
-                alu(&mut self.c, o, reg(RAX), RCX);
+                flat(self, if op == Arith::Add { Alu::Add } else { Alu::Sub });
                 if wide_signed {
                     self.trap_if(Cond::O, Trap::Overflow, loc, traps);
                 } else {
@@ -1346,9 +1618,9 @@ impl Gen {
                 }
                 mov(&mut self.c, reg(RAX), RDX);
             }
-            Arith::And => alu(&mut self.c, Alu::And, reg(RAX), RCX),
-            Arith::Or => alu(&mut self.c, Alu::Or, reg(RAX), RCX),
-            Arith::Xor => alu(&mut self.c, Alu::Xor, reg(RAX), RCX),
+            Arith::And => flat(self, Alu::And),
+            Arith::Or => flat(self, Alu::Or),
+            Arith::Xor => flat(self, Alu::Xor),
             Arith::Shl => {
                 if num.checked {
                     alu_i(&mut self.c, Alu::Cmp, reg(RCX), num.bits as i32);
@@ -1402,6 +1674,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         files: files.to_vec(),
         imports: imports.clone(),
         too_large: None,
+        pl: Vec::new(),
     };
     let mut symbols: Vec<(String, usize)> = Vec::new();
 
