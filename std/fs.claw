@@ -11,8 +11,12 @@ pub type IoErr = NotFound | Denied | Failed{code int}
 
 const o_rdonly i32 = 0
 const o_wronly i32 = 1
-const o_creat i32 = 512
-const o_trunc i32 = 1024
+
+// The flag values of `open` differ between macOS and Linux.
+claw fn o_create_trunc() i32 {
+    if __linux() { ret 64 | 512 }
+    ret 512 | 1024
+}
 
 claw fn last_error() IoErr {
     code := int(*c_errno())
@@ -60,7 +64,7 @@ pub claw fn read(path str) str ! IoErr +io +mem {
 pub claw fn write(path str, data str) ! IoErr +io +mem {
     name := c_path(path)
     defer free(name)
-    fd := c_open(name, o_wronly | o_creat | o_trunc, 420)
+    fd := c_open(name, o_wronly | o_create_trunc(), 420)
     if fd < 0 { fail last_error() }
     defer {
         _ = c_close(fd)

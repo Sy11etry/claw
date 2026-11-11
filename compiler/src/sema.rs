@@ -2470,6 +2470,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
             "__state" if self.g.mods[self.g.cur].prefix == "__check." => self.g.types.intern(Kind::Pointer(INT)),
             // For `std/par.claw` only: whether tasks must run one after another, and where a task's thread starts.
             "__sequential" if self.g.mods[self.g.cur].prefix == "par." => BOOL,
+            // For `std/fs.claw` only: the values of `open` flags differ between macOS and Linux.
+            "__linux" if self.g.mods[self.g.cur].prefix == "fs." => BOOL,
             "__entry" if self.g.mods[self.g.cur].prefix == "par." => {
                 let targs = self.resolve_targs(targs)?;
                 let m = self.g.cur;

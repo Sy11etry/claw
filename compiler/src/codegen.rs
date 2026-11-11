@@ -68,6 +68,8 @@ pub struct Object {
 }
 
 struct Gen {
+    /// Linux rules for C calls (variadic arguments in registers) instead of Apple's.
+    linux: bool,
     /// Where the function being written begins, until its first source line is known.
     func_first: Option<usize>,
     lines: Vec<(usize, Loc)>,
@@ -92,13 +94,13 @@ enum Slot {
     Stack(u32),
 }
 
-/// Apple's ARM64 rules: 8 integer and 8 float registers, then the stack with each
-/// value at its natural size. Everything variadic goes on the stack in 8-byte slots.
-fn assign_c(args: &[CArg], variadic: Option<usize>) -> (Vec<Slot>, u32) {
+/// The ARM64 rules: 8 integer and 8 float registers, then the stack with each value at its
+/// natural size. Apple puts everything variadic on the stack in 8-byte slots; Linux does not.
+fn assign_c(args: &[CArg], variadic: Option<usize>, linux: bool) -> (Vec<Slot>, u32) {
     let (mut x, mut d, mut stack) = (0u32, 0u32, 0u32);
     let mut out = Vec::with_capacity(args.len());
     for (i, a) in args.iter().enumerate() {
-        if variadic.is_some_and(|v| i >= v) {
+        if !linux && variadic.is_some_and(|v| i >= v) {
             stack = (stack + 7) & !7;
             out.push(Slot::Stack(stack));
             stack += 8;
@@ -621,13 +623,15 @@ impl Gen {
     }
 
     /// `__claw_buf_float(d0 = value, x2 = format)`, via libSystem's snprintf.
-    /// On Apple ARM64 the variadic double is passed on the stack.
+    /// On Apple ARM64 the variadic double is passed on the stack; on Linux it stays in d0.
     fn rt_buf_float(&mut self) -> usize {
         let pos = self.here();
         self.e(stp_pre(FP, LR, SP, -16));
         self.e(mov_sp(FP, SP));
         self.e(sub_imm(SP, SP, 80));
-        self.e(str_d(D0, SP, 0));
+        if !self.linux {
+            self.e(str_d(D0, SP, 0));
+        }
         self.e(add_imm(X0, SP, 16));
         self.e(movz(X1, 64, 0));
         self.call(BL, Target::Import(IMP_SNPRINTF));
@@ -664,7 +668,7 @@ impl Gen {
                     outgoing = outgoing.max(args.len().saturating_sub(8) as u32 * 8);
                 }
                 if let Inst::CallC { args, variadic, .. } = i {
-                    outgoing = outgoing.max((assign_c(args, *variadic).1 + 7) & !7);
+                    outgoing = outgoing.max((assign_c(args, *variadic, self.linux).1 + 7) & !7);
                 }
             }
         }
@@ -1392,12 +1396,12 @@ impl Gen {
     }
 
     fn call_c(&mut self, fr: &Frame, d: Option<VReg>, sym: &str, args: &[CArg], variadic: Option<usize>, ret: CRet) {
-        let (slots, _) = assign_c(args, variadic);
+        let (slots, _) = assign_c(args, variadic, self.linux);
         for (i, (a, slot)) in args.iter().zip(&slots).enumerate() {
             if let Slot::Stack(off) = slot {
                 self.load(fr, X9, a.v);
                 self.e(add_imm(X10, SP, *off));
-                let size = if variadic.is_some_and(|v| i >= v) { 8 } else { a.size };
+                let size = if !self.linux && variadic.is_some_and(|v| i >= v) { 8 } else { a.size };
                 self.e(match size {
                     1 => strb(X9, X10, 0),
                     2 => strh(X9, X10),
@@ -1638,6 +1642,15 @@ impl Gen {
 }
 
 pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Object, String> {
+    build(m, files, alloc_stats, false)
+}
+
+/// The same program for Linux on ARM64: only the C calls differ.
+pub fn generate_linux(m: &Module, files: &[String], alloc_stats: bool) -> Result<Object, String> {
+    build(m, files, alloc_stats, true)
+}
+
+fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result<Object, String> {
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
     for f in m.funcs.iter().filter(|f| !f.dead) {
         for b in &f.blocks {
@@ -1652,6 +1665,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         }
     }
     let mut g = Gen {
+        linux,
         func_first: None,
         lines: Vec::new(),
         code: Vec::new(),

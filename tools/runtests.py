@@ -18,12 +18,17 @@ tests/run again, in check mode: the checker must not complain about correct prog
 tests/fast/*.claw  built with --fast; tests/stats/*.claw  the optimizer proves what it should.
 tools/fuzz_opt.py  random programs: optimized and unoptimized builds must agree.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
+tests/par/*.claw  tasks: checked run and real threads must print the same; err_*.claw must be rejected.
+tests/debug/*.claw  lldb stops at the right line.
+Linux target: the ELF is checked, and with qemu and an Alpine image the programs run there too.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
 """
 import os
 import pathlib
 import re
+import glob
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -355,6 +360,27 @@ def par_test(path, tmp):
     return None
 
 
+def linux_test(tmp):
+    """The Linux target: the file must look right, and where qemu and an Alpine image exist it must also run.
+    Returns (message, ran) where ran says whether the programs really executed on Linux."""
+    src = ROOT / "tests/run/arith.claw"
+    for target, interp in (("aarch64-linux", b"/lib/ld-linux-aarch64.so.1"), ("aarch64-linux-musl", b"/lib/ld-musl-aarch64.so.1")):
+        exe = tmp / ("linux_" + target)
+        p = child([CLAW, "build", "--target", target, src, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if p.returncode != 0:
+            return f"{target}: compile failed:\n{p.stderr}", False
+        data = exe.read_bytes()
+        if data[:4] != b"\x7fELF" or int.from_bytes(data[18:20], "little") != 183 or interp not in data[:512]:
+            return f"{target}: not an aarch64 ELF with the right loader", False
+    if not shutil.which("qemu-system-aarch64") or not glob.glob(os.path.expanduser("~/Downloads/alpine-virt-*-aarch64.iso")):
+        return None, False
+    r = child([sys.executable, str(ROOT / "tools/linux_check.py")], capture_output=True, text=True, env={**os.environ, "CLAW": str(CLAW)}, timeout=1500)
+    if r.returncode != 0:
+        return f"on Linux:\n{r.stdout[-3000:]}{r.stderr[-1000:]}", True
+    print("linux: " + r.stdout.strip().splitlines()[-1])
+    return None, True
+
+
 def err_test(path):
     text = path.read_text()
     want = sorted(c.strip() for c in headers(text, "error"))
@@ -472,6 +498,13 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL par/{path.name}: {msg}")
+        total += 1
+        msg, ran = linux_test(tmp)
+        if msg:
+            failures += 1
+            print(f"FAIL linux: {msg}")
+        elif not ran:
+            print("linux: ELF checked; programs not run (no qemu or Alpine image)")
         total += 1
         msg = bootstrap()
         if msg:

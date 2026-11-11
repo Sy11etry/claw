@@ -1,5 +1,8 @@
 //! Turns a checked AST into CIR.
 
+/// Set once by `--target aarch64-linux*`: the program is built for Linux.
+pub static LINUX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 use crate::ast::{self, BinOp, Coerce, Else, ElseKind, Expr, ExprKind, Part, Pat, Res, Stmt, StmtKind, UnOp};
 use crate::cir::*;
 use crate::diag::Span;
@@ -2069,6 +2072,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 Some(d)
             }
             "__sequential" => Some(self.constant(self.check as i64)),
+            "__linux" => Some(self.constant(LINUX.load(std::sync::atomic::Ordering::Relaxed) as i64)),
             "cast" => {
                 let s = self.expr_value(&args[0]);
                 let d = self.vreg();

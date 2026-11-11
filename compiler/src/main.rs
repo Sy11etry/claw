@@ -7,6 +7,7 @@ mod codegen;
 mod ctfe;
 mod diag;
 mod dwarf;
+mod elf;
 mod dump;
 mod effects;
 mod fmt;
@@ -54,6 +55,7 @@ claw fmt <file.claw> [--check]  put a file into the one standard format
 claw lsp                        language server on stdin and stdout, for editors
 claw --version
 flags: --json (errors as JSON), --emit-cir (print the IR)
+       --target arm64|aarch64-linux|aarch64-linux-musl (build only; default arm64)
 ";
 
 struct Options {
@@ -72,6 +74,8 @@ struct Options {
     debug: bool,
     /// `claw build --no-opt`: what the compiler written in Claw produces, for comparing.
     no_opt: bool,
+    /// `--target aarch64-linux`: an ELF for Linux instead of a Mach-O for macOS.
+    linux: Option<elf::Libc>,
     /// `claw sig --pub`.
     public: bool,
     /// `claw ctx file name`: the function asked about.
@@ -85,7 +89,7 @@ fn parse_options(args: &[String]) -> Options {
 }
 
 fn options(args: &[String], ctx: bool) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None, linux: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -97,6 +101,15 @@ fn options(args: &[String], ctx: bool) -> Options {
             "--stats" => o.stats = true,
             "--blocks" => o.blocks = true,
             "--no-opt" => o.no_opt = true,
+            "--target" => {
+                i += 1;
+                match args.get(i).map(|s| s.as_str()) {
+                    Some("arm64" | "aarch64" | "arm64-macos") => o.linux = None,
+                    Some("aarch64-linux" | "aarch64-linux-gnu" | "arm64-linux") => o.linux = Some(elf::Libc::Gnu),
+                    Some("aarch64-linux-musl") => o.linux = Some(elf::Libc::Musl),
+                    _ => die("`--target` is `arm64`, `aarch64-linux` (glibc) or `aarch64-linux-musl`"),
+                }
+            }
             "-g" => o.debug = true,
             "--pub" => o.public = true,
             "--test" => {
@@ -123,6 +136,7 @@ fn options(args: &[String], ctx: bool) -> Options {
     if o.file.is_empty() {
         die("no input file");
     }
+    lower::LINUX.store(o.linux.is_some(), std::sync::atomic::Ordering::Relaxed);
     o
 }
 
@@ -234,6 +248,19 @@ fn compile(o: &Options, out: &Path, mode: Mode) {
 }
 
 fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], out: &Path) {
+    if let Some(libc) = o.linux {
+        if o.debug {
+            die("`-g` writes a macOS .dSYM; it is not available for Linux targets");
+        }
+        match codegen::generate_linux(module, files, o.alloc_stats) {
+            Ok(obj) => write_executable(out, &elf::write_elf(&obj, libc)),
+            Err(e) => {
+                eprintln!("{}:1:1 {e}", o.file);
+                exit(1);
+            }
+        }
+        return;
+    }
     let object = match codegen::generate(module, files, o.alloc_stats) {
         Ok(obj) => obj,
         Err(e) => {
@@ -274,6 +301,9 @@ fn default_out(file: &str) -> PathBuf {
 }
 
 fn run(o: &Options) -> ! {
+    if o.linux.is_some() {
+        die("`claw run` starts the program here, and this machine is not Linux; use `claw build --target aarch64-linux`");
+    }
     let dir = std::env::temp_dir().join(format!("claw-run-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("claw: cannot create {}: {e}", dir.display());
