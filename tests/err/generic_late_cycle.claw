@@ -1,0 +1,14 @@
+// error: E0127
+// Both types are first used inside a generic function, after layout: still a cycle.
+type A[T] { b B[T], v T }
+
+type B[T] { a A[T] }
+
+fn f[T](v T) int {
+    _ = v
+    ret sizeof[A[T]]()
+}
+
+fn main() {
+    print(f(1))
+}

@@ -1,0 +1,30 @@
+// Two modules both define `P`: `show[P]` must be one instance per type, not one for both.
+use lib.same_a
+use lib.same_b
+
+type Box[T] { v T }
+
+fn pick[T](b Box[T]) T {
+    ret b.v
+}
+
+fn first[T](xs []T) T {
+    ret xs[0]
+}
+
+fn main() {
+    a := same_a.make(4)
+    b := same_b.make(4, 2)
+    print(same_a.get(pick(Box{a})))
+    print(same_b.get(pick(Box{b})))
+    mut xs []same_a.P = []
+    push(&xs, same_a.make(7))
+    mut ys []same_b.P = []
+    push(&ys, same_b.make(7, 3))
+    print(same_a.get(first(xs)))
+    print(same_b.get(first(ys)))
+}
+// expect: 4
+// expect: 42
+// expect: 7
+// expect: 73

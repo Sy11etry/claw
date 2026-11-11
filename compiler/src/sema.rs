@@ -107,6 +107,10 @@ struct Global<'a> {
     tenv: HashMap<String, Ty>,
     sigs: HashMap<String, FnSig>,
     struct_insts: HashMap<(usize, String, Vec<Ty>), Ty>,
+    /// The type arguments behind each instance name: two types can print alike (`a.P` and `b.P`).
+    fn_targs: HashMap<String, Vec<Ty>>,
+    /// Instances made after layout; laid out together once the outermost one has all its fields.
+    late: Vec<(Ty, usize, String)>,
     instance_of: HashMap<Ty, (usize, String, Vec<Ty>)>,
     spans: HashMap<Ty, Span>,
     layout_ready: bool,
@@ -365,12 +369,20 @@ impl<'a> Global<'a> {
         self.depth -= 1;
         self.tenv = saved_env;
         self.cur = saved_cur;
-        if self.layout_ready {
-            self.ensure_layout(ty, diags);
+        if self.layout_ready || self.funcs_ready {
+            self.late.push((ty, m, d.name.clone()));
         }
-        if self.funcs_ready {
-            let (type_name, args) = (d.name.clone(), self.instance_of[&ty].2.clone());
-            self.attach_generic_drop(ty, m, &type_name, args, diags);
+        if self.depth == 0 {
+            let late = std::mem::take(&mut self.late);
+            for (t, tm, type_name) in late {
+                if self.layout_ready {
+                    self.ensure_layout(t, diags);
+                }
+                if self.funcs_ready {
+                    let args = self.instance_of[&t].2.clone();
+                    self.attach_generic_drop(t, tm, &type_name, args, diags);
+                }
+            }
         }
         ty
     }
@@ -448,9 +460,15 @@ impl<'a> Global<'a> {
     }
 
     fn instantiate_fn(&mut self, f: &'a Func, m: usize, targs: Vec<Ty>, diags: &mut Vec<Diag>) -> String {
-        let full = format!("{}{}[{}]", self.mods[m].prefix, f.name, type_list(&self.types, &targs));
-        if self.sigs.contains_key(&full) {
-            return full;
+        let base = format!("{}{}[{}]", self.mods[m].prefix, f.name, type_list(&self.types, &targs));
+        let mut full = base.clone();
+        let mut n = 1;
+        while let Some(have) = self.fn_targs.get(&full) {
+            if *have == targs {
+                return full;
+            }
+            n += 1;
+            full = format!("{base}#{n}");
         }
         if self.work.len() >= MAX_INSTANCES || self.sigs.len() >= MAX_INSTANCES {
             if !std::mem::replace(&mut self.too_many, true) {
@@ -468,6 +486,7 @@ impl<'a> Global<'a> {
         let own = f.params.iter().map(|p| p.own).collect();
         let has_need = f.contracts.iter().any(|c| !c.sure);
         self.sigs.insert(full.clone(), FnSig { params, own, ret, ext: None, variadic: false, has_need });
+        self.fn_targs.insert(full.clone(), targs.clone());
         self.work.push((f, m, targs, full.clone()));
         full
     }
@@ -941,6 +960,8 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
         tenv: HashMap::new(),
         sigs: HashMap::new(),
         struct_insts: HashMap::new(),
+        fn_targs: HashMap::new(),
+        late: Vec::new(),
         instance_of: HashMap::new(),
         spans: HashMap::new(),
         layout_ready: false,

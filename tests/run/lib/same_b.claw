@@ -1,0 +1,9 @@
+pub type P { x int, y int }
+
+pub fn make(x int, y int) P {
+    ret P{x, y}
+}
+
+pub fn get(p P) int {
+    ret p.x * 10 + p.y
+}

@@ -1,0 +1,16 @@
+// Instances made late that point at each other are fine; they only fail when they hold each other by value.
+type A[T] { b *B[T], v T }
+
+type B[T] { a *A[T], w T }
+
+fn f[T](v T) int {
+    _ = v
+    ret sizeof[A[T]]() + sizeof[B[T]]()
+}
+
+fn main() {
+    print(f(1))
+    print(f(true))
+}
+// expect: 32
+// expect: 32

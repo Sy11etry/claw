@@ -50,6 +50,8 @@ type Mod {
 // A type variable and what it stands for.
 type Bind { name str, ty int }
 
+type Late { ty int, m int, name str, targs []int }
+
 type InstOf { ty int, m int, name str, targs []int }
 
 type Work { m int, index int, targs []int, full str }
@@ -83,6 +85,8 @@ pub type Global {
     sigs Map[str, int],
     sig_list []FnSig,
     struct_insts Map[str, int],
+    fn_targs Map[str, str],
+    late []Late,
     insts []InstOf,
     inst_at Map[int, int],
     spans Map[int, diag.Span],
@@ -583,9 +587,18 @@ fn instantiate_type(l modules.Loaded, g &Global, m int, index int, targs []int) 
     g.depth -= 1
     swap(&g.tenv, &tenv)
     g.cur = saved_cur
-    if g.layout_ready { ensure_layout(&g, ty) }
-    if g.funcs_ready {
-        attach_generic_drop(l, &g, ty, m, d.name, targs)
+    if g.layout_ready or g.funcs_ready {
+        push(&g.late, Late{ty, m, copy(d.name), copy(targs)})
+    }
+    if g.depth == 0 {
+        mut pending []Late = []
+        swap(&g.late, &pending)
+        for p in pending {
+            if g.layout_ready { ensure_layout(&g, p.ty) }
+            if g.funcs_ready {
+                attach_generic_drop(l, &g, p.ty, p.m, p.name, p.targs)
+            }
+        }
     }
     ret ty
 }
@@ -667,8 +680,16 @@ fn place_fields(g Global, fields []types.Field, start u64) Placed {
 
 fn instantiate_fn(l modules.Loaded, g &Global, m int, index int, targs []int) str {
     f := l.units[m].program.funcs[index]
-    full := "{g.mods[m].prefix}{f.name}[{type_list(g.types, targs)}]"
-    if has_key(g.sigs, full) { ret full }
+    base := "{g.mods[m].prefix}{f.name}[{type_list(g.types, targs)}]"
+    ids := inst_key(m, "", targs)
+    mut full := copy(base)
+    mut n := 1
+    for has_key(g.fn_targs, full) {
+        have := get(g.fn_targs, full) else ""
+        if have == ids { ret full }
+        n += 1
+        full = "{base}#{n}"
+    }
     if len(g.work) >= max_instances or len(g.sigs.items) >= max_instances {
         if not g.too_many {
             g.too_many = true
@@ -697,6 +718,7 @@ fn instantiate_fn(l modules.Loaded, g &Global, m int, index int, targs []int) st
         if not c.is_sure { has_need = true }
     }
     add_sig(&g, full, FnSig{params, owned, r, "", false, has_need})
+    put(&g.fn_targs, copy(full), ids)
     push(&g.work, Work{m, index, copy(targs), copy(full)})
     ret full
 }
@@ -1583,7 +1605,7 @@ pub fn check(l &modules.Loaded, tests_only bool, diags &[]diag.Diag) Checked +me
             new_map[str, GVariant](hash_str)})
     }
     mut g := Global{
-        [], types.new_types(), mods, 0, [], new_map[str, int](hash_str), [], new_map[str, int](hash_str), [],
+        [], types.new_types(), mods, 0, [], new_map[str, int](hash_str), [], new_map[str, int](hash_str), new_map[str, str](hash_str), [], [],
         new_map[int, int](hash_int), new_map[int, diag.Span](hash_int), false, false, l.core, false, 0, [], [],
         [], [], [],
         "", false, [], [], [], 0, 0, false, [], [], false, false, [], [], false, false, false,

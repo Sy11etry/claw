@@ -1,0 +1,9 @@
+pub type P { x int }
+
+pub fn make(x int) P {
+    ret P{x}
+}
+
+pub fn get(p P) int {
+    ret p.x
+}
