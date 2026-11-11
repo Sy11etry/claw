@@ -4,6 +4,7 @@ mod arm64;
 mod ast;
 mod cir;
 mod codegen;
+mod codegen_x64;
 mod ctfe;
 mod diag;
 mod dwarf;
@@ -28,6 +29,7 @@ mod sha256;
 mod ssa;
 mod types;
 mod why;
+mod x64;
 
 use diag::Diag;
 use std::path::{Path, PathBuf};
@@ -55,7 +57,7 @@ claw fmt <file.claw> [--check]  put a file into the one standard format
 claw lsp                        language server on stdin and stdout, for editors
 claw --version
 flags: --json (errors as JSON), --emit-cir (print the IR)
-       --target arm64|aarch64-linux|aarch64-linux-musl (build only; default arm64)
+       --target arm64|x86_64|aarch64-linux|aarch64-linux-musl (default arm64; Linux targets build only)
 ";
 
 struct Options {
@@ -82,6 +84,8 @@ struct Options {
     name: Option<String>,
     /// `claw why --test name`.
     test_name: Option<String>,
+    /// `--target x86_64`: write an x86-64 executable instead of an arm64 one.
+    x86_64: bool,
 }
 
 fn parse_options(args: &[String]) -> Options {
@@ -89,7 +93,7 @@ fn parse_options(args: &[String]) -> Options {
 }
 
 fn options(args: &[String], ctx: bool) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None, linux: None };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None, linux: None, x86_64: false };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -103,11 +107,14 @@ fn options(args: &[String], ctx: bool) -> Options {
             "--no-opt" => o.no_opt = true,
             "--target" => {
                 i += 1;
+                o.x86_64 = false;
+                o.linux = None;
                 match args.get(i).map(|s| s.as_str()) {
-                    Some("arm64" | "aarch64" | "arm64-macos") => o.linux = None,
+                    Some("arm64" | "aarch64" | "arm64-macos") => {}
+                    Some("x86_64" | "x86-64" | "x64" | "amd64") => o.x86_64 = true,
                     Some("aarch64-linux" | "aarch64-linux-gnu" | "arm64-linux") => o.linux = Some(elf::Libc::Gnu),
                     Some("aarch64-linux-musl") => o.linux = Some(elf::Libc::Musl),
-                    _ => die("`--target` is `arm64`, `aarch64-linux` (glibc) or `aarch64-linux-musl`"),
+                    _ => die("`--target` is `arm64`, `x86_64`, `aarch64-linux` (glibc) or `aarch64-linux-musl`"),
                 }
             }
             "-g" => o.debug = true,
@@ -261,18 +268,35 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
         }
         return;
     }
-    let object = match codegen::generate(module, files, o.alloc_stats) {
-        Ok(obj) => obj,
-        Err(e) => {
-            eprintln!("{}:1:1 {e}", o.file);
-            exit(1);
+    let ident = out.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into());
+    let mut object = None;
+    let bytes = if o.x86_64 {
+        if o.debug {
+            die("`-g` is only for the default arm64 target");
+        }
+        match codegen_x64::generate(module, files, o.alloc_stats) {
+            Ok(obj) => macho::write_macho_x64(&obj, &ident),
+            Err(e) => {
+                eprintln!("{}:1:1 {e}", o.file);
+                exit(1);
+            }
+        }
+    } else {
+        match codegen::generate(module, files, o.alloc_stats) {
+            Ok(obj) => {
+                let bytes = macho::write_macho(&obj, &ident);
+                object = Some(obj);
+                bytes
+            }
+            Err(e) => {
+                eprintln!("{}:1:1 {e}", o.file);
+                exit(1);
+            }
         }
     };
-    let ident = out.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into());
-    let bytes = macho::write_macho(&object, &ident);
     write_executable(out, &bytes);
-    if o.debug {
-        if let Err(e) = dwarf::write_dsym(out, &object, &bytes, paths) {
+    if let (true, Some(object)) = (o.debug, &object) {
+        if let Err(e) = dwarf::write_dsym(out, object, &bytes, paths) {
             eprintln!("claw: {e}");
             exit(2);
         }
@@ -656,6 +680,12 @@ fn real_main() {
             compile_to_cir(&o, Mode::Build);
         }
         Some("lsp") => lsp::serve(),
+        Some("__encoder-golden-x64") => {
+            for (bytes, text) in x64::golden() {
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                println!("{hex}\t{text}");
+            }
+        }
         Some("__encoder-golden") => {
             for (word, text) in arm64::golden() {
                 println!("{word:08x}\t{text}");

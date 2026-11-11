@@ -1,0 +1,76 @@
+// expect: 29
+// expect: 49
+// expect: 32
+// expect: 50
+// expect: 32
+// expect: 51
+// expect: 32
+// expect: 52
+// expect: 32
+// expect: 53
+// expect: 32
+// expect: 54
+// expect: 32
+// expect: 55
+// expect: 32
+// expect: 56
+// expect: 32
+// expect: 50
+// expect: 46
+// expect: 53
+// expect: 48
+// expect: 32
+// expect: 48
+// expect: 46
+// expect: 49
+// expect: 50
+// expect: 53
+// expect: 32
+// expect: 111
+// expect: 107
+// expect: 1024
+// expect: 24
+// expect: 1.414214
+// expect: 5
+// expect: 65
+// expect: 387
+// expect: 42
+extern fn snprintf(buf *u8, n u64, fmt *u8, ...) i32
+extern fn pow(x f64, y f64) f64
+extern fn ldexp(x f64, e i32) f64
+extern fn sqrtf(x f32) f32
+extern fn abs(n i32) i32
+extern fn toupper(c i32) i32
+
+fn id(x int) int {
+    ret x
+}
+
+fn many(a int, b int, c int, d int, e int, f int, g int, h int, i int, j int, k f64, l f64) f64 {
+    ret f64(a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9 + j * 10) + k * l
+}
+
+fn apply(f fn(int) int, x int) int {
+    ret f(x)
+}
+
+fn twice(x int) int {
+    ret x * 2
+}
+
+claw fn main() {
+    mut buf [128]u8 = [0...]
+    n := snprintf(&buf[0], 128, "%d %d %d %d %d %d %d %d %.2f %.3f %s", id(1), id(2), id(3), id(4), id(5), id(6), id(7), id(8), 2.5, 0.125, "ok")
+    print(n)
+    for c in buf {
+        if c == 0 { break }
+        print(c)
+    }
+    print(pow(2.0, 10.0))
+    print(ldexp(1.5, 4))
+    print(sqrtf(2.0))
+    print(abs(-5))
+    print(toupper(97))
+    print(many(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0.5, 4.0))
+    print(apply(twice, 21))
+}
