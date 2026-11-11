@@ -4,25 +4,12 @@ Real measurements on this machine, median of 5 runs. `claw build` keeps every ch
 
 | Benchmark | clang -O2 | clang -O0 | Claw | Claw `--fast` | Claw vs -O2 | `--fast` vs -O2 |
 |---|---|---|---|---|---|---|
-| fib | 0.141 s | 0.261 s | 0.293 s | 0.298 s | 2.1x | 2.1x |
-| primes | 0.180 s | 0.191 s | 0.191 s | 0.188 s | 1.1x | 1.0x |
-| collatz | 0.191 s | 1.023 s | 0.314 s | 0.311 s | 1.6x | 1.6x |
-| sieve | 0.086 s | 0.138 s | 0.111 s | 0.110 s | 1.3x | 1.3x |
-| mandel | 0.096 s | 0.307 s | 0.152 s | 0.151 s | 1.6x | 1.6x |
-| list | 0.059 s | 0.057 s | 0.056 s | 0.057 s | 1.0x | 1.0x |
-| vec | 0.019 s | 0.083 s | 0.030 s | 0.036 s | 1.6x | 1.9x |
+| fib | 0.147 s | 0.269 s | 0.305 s | 0.310 s | 2.1x | 2.1x |
+| primes | 0.182 s | 0.189 s | 0.196 s | 0.195 s | 1.1x | 1.1x |
+| collatz | 0.206 s | 1.078 s | 0.324 s | 0.331 s | 1.6x | 1.6x |
+| sieve | 0.089 s | 0.144 s | 0.130 s | 0.115 s | 1.5x | 1.3x |
+| mandel | 0.096 s | 0.312 s | 0.136 s | 0.137 s | 1.4x | 1.4x |
+| list | 0.058 s | 0.057 s | 0.061 s | 0.058 s | 1.0x | 1.0x |
+| vec | 0.019 s | 0.081 s | 0.030 s | 0.037 s | 1.6x | 1.9x |
 
-Compiler speed: 44004 lines in 127.0 ms, about 346,370 lines/s (full build to a signed binary).
-
-## The compiler written in Claw
-
-Building `benchmarks/out/big.claw` (44,004 lines), median of 5. All four produce working programs; the two unoptimized ones produce identical bytes.
-
-| Compiler | Time | Lines/s |
-|---|---|---|
-| `claw` (Rust), with optimizer | 131.8 ms | 333,976 |
-| `claw` (Rust), `--no-opt` | 64.1 ms | 686,209 |
-| `clawc` built by Rust with optimizer | 104.9 ms | 419,330 |
-| `clawc` built by itself (no optimizer) | 554.1 ms | 79,422 |
-
-`clawc` building itself (about 14,000 lines with std): 317 ms; `claw --no-opt` on the same: 45 ms.
+Compiler speed: 44004 lines in 132.6 ms, about 331,763 lines/s (full build to a signed binary).

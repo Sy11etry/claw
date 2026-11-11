@@ -1,0 +1,14 @@
+// expect: 499500
+use par
+
+fn sum_to(own n int) int {
+    mut s := 0
+    for i in 0..n { s += i }
+    ret s
+}
+
+fn main() {
+    a := par.spawn(sum_to, 1000)
+    b := par.spawn(sum_to, 10)
+    print(par.join(a) + par.join(b) - 45)
+}

@@ -6,6 +6,7 @@ mod cir;
 mod codegen;
 mod ctfe;
 mod diag;
+mod dwarf;
 mod dump;
 mod effects;
 mod fmt;
@@ -14,6 +15,7 @@ mod info;
 mod interp;
 mod lexer;
 mod lower;
+mod lsp;
 mod macho;
 mod modules;
 mod opt;
@@ -41,6 +43,7 @@ claw fix <file.claw>            apply the compiler's safe patches
 claw build <file.claw> [-o out] optimized executable; contracts with calls are left out
     --fast                      remove every run-time check: speed like C, risk like C
     --stats                     say how many checks were proved unnecessary
+    -g                          also write <out>.dSYM, so lldb can stop on source lines
 claw check <file.claw>          report errors only
 claw card                       the language on one page
 claw sig <file.claw> | std      only the signatures, with the effects worked out
@@ -48,6 +51,7 @@ claw sig <file.claw> | std      only the signatures, with the effects worked out
 claw ctx <file.claw> <fn>       one function and what it takes to change it
 claw audit <file.claw>          every place the compiler has to trust
 claw fmt <file.claw> [--check]  put a file into the one standard format
+claw lsp                        language server on stdin and stdout, for editors
 claw --version
 flags: --json (errors as JSON), --emit-cir (print the IR)
 ";
@@ -64,6 +68,8 @@ struct Options {
     stats: bool,
     /// `claw test --blocks`: no generated inputs, no explanations.
     blocks: bool,
+    /// `claw build -g`: write `name.dSYM` with line tables for lldb.
+    debug: bool,
     /// `claw build --no-opt`: what the compiler written in Claw produces, for comparing.
     no_opt: bool,
     /// `claw sig --pub`.
@@ -79,7 +85,7 @@ fn parse_options(args: &[String]) -> Options {
 }
 
 fn options(args: &[String], ctx: bool) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, test_name: None };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -91,6 +97,7 @@ fn options(args: &[String], ctx: bool) -> Options {
             "--stats" => o.stats = true,
             "--blocks" => o.blocks = true,
             "--no-opt" => o.no_opt = true,
+            "-g" => o.debug = true,
             "--pub" => o.public = true,
             "--test" => {
                 i += 1;
@@ -170,13 +177,13 @@ fn front(o: &Options, memory_checker: bool, tests_only: bool) -> Front {
 
 /// The program as the interpreter runs it: every contract, and the source lines.
 fn for_interp(f: &Front, test: bool) -> cir::Module {
-    let opts = lower::Opts { check: true, test, fast: false, interp: true, consts: &f.consts };
+    let opts = lower::Opts { check: true, test, fast: false, interp: true, debug: false, consts: &f.consts };
     lower::lower(&f.loaded.units, &f.checked, &f.loaded.base_names, opts)
 }
 
-fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
+fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>, Vec<String>) {
     let f = front(o, mode != Mode::Build, mode == Mode::Test);
-    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test, fast: o.fast && mode == Mode::Build, interp: false, consts: &f.consts };
+    let opts = lower::Opts { check: mode != Mode::Build, test: mode == Mode::Test, fast: o.fast && mode == Mode::Build, interp: false, debug: o.debug && mode == Mode::Build, consts: &f.consts };
     if mode == Mode::Build && f.effects.slow > 0 {
         eprintln!("claw: note: {} checks that call functions are left out of this build; `claw run` and `claw test` do them", f.effects.slow);
     }
@@ -189,7 +196,7 @@ fn compile_to_cir(o: &Options, mode: Mode) -> (cir::Module, Vec<String>) {
         }
     }
     let names = f.loaded.base_names.clone();
-    (module, names)
+    (module, names, f.loaded.files.clone())
 }
 
 fn format_file(o: &Options) -> ! {
@@ -219,14 +226,14 @@ fn format_file(o: &Options) -> ! {
 }
 
 fn compile(o: &Options, out: &Path, mode: Mode) {
-    let (module, files) = compile_to_cir(o, mode);
+    let (module, files, paths) = compile_to_cir(o, mode);
     if o.emit_cir {
         print!("{}", cir::dump(&module));
     }
-    emit(o, &module, &files, out);
+    emit(o, &module, &files, &paths, out);
 }
 
-fn emit(o: &Options, module: &cir::Module, files: &[String], out: &Path) {
+fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], out: &Path) {
     let object = match codegen::generate(module, files, o.alloc_stats) {
         Ok(obj) => obj,
         Err(e) => {
@@ -237,6 +244,12 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], out: &Path) {
     let ident = out.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into());
     let bytes = macho::write_macho(&object, &ident);
     write_executable(out, &bytes);
+    if o.debug {
+        if let Err(e) = dwarf::write_dsym(out, &object, &bytes, paths) {
+            eprintln!("claw: {e}");
+            exit(2);
+        }
+    }
 }
 
 /// Writes through a temp file and renames: replacing a binary that already
@@ -345,7 +358,7 @@ fn explain_block(f: &Front, m: &cir::Module, src: &why::Sources, id: cir::FuncId
 fn test_all(o: &Options) -> ! {
     let f = front(o, true, true);
     let files = f.loaded.base_names.clone();
-    let opts = lower::Opts { check: true, test: true, fast: false, interp: false, consts: &f.consts };
+    let opts = lower::Opts { check: true, test: true, fast: false, interp: false, debug: false, consts: &f.consts };
     let mut module = lower::lower(&f.loaded.units, &f.checked, &files, opts);
     let interpreted = for_interp(&f, true);
     let src = why::Sources::new(&f.loaded.units, &f.loaded.files, &files, &f.checked.types);
@@ -359,7 +372,7 @@ fn test_all(o: &Options) -> ! {
     for (i, (name, id)) in tests.iter().enumerate() {
         module.main = *id;
         let exe = dir.join(format!("t{i}"));
-        emit(o, &module, &files, &exe);
+        emit(o, &module, &files, &[], &exe);
         if let Err(why) = run_one_test(&exe, &dir) {
             failed += 1;
             println!("FAIL {name}");
@@ -612,6 +625,7 @@ fn real_main() {
             let o = parse_options(&args[1..]);
             compile_to_cir(&o, Mode::Build);
         }
+        Some("lsp") => lsp::serve(),
         Some("__encoder-golden") => {
             for (word, text) in arm64::golden() {
                 println!("{word:08x}\t{text}");

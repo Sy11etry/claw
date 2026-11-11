@@ -54,6 +54,8 @@ pub struct Opts<'c> {
     pub fast: bool,
     /// For the interpreter: it watches memory itself and wants to know the source lines.
     pub interp: bool,
+    /// `-g`: keep the source line of every statement, for the debugger's table.
+    pub debug: bool,
     /// Values of the `const`s that need a call; empty while they are being worked out.
     pub consts: &'c [ConstData],
 }
@@ -76,6 +78,7 @@ struct Env<'a, 'i> {
     check: bool,
     fast: bool,
     interp: bool,
+    debug: bool,
     consts: &'i [ConstData],
 }
 
@@ -93,6 +96,7 @@ struct FnLower<'a, 'i> {
     /// No contract runs.
     fast: bool,
     interp: bool,
+    debug: bool,
     consts: &'i [ConstData],
     /// The last source position announced to the interpreter.
     mark_at: Option<Span>,
@@ -155,7 +159,7 @@ pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: O
     let filtered: Vec<(&String, &'a ast::Func)> = wanted.iter().filter(|(_, f)| f.contracts.iter().any(|x| !x.sure)).cloned().collect();
     let synth = RefCell::new(Synth { base: list.len() + filtered.len(), jobs: Vec::new(), known: HashMap::new() });
     let by_name: HashMap<String, &'a ast::Func> = list.iter().map(|(n, f)| (n.clone(), *f)).collect();
-    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check, fast: opts.fast, interp: opts.interp, consts: opts.consts };
+    let env = Env { c, files, ids: &ids, funcs: &by_name, synth: &synth, check: opts.check, fast: opts.fast, interp: opts.interp, debug: opts.debug, consts: opts.consts };
     let mut funcs: Vec<Func> = list.iter().map(|(n, f)| lower_func(n, f, &env)).collect();
     for (n, f) in &filtered {
         funcs.push(build_filter(n, f, &env));
@@ -233,6 +237,7 @@ fn new_lower<'a, 'i>(env: &Env<'a, 'i>, ret: Ty, is_main: bool) -> FnLower<'a, '
         check: env.check,
         fast: env.fast,
         interp: env.interp,
+        debug: env.debug,
         consts: env.consts,
         mark_at: None,
         instrument: env.check && !env.interp,
@@ -332,7 +337,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
 
     /// Tells the interpreter which source line runs next.
     fn mark(&mut self, s: Span) {
-        if self.interp {
+        if self.interp || self.debug {
             self.mark_at = Some(s);
             self.emit(Inst::Line { loc: loc(s) });
         }
@@ -1978,6 +1983,12 @@ impl<'a, 'i> FnLower<'a, 'i> {
     fn call(&mut self, e: &'a Expr, name: &str, args: &'a [Expr], via: Option<&'a Expr>) -> Option<VReg> {
         let ty = e.ty.get();
         let res = e.res.borrow().clone();
+        // `__entry[T, R]()` is the address of a function, not a call of it.
+        if let (Res::Func(full), "__entry") = (&res, name) {
+            let d = self.vreg();
+            self.emit(Inst::FuncAddr { d, f: self.ids[full] });
+            return Some(d);
+        }
         let full = match res {
             Res::Value(t) => {
                 let callee = match via {
@@ -2057,6 +2068,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
                 self.emit(Inst::RtState { d });
                 Some(d)
             }
+            "__sequential" => Some(self.constant(self.check as i64)),
             "cast" => {
                 let s = self.expr_value(&args[0]);
                 let d = self.vreg();

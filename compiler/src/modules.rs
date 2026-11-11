@@ -6,6 +6,23 @@ use crate::{lexer, parser};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+thread_local! {
+    /// Text of files an editor has open and not saved: the language server reads these instead of the disk.
+    static OVERLAY: std::cell::RefCell<HashMap<PathBuf, String>> = std::cell::RefCell::new(HashMap::new());
+}
+
+pub fn set_overlay(files: HashMap<PathBuf, String>) {
+    OVERLAY.with(|o| *o.borrow_mut() = files);
+}
+
+fn read_source(path: &Path) -> std::io::Result<String> {
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(text) = OVERLAY.with(|o| o.borrow().get(&key).cloned()) {
+        return Ok(text);
+    }
+    std::fs::read_to_string(path)
+}
+
 pub struct Unit {
     /// Prepended to names to make them unique: "" for the root, "geo." for `use geo`.
     pub prefix: String,
@@ -81,7 +98,7 @@ impl Loader {
             self.diags.push(Diag::new("E0146", at, format!("module `{prefix}` is part of an import cycle")));
             return None;
         }
-        let src = match std::fs::read_to_string(&path) {
+        let src = match read_source(&path) {
             Ok(s) => s,
             Err(e) => {
                 if from.is_none() {

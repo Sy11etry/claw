@@ -1,0 +1,15 @@
+// error: E0104
+use par
+
+fn total(xs []int) int {
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn main() {
+    mut a []int = []
+    push(&a, 1)
+    t := par.spawn(total, a)
+    print(par.join(t))
+}

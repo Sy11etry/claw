@@ -2468,6 +2468,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
             }
             "__state" if self.g.mods[self.g.cur].prefix == "__check." => self.g.types.intern(Kind::Pointer(INT)),
+            // For `std/par.claw` only: whether tasks must run one after another, and where a task's thread starts.
+            "__sequential" if self.g.mods[self.g.cur].prefix == "par." => BOOL,
+            "__entry" if self.g.mods[self.g.cur].prefix == "par." => {
+                let targs = self.resolve_targs(targs)?;
+                let m = self.g.cur;
+                let (Some(f), _) = self.g.mods[m].funcs.get("thread_main").copied()? else { return Some(ERR) };
+                let full = self.g.instantiate_fn(f, m, targs, self.diags);
+                *e.res.borrow_mut() = Res::Func(full);
+                self.g.types.intern(Kind::Pointer(U8))
+            }
             "copy" => {
                 if args.len() != 1 {
                     return Some(self.err("E0106", span, format!("`copy` takes 1 value, found {}", args.len())));

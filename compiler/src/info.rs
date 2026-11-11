@@ -135,6 +135,26 @@ pub fn sig(units: &[Unit], report: &Report, public_only: bool) -> String {
     sig_of_program(&root.program, public_only, &|f| effects_of(f, &root.prefix, report))
 }
 
+/// What a name stands for, as one declaration, and where it is declared: for hover and go-to-definition.
+/// The root file is searched first, then the modules it uses.
+pub fn describe(units: &[Unit], report: &Report, name: &str) -> Option<(String, crate::diag::Span)> {
+    for u in units.iter().rev() {
+        if let Some(f) = u.program.funcs.iter().find(|f| visible(f) && f.name == name) {
+            return Some((header(f, &effects_of(f, &u.prefix, report)).trim_end().to_string(), f.name_span));
+        }
+        if let Some(d) = u.program.types.iter().find(|d| d.name == name) {
+            return Some((type_decl(d).trim_end().to_string(), d.span));
+        }
+        if let Some(c) = u.program.consts.iter().find(|c| c.name == name) {
+            return Some((const_decl(c).trim_end().to_string(), c.span));
+        }
+        if let Some(x) = u.program.externs.iter().find(|x| x.name == name) {
+            return Some((extern_decl(x).trim_end().to_string(), x.span));
+        }
+    }
+    None
+}
+
 pub fn sig_std() -> String {
     let mut out = String::new();
     for (name, p) in crate::modules::std_programs() {

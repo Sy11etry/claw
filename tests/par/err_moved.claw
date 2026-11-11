@@ -1,0 +1,16 @@
+// error: E0151
+use par
+
+fn total(own xs []int) int {
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn main() {
+    mut a []int = []
+    push(&a, 1)
+    t := par.spawn(total, a)
+    print(len(a))
+    print(par.join(t))
+}

@@ -1,16 +1,16 @@
-# Claw 0.8 card
+# Claw 0.10 card
 
 One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
 
 ```claw
-type Point { x int, y int }              // struct
-type Shape = Circle{r f64} | Dot         // variants
+type Point { x int, y int }
+type Shape = Circle{r f64} | Dot
 type ParseErr = Empty | Bad{at int}
 
 const limit = 100
-const big int = twice(limit)             // typed: may call functions; runs while compiling
+const big int = twice(limit)             // runs while compiling
 
-fn add(a Point, b Point) Point {         // parameters are read-only
+fn add(a Point, b Point) Point {
     ret Point{a.x + b.x, a.y + b.y}      // struct fields are positional
 }
 
@@ -34,7 +34,7 @@ fn find(a []int, x int) ?int {
 }
 
 fn main() {
-    x := 5                               // immutable, type inferred
+    x := 5                               // immutable
     y i32 = 7
     mut s := 0
     for i in 0..10 { s += i }
@@ -53,7 +53,7 @@ fn main() {
     f := find(b, 2) else {               // or a block that exits
         ret
     }
-    g := digit('x') else err {           // the error value
+    g := digit('x') else err {
         print("{err}")
         ret
     }
@@ -85,7 +85,7 @@ fn names() []str {
     ret a
 }
 
-fn total(a []int) int { ... }            // parameter: read-only view; takes a `[N]int` too
+fn total(a []int) int { ... }            // read-only view; takes a `[N]int` too
 fn clear_it(a &[]int) { a = [] }         // `&`: may change it; call clear_it(&x)
 fn keep(own s str) Box { ... }           // `own`: takes it over; call keep(s)
 
@@ -93,8 +93,8 @@ fn demo() {
     a := names()
     b := a                               // `a` moved
     c := copy(b)
-    s := "n = {len(c)}"                  // a new str
-    v := b[1..]                          // also `[..2]`, and on str
+    s := "n = {len(c)}"
+    v := b[1..]                          // also `[..2]`
     print("{s} {v}")
 }                                        // the rest is freed here
 ```
@@ -107,6 +107,7 @@ A collection cannot change while `for` walks it. One call cannot pass the same t
 Always available: `push pop insert remove clear reserve swap sort has index_of`,
 `find contains starts_with ends_with trim split lines join upper lower to_int`. Also `use fs`, `use math`.
 `claw sig std` lists their signatures.
+Threads (`use par`): `t := par.spawn(work, x)`, later `par.join(t)`. `work` is a `fn(own T) R +mem`; tasks share nothing.
 
 Map: `mut m := new_map[str, int](hash_str)` (or `hash_int`), `put(&m, k, v)`, `get(m, k) else 0`, `has_key(m, k)`,
 `del(&m, k)`, `for e in m.items { e.key, e.val }`, `len(m.items)`.
@@ -141,7 +142,7 @@ No methods. `+mem +io` may follow a function type. A template, an `extern` or a 
 extern fn strlen(s *u8) u64              // any libSystem function
 
 claw fn sum() int {
-    p := alloc[int](3)                   // 3 items on the heap
+    p := alloc[int](3)
     defer free(p)                        // when this block ends
     p[0] = 1
     q := p + 1
@@ -169,7 +170,7 @@ pub fn div(a int, b int) int +io
 }
 
 test "div" {
-    sure div(6, 2) == 3                  // works in any body
+    sure div(6, 2) == 3
 }
 ```
 

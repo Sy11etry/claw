@@ -1,0 +1,39 @@
+// expect: 4950
+// expect: 4950
+// expect: done
+use par
+
+fn total(own xs []int) int {
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn doubled(own xs []int) []int +mem {
+    mut out []int = []
+    for x in xs { push(&out, x * 2) }
+    ret out
+}
+
+fn chunk(from int, to int) []int +mem {
+    mut a []int = []
+    for i in from..to { push(&a, i) }
+    ret a
+}
+
+fn main() {
+    // four tasks, each owns its own quarter of the numbers 0..100
+    mut tasks []par.Task[int] = []
+    for q in 0..4 { push(&tasks, par.spawn(total, chunk(q * 25, q * 25 + 25))) }
+    mut sum := 0
+    for len(tasks) > 0 { sum += par.join(remove(&tasks, 0)) }
+    print(sum)
+
+    // a task hands back an array; the array is the caller's again
+    t := par.spawn(doubled, chunk(0, 100))
+    print(total(par.join(t)) / 2)
+
+    // a task that is never joined is joined and cleaned up on its own
+    _ = par.spawn(doubled, chunk(0, 10))
+    print("done")
+}

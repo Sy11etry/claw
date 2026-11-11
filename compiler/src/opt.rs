@@ -758,7 +758,7 @@ fn num_bits(n: Num) -> u64 {
     n.bits as u64 | (n.signed as u64) << 8 | (n.checked as u64) << 9
 }
 
-fn key_of(i: &Inst) -> Option<(Key, Option<VReg>)> {
+fn key_of(i: &Inst, float: &[bool]) -> Option<(Key, Option<VReg>)> {
     let (a, b): (u64, u64);
     Some(match i {
         Inst::Bin { op, d, a: x, b: y, num, .. } => {
@@ -779,7 +779,8 @@ fn key_of(i: &Inst) -> Option<(Key, Option<VReg>)> {
         Inst::FCmp { cc, d, a: x, b: y, bits } => ((13, *x as u64, *y as u64, *cc as u64 | (*bits as u64) << 8), Some(*d)),
         Inst::Bounds { idx, len, .. } => ((14, *idx as u64, *len, 0), None),
         Inst::BoundsDyn { idx, len, .. } => ((15, *idx as u64, *len as u64, 0), None),
-        Inst::Const { d, v } => ((16, *v as u64, 0, 0), Some(*d)),
+        // 0 and 0.0 are the same bits but live in different registers.
+        Inst::Const { d, v } => ((16, *v as u64, float[*d as usize] as u64, 0), Some(*d)),
         Inst::ObjAddr { d, obj } => ((17, *obj as u64, 0, 0), Some(*d)),
         _ => return None,
     })
@@ -792,6 +793,7 @@ fn gvn(f: &mut Func) {
     let kids = dom_children(&idom);
     let mut table: std::collections::HashMap<Key, Option<VReg>> = std::collections::HashMap::new();
     let mut repl: Vec<VReg> = (0..f.nvregs).collect();
+    let float = crate::regalloc::float_classes(f);
     enum Step {
         Enter(BlockId),
         Leave(Vec<Key>),
@@ -818,7 +820,7 @@ fn gvn(f: &mut Func) {
                     }
                 });
             }
-            if let Some((key, d)) = key_of(&i) {
+            if let Some((key, d)) = key_of(&i, &float) {
                 if let Some(prev) = table.get(&key) {
                     if let (Some(d), Some(p)) = (d, prev) {
                         repl[d as usize] = *p;
@@ -880,6 +882,7 @@ fn licm(f: &mut Func) {
     if loops.is_empty() {
         return;
     }
+    let float = crate::regalloc::float_classes(f);
     let mut def_block = vec![usize::MAX; f.nvregs as usize];
     for (bi, b) in f.blocks.iter().enumerate() {
         for i in &b.insts {
@@ -905,7 +908,9 @@ fn licm(f: &mut Func) {
             let old = std::mem::take(&mut f.blocks[b].insts);
             let mut keep = Vec::with_capacity(old.len());
             for i in old {
-                let movable = i.removable() && !matches!(i, Inst::Phi { .. } | Inst::Pi { .. } | Inst::Load { .. } | Inst::Cmp { .. } | Inst::FCmp { .. } | Inst::Const { .. } | Inst::ObjAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::Mov { .. });
+                let movable = i.removable() && !matches!(i, Inst::Phi { .. } | Inst::Pi { .. } | Inst::Load { .. } | Inst::Cmp { .. } | Inst::FCmp { .. } | Inst::ObjAddr { .. } | Inst::StrAddr { .. } | Inst::RtState { .. } | Inst::Mov { .. });
+                // A float constant costs two instructions each time; an integer one is usually an immediate.
+                let movable = movable || matches!(&i, Inst::Const { d, v } if float[*d as usize] || !crate::regalloc::cheap_const(*v));
                 let mut inside = false;
                 i.each(&mut |v, def| {
                     if !def && (def_block[v as usize] == usize::MAX || body.contains(&def_block[v as usize])) {
@@ -1008,10 +1013,79 @@ pub fn optimize(m: &mut Module, fast: bool) -> Stats {
     for f in m.funcs.iter_mut().filter(|f| !f.dead) {
         stats.checks_after += count_checks(f);
         ssa::destruct(f);
+        rotate_loops(f);
         drop_unused_objects(f);
         f.optimized = true;
     }
     stats
+}
+
+/// `for` tests its condition at the top, so every pass costs a jump back as well. When the test is a
+/// few harmless instructions, the end of the loop gets its own copy and branches straight to the body.
+fn rotate_loops(f: &mut Func) {
+    const MAX_COPIED: usize = 6;
+    let n = f.blocks.len();
+    let mut uses = vec![0u32; f.nvregs as usize];
+    let mut defs = vec![0u32; f.nvregs as usize];
+    for b in &mut f.blocks {
+        for i in &b.insts {
+            i.each(&mut |v, def| if def { defs[v as usize] += 1 } else { uses[v as usize] += 1 });
+        }
+        ssa::term_each_use(&mut b.term, &mut |v| uses[*v as usize] += 1);
+    }
+    let copyable = |i: &Inst| {
+        i.removable() && !i.is_call() && !matches!(i, Inst::Phi { .. } | Inst::Pi { .. })
+            || matches!(i, Inst::Bin { .. } | Inst::IntCast { .. } | Inst::Bounds { .. } | Inst::BoundsDyn { .. })
+    };
+    for l in 0..n {
+        let Term::Jmp(h) = f.blocks[l].term else { continue };
+        if h > l || h == l || !matches!(f.blocks[h].term, Term::Br { .. }) {
+            continue;
+        }
+        if f.blocks[h].insts.len() > MAX_COPIED || !f.blocks[h].insts.iter().all(copyable) {
+            continue;
+        }
+        // Values the test makes and only the test reads can be renamed in the copy.
+        let mut local_uses = std::collections::HashMap::<VReg, u32>::new();
+        for i in &f.blocks[h].insts {
+            i.each(&mut |v, def| if !def { *local_uses.entry(v).or_insert(0) += 1 });
+        }
+        let mut term = f.blocks[h].term.clone();
+        ssa::term_each_use(&mut term, &mut |v| *local_uses.entry(*v).or_insert(0) += 1);
+        let mut rename = std::collections::HashMap::<VReg, VReg>::new();
+        let mut copy = Vec::new();
+        let mut carried = false;
+        for i in f.blocks[h].insts.clone() {
+            let mut i = i;
+            i.each_mut(&mut |v, def| {
+                let local = defs[*v as usize] == 1 && uses[*v as usize] == local_uses.get(v).copied().unwrap_or(0);
+                if def {
+                    if local {
+                        let fresh = f.nvregs;
+                        f.nvregs += 1;
+                        rename.insert(*v, fresh);
+                        *v = fresh;
+                    }
+                } else if let Some(r) = rename.get(v) {
+                    *v = *r;
+                } else if local && f.blocks[h].insts.iter().any(|x| x.def() == Some(*v)) {
+                    // Read before this pass writes it: a value carried round the loop.
+                    carried = true;
+                }
+            });
+            copy.push(i);
+        }
+        if carried {
+            continue;
+        }
+        ssa::term_each_use(&mut term, &mut |v| {
+            if let Some(r) = rename.get(v) {
+                *v = *r;
+            }
+        });
+        f.blocks[l].insts.append(&mut copy);
+        f.blocks[l].term = term;
+    }
 }
 
 fn placeholder() -> Func {

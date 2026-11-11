@@ -1,0 +1,12 @@
+// error: E0178
+use par
+
+fn noisy(own n int) int +io {
+    print(n)
+    ret n
+}
+
+fn main() {
+    t := par.spawn(noisy, 1)
+    print(par.join(t))
+}

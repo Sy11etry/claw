@@ -207,6 +207,46 @@ def selfhost_corpus(tmp):
     return None if not bad else f"{len(bad)} differ: {', '.join(bad[:5])}"
 
 
+def debug_test(path, tmp):
+    """`claw build -g`: the .dSYM passes dwarfdump, and lldb stops on the line with the right backtrace."""
+    import shutil
+
+    if not (shutil.which("lldb") and shutil.which("dwarfdump")):
+        return None
+    text = path.read_text()
+    problems = []
+    for flags in ([], ["--no-opt"]):
+        exe = tmp / ("dbg" + "".join(f.strip("-") for f in flags) + "_" + path.stem)
+        p = child([CLAW, "build", "-g", path, "-o", exe, *flags], capture_output=True, text=True, env={"PATH": ""})
+        if p.returncode != 0:
+            return f"compile failed:\n{p.stderr}"
+        v = child(["dwarfdump", "--verify", f"{exe}.dSYM"], capture_output=True, text=True)
+        if v.returncode != 0 or "No errors" not in v.stdout + v.stderr:
+            return f"dwarfdump --verify {' '.join(flags)}: {v.stdout}{v.stderr}"
+        line = headers(text, "break")[0]
+        cmds = ["-o", f"breakpoint set -f {path.name} -l {line}", "-o", "run", "-o", "bt", "-o", "kill"]
+        r = child(["lldb", "-b", *cmds, str(exe)], capture_output=True, text=True, timeout=60)
+        out = r.stdout + r.stderr
+        # Optimized code may have inlined a callee, so only the plain build promises the call chain.
+        wanted = headers(text, "frame") if flags else [f"{path.name}:{line}"]
+        for want in wanted:
+            where = want.split(" at ")[-1]
+            if not re.search(rf"at {re.escape(where)}", out):
+                problems.append(f"{' '.join(flags) or 'optimized'}: nothing at `{want}` in:\n{out}")
+        if flags:
+            for want in headers(text, "frame"):
+                fn, where = want.split(" at ")
+                if not re.search(rf"`{re.escape(fn)} at {re.escape(where)}", out):
+                    problems.append(f"{' '.join(flags)}: no frame `{want}` in:\n{out}")
+    return "\n".join(problems) or None
+
+
+def lsp_test():
+    """`claw lsp` answers an editor: diagnostics on unsaved text, quick fixes, hover, outline, formatting."""
+    p = child([sys.executable, ROOT / "tools/lsp_check.py"], capture_output=True, text=True, env={**os.environ, "CLAW": str(CLAW)}, timeout=120)
+    return None if p.returncode == 0 else p.stdout + p.stderr
+
+
 def card_command():
     """`claw card` is exactly the card the size budget is checked on."""
     p = child([CLAW, "card"], capture_output=True, text=True)
@@ -292,6 +332,26 @@ def own_test(path, tmp):
     least = headers(text, "allocs-at-least")
     if least and int(m[1]) < int(least[0]):
         return f"expected at least {least[0]} allocations, saw {m[1]}"
+    return None
+
+
+def par_test(path, tmp):
+    """Tasks: the checked run is sequential, the built program really uses threads.
+    Both must print the same, many times over, in every build mode."""
+    text = path.read_text()
+    want = headers(text, "expect")
+    p = child([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+    if p.returncode != 0 or p.stdout.splitlines() != want:
+        return f"claw run: exit {p.returncode}, got {p.stdout.splitlines()}, wanted {want}\n{p.stderr}"
+    for mode in ([], ["--fast"], ["--no-opt"]):
+        exe = tmp / ("par_" + path.stem + "".join(mode))
+        b = child([CLAW, "build", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode != 0:
+            return f"compile {mode} failed:\n{b.stderr}"
+        for _ in range(25):
+            r = child([exe], capture_output=True, text=True, timeout=30)
+            if r.returncode != 0 or r.stdout.splitlines() != want:
+                return f"threads {mode}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
     return None
 
 
@@ -400,6 +460,18 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL info/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/debug").glob("*.claw")):
+            total += 1
+            msg = debug_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL debug/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/par").glob("*.claw")):
+            total += 1
+            msg = err_test(path) if path.name.startswith("err_") else par_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL par/{path.name}: {msg}")
         total += 1
         msg = bootstrap()
         if msg:
@@ -410,6 +482,11 @@ def main():
         if msg:
             failures += 1
             print(f"FAIL selfhost corpus: {msg}")
+        total += 1
+        msg = lsp_test()
+        if msg:
+            failures += 1
+            print(f"FAIL lsp: {msg}")
         total += 1
         msg = card_command()
         if msg:

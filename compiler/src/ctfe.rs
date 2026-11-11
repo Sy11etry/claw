@@ -16,7 +16,7 @@ pub fn evaluate(units: &[Unit], c: &Checked, files: &[String], diags: &mut Vec<D
     if n == 0 {
         return Vec::new();
     }
-    let module = lower::lower(units, c, files, Opts { check: true, test: false, fast: false, interp: true, consts: &[] });
+    let module = lower::lower(units, c, files, Opts { check: true, test: false, fast: false, interp: true, debug: false, consts: &[] });
     let cfg = Config { steps: STEPS, memory: 1 << 30, depth: 100_000, io: false, stdout: false, trace: false, cover: false };
     let mut mc = Machine::new(&module, files, cfg);
     mc.consts = vec![None; n];

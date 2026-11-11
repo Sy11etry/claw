@@ -1,0 +1,62 @@
+// Threads without data races: a task owns its input and hands back its result.
+// Nothing is shared, so there is nothing to race on. `claw run` and `claw test`
+// run tasks one after another, so a failure replays the same way every time.
+
+extern "pthread_create" fn c_create(t *u64, attr *u8, f *u8, arg *u8) i32
+extern "pthread_join" fn c_join(t u64, out *u8) i32
+
+// Where a task leaves its result. `state` is 0 while a thread may still run, 1 after.
+type Cell[R] { state int, taken bool, out R }
+
+pub type Task[R] { tid u64, cell *Cell[R] }
+
+// `cell` comes first: the address of the job is the address of the cell.
+type Job[T, R] { cell Cell[R], f fn(own T) R +mem, arg T }
+
+fn discard[R](own _ R) {
+}
+
+claw fn thread_main[T, R](p *u8) *u8 +mem {
+    j := cast[*Job[T, R]](p)
+    f := j.f
+    j.cell.out = f(j.arg)
+    ret none
+}
+
+pub claw fn spawn[T, R](f fn(own T) R +mem, own x T) Task[R] +mem {
+    j := alloc[Job[T, R]](1)
+    j.cell.state = 1
+    j.cell.taken = false
+    j.f = f
+    j.arg = x
+    cell := cast[*Cell[R]](j)
+    if not __sequential() {
+        mut tid u64 = 0
+        if c_create(&tid, none, __entry[T, R](), cast[*u8](j)) == 0 {
+            j.cell.state = 0
+            ret Task[R]{tid, cell}
+        }
+    }
+    j.cell.out = f(j.arg)
+    ret Task[R]{0, cell}
+}
+
+claw fn finish[R](t Task[R]) +mem {
+    if t.cell.state == 0 {
+        _ = c_join(t.tid, none)
+        t.cell.state = 1
+    }
+}
+
+pub claw fn join[R](own t Task[R]) R +mem {
+    finish(t)
+    t.cell.taken = true
+    ret t.cell.out
+}
+
+// Leaving a task unjoined joins it here and drops its result.
+claw fn drop[R](t &Task[R]) +mem {
+    finish(t)
+    if not t.cell.taken { discard(t.cell.out) }
+    free(t.cell)
+}

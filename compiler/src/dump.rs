@@ -957,7 +957,7 @@ pub fn cir_dump(args: &[String]) {
             effects::check(&l.units, &c, &mut diags);
             let consts = if diags.is_empty() { ctfe::evaluate(&l.units, &c, &l.base_names, &mut diags) } else { Vec::new() };
             if diags.is_empty() {
-                let opts = lower::Opts { check, test, fast, interp: false, consts: &consts };
+                let opts = lower::Opts { check, test, fast, interp: false, debug: false, consts: &consts };
                 let m = lower::lower(&l.units, &c, &l.base_names, opts);
                 o = if regs { reg_dump(&m) } else { cir::dump(&m) };
             } else {

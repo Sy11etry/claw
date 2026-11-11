@@ -1,0 +1,14 @@
+// break: 5
+// frame: square at stop_at_line.claw:5
+// frame: main at stop_at_line.claw:11
+fn square(x int) int {
+    ret x * x
+}
+
+fn main() {
+    mut total := 0
+    for i in 1..4 {
+        total += square(i)
+    }
+    print(total)
+}

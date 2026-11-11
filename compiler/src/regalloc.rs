@@ -44,10 +44,19 @@ struct Interval {
     crosses: bool,
     /// Touches a call or the entry: x0-x7 are in use around it.
     touches: bool,
+    /// Dies as argument `n` of the only call it touches: it may sit in `x{n}` already.
+    arg_reg: Option<u32>,
+    /// Made by the call at its start, which leaves it in x0.
+    ret_reg: bool,
     weight: f32,
 }
 
-fn float_classes(f: &Func) -> Vec<bool> {
+/// An integer constant that one or two instructions rebuild, or an operand field can hold.
+pub fn cheap_const(v: i64) -> bool {
+    (-65536..65536).contains(&v) || crate::arm64::logical_imm(v as u64).is_some()
+}
+
+pub fn float_classes(f: &Func) -> Vec<bool> {
     let n = f.nvregs as usize;
     let mut parent: Vec<u32> = (0..f.nvregs).collect();
     fn root(p: &mut [u32], mut x: u32) -> u32 {
@@ -61,9 +70,15 @@ fn float_classes(f: &Func) -> Vec<bool> {
     for b in &f.blocks {
         for i in &b.insts {
             match i {
-                Inst::Mov { d, s } => {
+                Inst::Mov { d, s } | Inst::Pi { d, s, .. } => {
                     let (a, c) = (root(&mut parent, *d), root(&mut parent, *s));
                     parent[a as usize] = c;
+                }
+                Inst::Phi { d, args } => {
+                    for (_, s) in args {
+                        let (a, c) = (root(&mut parent, *d), root(&mut parent, *s));
+                        parent[a as usize] = c;
+                    }
                 }
                 Inst::FBin { d, a, b, .. } => {
                     float[*d as usize] = true;
@@ -202,6 +217,9 @@ pub fn allocate(f: &Func) -> Alloc {
     let mut weight = vec![0f32; n];
     let mut hint: Vec<Option<VReg>> = vec![None; n];
     let mut calls: Vec<u32> = vec![0];
+    let mut call_arg: Vec<Option<(u32, u32)>> = vec![None; n];
+    let mut call_result: Vec<Option<u32>> = vec![None; n];
+    let mut x0_unsafe = vec![false; n];
     let mut pos = 2u32;
     let touch = |v: VReg, p: u32, start: &mut Vec<u32>, end: &mut Vec<u32>| {
         let i = v as usize;
@@ -217,6 +235,26 @@ pub fn allocate(f: &Func) -> Alloc {
         for i in &b.insts {
             if i.is_call() {
                 calls.push(pos);
+            }
+            if let Inst::Call { args, .. } = i {
+                for (k, a) in args.iter().enumerate().take(8) {
+                    call_arg[*a as usize].get_or_insert((k as u32, pos));
+                }
+            }
+            if let Inst::Call { d: Some(d), .. } | Inst::CallInd { d: Some(d), .. } = i {
+                call_result[*d as usize] = Some(pos);
+            }
+            // Arguments are loaded x0, x1, ... in turn, so a value waiting in x0 survives only as argument 0.
+            if i.is_call() {
+                let first = match i {
+                    Inst::Call { args, .. } => args.first().copied(),
+                    _ => None,
+                };
+                i.each(&mut |v, def| {
+                    if !def && Some(v) != first {
+                        x0_unsafe[v as usize] = true;
+                    }
+                });
             }
             if let Inst::Mov { d, s } = i {
                 hint[*d as usize] = Some(*s);
@@ -250,6 +288,21 @@ pub fn allocate(f: &Func) -> Alloc {
         }
     }
 
+    // A float constant used in a loop is worth a register of its own; if none is left it is rebuilt at each use.
+    let mut fconst: Vec<Option<i64>> = vec![None; n];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::Const { d, v } = i {
+                let k = *d as usize;
+                if remat[k] && (float[k] || !cheap_const(*v)) && weight[k] >= 8.0 {
+                    fconst[k] = Some(*v);
+                    remat[k] = false;
+                    places[k] = Place::None;
+                }
+            }
+        }
+    }
+
     let mut list: Vec<Interval> = Vec::new();
     for v in 0..f.nvregs {
         let i = v as usize;
@@ -260,13 +313,13 @@ pub fn allocate(f: &Func) -> Alloc {
         let touches = at < calls.len() && calls[at] <= end[i];
         let first_inside = calls.partition_point(|c| *c <= start[i]);
         let crosses = first_inside < calls.len() && calls[first_inside] < end[i];
-        list.push(Interval { v, start: start[i], end: end[i], float: float[i], crosses, touches, weight: weight[i] / (end[i] - start[i] + 1) as f32 });
+        let arg_reg = call_arg[i].filter(|(_, p)| !float[i] && at < calls.len() && calls[at] == *p && *p == end[i] && *p != 0).map(|(k, _)| k);
+        let ret_reg = !float[i] && !crosses && !x0_unsafe[i] && call_result[i] == Some(start[i]) && defs[i] == 1;
+        list.push(Interval { v, start: start[i], end: end[i], float: float[i], crosses, touches, arg_reg, ret_reg, weight: weight[i] / (end[i] - start[i] + 1) as f32 });
     }
     list.sort_by_key(|x| x.start);
 
     let mut active: Vec<(Interval, u32)> = Vec::new();
-    let mut busy_x = 0u32;
-    let mut busy_d = 0u32;
     let mut slots = 0u32;
     let mut used_x = 0u32;
     let mut used_d = 0u32;
@@ -285,6 +338,10 @@ pub fn allocate(f: &Func) -> Alloc {
             if !iv.crosses {
                 if !iv.touches {
                     out.extend(LOW_X);
+                } else if iv.ret_reg {
+                    out.push(0);
+                } else if let Some(k) = iv.arg_reg {
+                    out.push(k);
                 }
                 out.extend(MID_X);
             }
@@ -294,20 +351,21 @@ pub fn allocate(f: &Func) -> Alloc {
     };
 
     for iv in list {
-        active.retain(|(a, r)| {
-            if a.end < iv.start {
-                if a.float {
-                    busy_d &= !(1 << r);
-                } else {
-                    busy_x &= !(1 << r);
-                }
-                false
+        active.retain(|(a, _)| a.end >= iv.start);
+        let (mut busy_x, mut busy_d) = (0u32, 0u32);
+        for (a, r) in &active {
+            if a.float {
+                busy_d |= 1 << r;
             } else {
-                true
+                busy_x |= 1 << r;
             }
-        });
+        }
         let options = candidates(&iv);
-        let busy = if iv.float { busy_d } else { busy_x };
+        let mut busy = if iv.float { busy_d } else { busy_x };
+        // A call's result arrives in x0, where its own last argument may still sit.
+        if iv.ret_reg && busy & 1 != 0 && active.iter().all(|(a, r)| *r != 0 || a.float || a.end <= iv.start) {
+            busy &= !1;
+        }
         let hinted = hint[iv.v as usize].and_then(|h| match places[h as usize] {
             Place::Reg(r) if !iv.float => Some(r),
             Place::Fpr(r) if iv.float => Some(r),
@@ -335,11 +393,9 @@ pub fn allocate(f: &Func) -> Alloc {
         match chosen {
             Some(r) => {
                 if iv.float {
-                    busy_d |= 1 << r;
                     used_d |= 1 << r;
                     places[iv.v as usize] = Place::Fpr(r);
                 } else {
-                    busy_x |= 1 << r;
                     used_x |= 1 << r;
                     places[iv.v as usize] = Place::Reg(r);
                 }
@@ -349,6 +405,12 @@ pub fn allocate(f: &Func) -> Alloc {
                 places[iv.v as usize] = Place::Slot(slots);
                 slots += 1;
             }
+        }
+    }
+
+    for (k, c) in fconst.iter().enumerate() {
+        if let (Some(v), Place::Slot(_)) = (c, places[k]) {
+            places[k] = Place::Const(*v);
         }
     }
 

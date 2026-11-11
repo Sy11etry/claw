@@ -61,11 +61,16 @@ pub struct Object {
     pub imports: Vec<String>,
     /// Symbol name and code position in instructions.
     pub symbols: Vec<(String, usize)>,
+    /// With `-g`: the source position that each run of instructions comes from (index into `code`).
+    pub lines: Vec<(usize, Loc)>,
     pub entry: usize,
     pub bss_size: u64,
 }
 
 struct Gen {
+    /// Where the function being written begins, until its first source line is known.
+    func_first: Option<usize>,
+    lines: Vec<(usize, Loc)>,
     code: Vec<u32>,
     rodata: Vec<u8>,
     data_refs: Vec<(usize, usize)>,
@@ -276,11 +281,20 @@ impl Gen {
         }
     }
 
+    fn const_of(f: &Frame, v: VReg) -> Option<i64> {
+        match f.place(v) {
+            Place::Const(c) => Some(c),
+            _ => None,
+        }
+    }
+
     fn compare(&mut self, fr: &Frame, a: VReg, b: VReg) {
         let x = self.use_x(fr, a, X9);
-        match Self::small_const(fr, b) {
-            Some(k) => self.e(cmp_imm(x, k)),
-            None => {
+        match (Self::small_const(fr, b), Self::const_of(fr, b)) {
+            (Some(k), _) => self.e(cmp_imm(x, k)),
+            // `cmp x, #-k` is `cmn x, #k`, flags and all.
+            (None, Some(c)) if (-4095..0).contains(&c) => self.e(cmn_imm(x, -c as u32)),
+            _ => {
                 let y = self.use_x(fr, b, X10);
                 self.e(cmp(x, y));
             }
@@ -642,6 +656,7 @@ impl Gen {
     }
 
     fn func(&mut self, f: &Func, fmts: (usize, usize)) {
+        self.func_first = Some(self.here());
         let mut outgoing = 0u32;
         for b in &f.blocks {
             for i in &b.insts {
@@ -877,13 +892,33 @@ impl Gen {
     /// Writes the callee-saved registers this function uses, or reads them back.
     fn save_regs(&mut self, fr: &Frame, restore: bool) {
         let mut off = fr.save_base;
-        for r in fr.alloc.saved_x.clone() {
-            self.e(if restore { ldr(r, SP, off) } else { str(r, SP, off) });
-            off += 8;
+        // Two registers at a time where the frame allows it; only optimized code has any to save.
+        let pair_ok = |off: u32| off % 8 == 0 && off < 504;
+        let xs = fr.alloc.saved_x.clone();
+        let mut k = 0;
+        while k < xs.len() {
+            if k + 1 < xs.len() && pair_ok(off) {
+                self.e(if restore { ldp(xs[k], xs[k + 1], SP, off) } else { stp(xs[k], xs[k + 1], SP, off) });
+                off += 16;
+                k += 2;
+            } else {
+                self.e(if restore { ldr(xs[k], SP, off) } else { str(xs[k], SP, off) });
+                off += 8;
+                k += 1;
+            }
         }
-        for r in fr.alloc.saved_d.clone() {
-            self.e(if restore { ldr_d(r, SP, off) } else { str_d(r, SP, off) });
-            off += 8;
+        let ds = fr.alloc.saved_d.clone();
+        let mut k = 0;
+        while k < ds.len() {
+            if k + 1 < ds.len() && pair_ok(off) {
+                self.e(if restore { ldp_d(ds[k], ds[k + 1], SP, off) } else { stp_d(ds[k], ds[k + 1], SP, off) });
+                off += 16;
+                k += 2;
+            } else {
+                self.e(if restore { ldr_d(ds[k], SP, off) } else { str_d(ds[k], SP, off) });
+                off += 8;
+                k += 1;
+            }
         }
     }
 
@@ -936,7 +971,31 @@ impl Gen {
                 let rd = self.def_x(fr, *d, X11);
                 let wide = num.bits == 64 && (num.checked || !num.signed);
                 let no_mask = num.bits == 64 || (num.signed && !num.checked);
+                let wide_signed = num.signed && num.bits == 64 && num.checked;
+                let konst = Self::const_of(fr, *b);
+                let pattern = konst.and_then(|c| logical_imm(c as u64));
+                let shift = konst.filter(|c| (0..num.bits as i64).contains(c)).map(|c| c as u32);
+                let negative = konst.filter(|c| (-4095..0).contains(c)).map(|c| -c as u32);
                 match (op, Self::small_const(fr, *b)) {
+                    (Arith::And, _) if pattern.is_some() => self.e(and_imm(rd, ra, pattern.unwrap())),
+                    (Arith::Or, _) if pattern.is_some() => self.e(orr_imm(rd, ra, pattern.unwrap())),
+                    (Arith::Xor, _) if pattern.is_some() => self.e(eor_imm(rd, ra, pattern.unwrap())),
+                    (Arith::Shr, _) if shift.is_some() => self.e(if num.signed { asr_imm(rd, ra, shift.unwrap()) } else { lsr_imm(rd, ra, shift.unwrap()) }),
+                    (Arith::Shl, _) if shift.is_some() && !wide_signed => {
+                        self.e(lsl_imm(rd, ra, shift.unwrap()));
+                        self.normalize_in(*num, *loc, traps, rd);
+                    }
+                    // x + (-k) is x - k, and overflows in the same cases.
+                    (Arith::Add, None) if negative.is_some() && wide && num.signed => {
+                        self.e(subs_imm(rd, ra, negative.unwrap()));
+                        self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                    }
+                    (Arith::Sub, None) if negative.is_some() && wide && num.signed => {
+                        self.e(adds_imm(rd, ra, negative.unwrap()));
+                        self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                    }
+                    (Arith::Add, None) if negative.is_some() && no_mask && !(num.signed && num.checked) => self.e(sub_imm(rd, ra, negative.unwrap())),
+                    (Arith::Sub, None) if negative.is_some() && no_mask && !(num.signed && num.checked) => self.e(add_imm(rd, ra, negative.unwrap())),
                     (Arith::Add, Some(k)) if no_mask && !(num.signed && num.checked) => self.e(add_imm(rd, ra, k)),
                     (Arith::Sub, Some(k)) if no_mask && !(num.signed && num.checked) => self.e(sub_imm(rd, ra, k)),
                     (Arith::Add, Some(k)) if wide && num.signed => {
@@ -979,7 +1038,16 @@ impl Gen {
                 self.store(fr, X11, *d);
             }
             Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("gone before code generation"),
-            Inst::ConstRef { .. } | Inst::Line { .. } | Inst::Note { .. } => unreachable!("only the interpreter sees these"),
+            Inst::Line { loc } => {
+                // The first line of a function covers its prologue too.
+                let at = self.func_first.take().unwrap_or_else(|| self.here());
+                match self.lines.last_mut() {
+                    Some((p, l)) if *p == at => *l = *loc,
+                    Some((_, l)) if l == loc => {}
+                    _ => self.lines.push((at, *loc)),
+                }
+            }
+            Inst::ConstRef { .. } | Inst::Note { .. } => unreachable!("only the interpreter sees these"),
             Inst::DataAddr { d, bytes } => {
                 let off = self.add_str(bytes);
                 self.data_addr(X9, off);
@@ -1584,6 +1652,8 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         }
     }
     let mut g = Gen {
+        func_first: None,
+        lines: Vec::new(),
         code: Vec::new(),
         rodata: Vec::new(),
         data_refs: Vec::new(),
@@ -1693,6 +1763,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         got_refs: g.got_refs,
         imports,
         symbols,
+        lines: g.lines,
         entry,
         bss_size: STATE + STATE_SIZE,
     })

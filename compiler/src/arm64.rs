@@ -174,6 +174,58 @@ pub fn eor(rd: Reg, rn: Reg, rm: Reg) -> u32 {
 pub fn mvn(rd: Reg, rm: Reg) -> u32 {
     rrr(0xAA20_03E0, rd, 0, rm)
 }
+/// The 13-bit pattern `N:immr:imms` that writes `v` as a logical immediate, if it can.
+pub fn logical_imm(v: u64) -> Option<u32> {
+    if v == 0 || v == u64::MAX {
+        return None;
+    }
+    // The smallest repeating element: 2, 4, 8, 16, 32 or 64 bits.
+    let mut size = 64u32;
+    while size > 2 {
+        let half = size / 2;
+        let mask = (1u64 << half) - 1;
+        if v & mask != (v >> half) & mask {
+            break;
+        }
+        size = half;
+    }
+    let mask = if size == 64 { u64::MAX } else { (1u64 << size) - 1 };
+    let e = v & mask;
+    // The element must be one run of ones, possibly rotated.
+    let ones = e.count_ones();
+    let rot = (0..size).find(|r| {
+        let x = if *r == 0 { e } else { ((e >> r) | (e << (size - r))) & mask };
+        x == (1u64 << ones) - 1 || (ones == size)
+    })?;
+    if ones == size {
+        return None;
+    }
+    let immr = (size - rot) & (size - 1);
+    let n = (size == 64) as u32;
+    let imms = ((!(size - 1) << 1) | (ones - 1)) & 0x3F;
+    Some((n << 12) | (immr << 6) | imms)
+}
+pub fn and_imm(rd: Reg, rn: Reg, pattern: u32) -> u32 {
+    0x9200_0000 | (pattern << 10) | (rn << 5) | rd
+}
+pub fn orr_imm(rd: Reg, rn: Reg, pattern: u32) -> u32 {
+    0xB200_0000 | (pattern << 10) | (rn << 5) | rd
+}
+pub fn eor_imm(rd: Reg, rn: Reg, pattern: u32) -> u32 {
+    0xD200_0000 | (pattern << 10) | (rn << 5) | rd
+}
+/// `lsl rd, rn, #k`
+pub fn lsl_imm(rd: Reg, rn: Reg, k: u32) -> u32 {
+    0xD340_0000 | (((64 - k) & 63) << 16) | ((63 - k) << 10) | (rn << 5) | rd
+}
+/// `lsr rd, rn, #k`
+pub fn lsr_imm(rd: Reg, rn: Reg, k: u32) -> u32 {
+    0xD340_FC00 | (k << 16) | (rn << 5) | rd
+}
+/// `asr rd, rn, #k`
+pub fn asr_imm(rd: Reg, rn: Reg, k: u32) -> u32 {
+    0x9340_FC00 | (k << 16) | (rn << 5) | rd
+}
 /// `eor rd, rn, #1`
 pub fn eor_1(rd: Reg, rn: Reg) -> u32 {
     0xD240_0000 | (rn << 5) | rd
@@ -270,6 +322,12 @@ pub fn stp(rt: Reg, rt2: Reg, rn: Reg, off: u32) -> u32 {
 /// `ldp rt, rt2, [rn, #off]`
 pub fn ldp(rt: Reg, rt2: Reg, rn: Reg, off: u32) -> u32 {
     0xA940_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+pub fn stp_d(rt: Reg, rt2: Reg, rn: Reg, off: u32) -> u32 {
+    0x6D00_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
+}
+pub fn ldp_d(rt: Reg, rt2: Reg, rn: Reg, off: u32) -> u32 {
+    0x6D40_0000 | ((off / 8) << 15) | (rt2 << 10) | (rn << 5) | rt
 }
 
 pub fn ldr_d(rt: Reg, rn: Reg, off: u32) -> u32 {
@@ -473,6 +531,8 @@ pub fn golden() -> Vec<(u32, String)> {
         s(strb_reg(X13, X12, X10), "strb w13, [x12, x10]"),
         s(stp(X19, X20, SP, 16), "stp x19, x20, [sp, #16]"),
         s(ldp(X19, X20, SP, 16), "ldp x19, x20, [sp, #16]"),
+        s(stp_d(8, 9, SP, 24), "stp d8, d9, [sp, #24]"),
+        s(ldp_d(10, 11, SP, 504), "ldp d10, d11, [sp, #504]"),
         s(ldr_d(D0, SP, 8), "ldr d0, [sp, #8]"),
         s(str_d(D0, SP, 32760), "str d0, [sp, #32760]"),
         s(ldr_s(D1, SP, 4), "ldr s1, [sp, #4]"),
@@ -507,5 +567,24 @@ pub fn golden() -> Vec<(u32, String)> {
         s(cset(X11, Cond::Hi as u32), "cset x11, hi"),
         s(cset(X11, Cond::Hs as u32), "cset x11, hs"),
         s(cset(X11, Cond::Mi as u32), "cset x11, mi"),
+        s(lsl_imm(X11, X9, 1), "lsl x11, x9, #1"),
+        s(lsl_imm(X11, X9, 63), "lsl x11, x9, #63"),
+        s(lsr_imm(X11, X9, 3), "lsr x11, x9, #3"),
+        s(asr_imm(X11, X9, 1), "asr x11, x9, #1"),
+        s(asr_imm(X11, X9, 63), "asr x11, x9, #63"),
     ]
+    .into_iter()
+    .chain(
+        [1u64, 3, 0xFF, 0xFFFF_FFFF, 0x8000_0000_0000_0000, 0x7FFF_FFFF_FFFF_FFFF, 0xF0F0_F0F0_F0F0_F0F0, 0x5555_5555_5555_5555, 0x00FF_00FF_00FF_00FF, 6, 0xFFFF_FFFF_FFFF_FFFE, 0x0000_FFFF_0000_0000, 12, 0x0101_0101_0101_0101]
+            .into_iter()
+            .flat_map(|v| {
+                let p = logical_imm(v).expect("encodable");
+                vec![
+                    (and_imm(X11, X9, p), format!("and x11, x9, #{v}")),
+                    (orr_imm(X11, X9, p), format!("orr x11, x9, #{v}")),
+                    (eor_imm(X11, X9, p), format!("eor x11, x9, #{v}")),
+                ]
+            }),
+    )
+    .collect()
 }
