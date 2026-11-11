@@ -4,6 +4,7 @@ mod arm64;
 mod ast;
 mod cir;
 mod codegen;
+mod codegen_x64;
 mod ctfe;
 mod diag;
 mod dump;
@@ -25,6 +26,7 @@ mod sha256;
 mod ssa;
 mod types;
 mod why;
+mod x64;
 
 use diag::Diag;
 use std::path::{Path, PathBuf};
@@ -50,6 +52,7 @@ claw audit <file.claw>          every place the compiler has to trust
 claw fmt <file.claw> [--check]  put a file into the one standard format
 claw --version
 flags: --json (errors as JSON), --emit-cir (print the IR)
+       --target arm64|x86_64 (build, run and test; default arm64)
 ";
 
 struct Options {
@@ -72,6 +75,8 @@ struct Options {
     name: Option<String>,
     /// `claw why --test name`.
     test_name: Option<String>,
+    /// `--target x86_64`: write an x86-64 executable instead of an arm64 one.
+    x86_64: bool,
 }
 
 fn parse_options(args: &[String]) -> Options {
@@ -79,7 +84,7 @@ fn parse_options(args: &[String]) -> Options {
 }
 
 fn options(args: &[String], ctx: bool) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, test_name: None };
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, test_name: None, x86_64: false };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -92,6 +97,14 @@ fn options(args: &[String], ctx: bool) -> Options {
             "--blocks" => o.blocks = true,
             "--no-opt" => o.no_opt = true,
             "--pub" => o.public = true,
+            "--target" => {
+                i += 1;
+                match args.get(i).map(|s| s.as_str()) {
+                    Some("x86_64" | "x86-64" | "x64" | "amd64") => o.x86_64 = true,
+                    Some("arm64" | "aarch64") => o.x86_64 = false,
+                    _ => die("`--target` is `arm64` or `x86_64`"),
+                }
+            }
             "--test" => {
                 i += 1;
                 match args.get(i) {
@@ -227,15 +240,24 @@ fn compile(o: &Options, out: &Path, mode: Mode) {
 }
 
 fn emit(o: &Options, module: &cir::Module, files: &[String], out: &Path) {
-    let object = match codegen::generate(module, files, o.alloc_stats) {
-        Ok(obj) => obj,
-        Err(e) => {
-            eprintln!("{}:1:1 {e}", o.file);
-            exit(1);
+    let ident = out.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into());
+    let bytes = if o.x86_64 {
+        match codegen_x64::generate(module, files, o.alloc_stats) {
+            Ok(obj) => macho::write_macho_x64(&obj, &ident),
+            Err(e) => {
+                eprintln!("{}:1:1 {e}", o.file);
+                exit(1);
+            }
+        }
+    } else {
+        match codegen::generate(module, files, o.alloc_stats) {
+            Ok(obj) => macho::write_macho(&obj, &ident),
+            Err(e) => {
+                eprintln!("{}:1:1 {e}", o.file);
+                exit(1);
+            }
         }
     };
-    let ident = out.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into());
-    let bytes = macho::write_macho(&object, &ident);
     write_executable(out, &bytes);
 }
 
@@ -611,6 +633,12 @@ fn real_main() {
         Some("check") => {
             let o = parse_options(&args[1..]);
             compile_to_cir(&o, Mode::Build);
+        }
+        Some("__encoder-golden-x64") => {
+            for (bytes, text) in x64::golden() {
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                println!("{hex}\t{text}");
+            }
         }
         Some("__encoder-golden") => {
             for (word, text) in arm64::golden() {

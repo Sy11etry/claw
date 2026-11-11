@@ -1,0 +1,171 @@
+// expect: 18446744073709549568
+// expect: 1.84467440737096e+19
+// expect: 18446744073709549568
+// expect: 1.84467440737096e+19
+// expect: 9223372036854775808
+// expect: 9.22337203685478e+18
+// expect: 9223372036854777856
+// expect: 9.22337203685478e+18
+// expect: 9223372036854775808
+// expect: 9.22337203685478e+18
+// expect: 9223372036854777856
+// expect: 9.22337203685478e+18
+// expect: 13835058055282163712
+// expect: 1.38350580552822e+19
+// expect: 5
+// expect: 5
+// expect: 0
+// expect: 0
+// expect: 9223372036854775808
+// expect: 18446744073709547520
+// expect: 12345678901234567168
+// expect: 0
+// expect: -9223372036854775808
+// expect: 9223372036854774784
+// expect: -2147483648
+// expect: 255
+// expect: 4294967295
+// expect: 16777216
+// expect: 9999999980506447872
+// expect: 0.3
+// expect: 0.03333334
+// expect: 3.1
+// expect: -2.9
+// expect: 0.100000001490116
+// expect: -0.1
+// expect: inf
+// expect: -inf
+// expect: -0
+// expect: inf
+// expect: false
+// expect: true
+// expect: false
+// expect: false
+// expect: false
+// expect: false
+// expect: false
+// expect: false
+// expect: true
+// expect: true
+// expect: false
+// expect: true
+// expect: true
+// expect: false
+// expect: false
+// expect: true
+// expect: false
+// expect: true
+// expect: 9223372036854775806
+// expect: -9223372036854775808
+// expect: -9223372036854775807
+// expect: 9223372030926249001
+// expect: -1
+// expect: 1
+// expect: 0
+// expect: -3
+// expect: 4611686018427387904
+// expect: -4611686018427387904
+// expect: -4
+// expect: -1
+// expect: 1
+// expect: 44
+// expect: 254
+// expect: 3410065408
+// expect: 250
+// expect: -6
+// expect: -5
+// expect: 30000
+fn id(x int) int {
+    ret x
+}
+
+fn idu(x u64) u64 {
+    ret x
+}
+
+fn idf(x f64) f64 {
+    ret x
+}
+
+fn idg(x f32) f32 {
+    ret x
+}
+
+fn main() {
+    // u64 to float: the top bit set, ties, and odd low bits
+    for v in [idu(18446744073709549568), idu(18446744073709550591), idu(9223372036854775808), idu(9223372036854777856), idu(9223372036854776832), idu(9223372036854776833), idu(13835058055282163713), idu(5), idu(0)] {
+        f := f64(v)
+        g := f32(v)
+        print(u64(f))
+        print(f64(g))
+    }
+    // float to u64 above 2^63
+    print(u64(idf(9223372036854775808.0)))
+    print(u64(idf(1.8446744073709548e19)))
+    print(u64(idf(12345678901234567890.0)))
+    print(u64(idf(0.9)))
+    print(int(idf(-9223372036854775808.0)))
+    print(int(idf(9223372036854774784.0)))
+    print(i32(idf(-2147483648.9)))
+    print(u8(idf(255.9)))
+    print(u32(idf(4294967295.5)))
+    print(int(idg(16777216.0)))
+    print(u64(idg(1e19)))
+    // f32 arithmetic and printing
+    a f32 = idg(0.1)
+    b f32 = idg(3.0)
+    print(a * b)
+    print(a / b)
+    print(a + b)
+    print(a - b)
+    print(f64(a))
+    print(-a)
+    // doubles: specials
+    zero := idf(0.0)
+    print(1.0 / zero)
+    print(-1.0 / zero)
+    print(-zero)
+    print(idf(1e300) * idf(1e300))
+    nan := zero / zero
+    print(nan == nan)
+    print(nan != nan)
+    print(nan < 1.0)
+    print(nan <= 1.0)
+    print(nan > 1.0)
+    print(nan >= 1.0)
+    print(1.0 < nan)
+    print(1.0 >= nan)
+    one := idf(1.0)
+    print(one < 2.0)
+    print(one <= 1.0)
+    print(one > 2.0)
+    print(one >= 1.0)
+    print(one == 1.0)
+    print(one != 1.0)
+    ng := idg(0.0) / idg(0.0)
+    print(ng == ng)
+    print(ng != ng)
+    print(ng < idg(1.0))
+    print(idg(1.0) <= idg(2.0))
+    // integers: edges
+    print(id(9223372036854775807) - 1)
+    print(id(-9223372036854775807) - 1)
+    print(id(-9223372036854775807) - 1 + 1)
+    print(id(3037000499) * id(3037000499))
+    print(id(-7) % id(3))
+    print(id(7) % id(-3))
+    print(id(-9223372036854775807) % id(-1))
+    print(id(-7) / id(2))
+    print(id(1) << id(62))
+    print(id(-1) << id(62))
+    print(id(-8) >> id(1))
+    print(id(-1) >> id(63))
+    print(u64(id(-1)) >> u64(id(63)))
+    print(u8(id(200)) + u8(id(100)))
+    print(u8(id(3)) - u8(id(5)))
+    print(u32(id(4000000000)) * u32(id(3)))
+    print(~u8(id(5)))
+    print(~id(5))
+    print(-id(5))
+    print(i16(id(300)) * i16(id(100)))
+}

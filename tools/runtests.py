@@ -15,6 +15,9 @@ tests/auto/*.claw  through `claw test`: generated inputs, shrunk failures and th
 tests/why/*.claw  through `claw why`: the report names the lines that matter.
 tests/fix/x.claw  `claw fix` must turn it into tests/fix/x.out, or leave it and report.
 tests/run again, in check mode: the checker must not complain about correct programs.
+x86-64: tests/run and tests/own built with --target x86_64 and run under Rosetta (optimized build, then
+    --alloc-stats for tests/own), tests/run and tests/check through `claw run --target x86_64`,
+    the encoder against llvm-mc, and random programs that must behave the same on both targets.
 tests/fast/*.claw  built with --fast; tests/stats/*.claw  the optimizer proves what it should.
 tools/fuzz_opt.py  random programs: optimized and unoptimized builds must agree.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
@@ -44,11 +47,11 @@ def headers(text, key):
     return re.findall(rf"^// {key}: ?(.*)$", text, re.M)
 
 
-def run_test(path, tmp):
+def run_test(path, tmp, extra=()):
     text = path.read_text()
     exe = tmp / path.stem
     p = child(
-        [CLAW, "build", path, "-o", exe], capture_output=True, text=True, env={"PATH": ""}
+        [CLAW, "build", *extra, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""}
     )
     if p.returncode != 0:
         return f"compile failed:\n{p.stderr}"
@@ -66,10 +69,10 @@ def run_test(path, tmp):
     return None
 
 
-def check_test(path):
+def check_test(path, extra=()):
     """`claw run`: the mode with every contract and the memory checker."""
     text = path.read_text()
-    p = child([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+    p = child([CLAW, "run", *extra, path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
     want_exit = int((headers(text, "exit") or ["0"])[0])
     if p.returncode != want_exit:
         return f"exit code {p.returncode}, wanted {want_exit}\nstderr: {p.stderr}"
@@ -81,12 +84,12 @@ def check_test(path):
     return None
 
 
-def run_again_checked(path):
+def run_again_checked(path, extra=()):
     """A correct program behaves the same with the checker switched on."""
     text = path.read_text()
     if headers(text, "build-only"):
         return None
-    p = child([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=120)
+    p = child([CLAW, "run", *extra, path], capture_output=True, text=True, env={"PATH": ""}, timeout=120)
     want_exit = int((headers(text, "checked-exit") or headers(text, "exit") or ["0"])[0])
     if p.returncode != want_exit:
         return f"exit code {p.returncode}, wanted {want_exit}\nstderr: {p.stderr}"
@@ -271,11 +274,38 @@ def fuzz(count):
     return None if p.returncode == 0 else p.stdout[-800:]
 
 
-def own_test(path, tmp):
+def in_temp(test, path, extra):
+    """Runs `test(path, dir, extra)` in a directory of its own."""
+    with tempfile.TemporaryDirectory() as d:
+        return test(path, pathlib.Path(d), extra)
+
+
+def parallel(jobs, workers=8):
+    """Runs (label, function) jobs side by side; gives back (label, result) in the original order."""
+    import concurrent.futures as cf
+
+    with cf.ThreadPoolExecutor(workers) as ex:
+        results = list(ex.map(lambda j: j[1](), jobs))
+    return [(j[0], r) for j, r in zip(jobs, results)]
+
+
+def encoder_x64():
+    """Our x86-64 encoder against llvm-mc."""
+    p = child([sys.executable, ROOT / "tools/check_encoder_x64.py"], capture_output=True, text=True)
+    return None if p.returncode == 0 else (p.stdout + p.stderr)[-800:]
+
+
+def fuzz_x64(count):
+    """Random programs: arm64 and x86-64 must print the same, trap the same, exit the same."""
+    p = child([sys.executable, ROOT / "tools/fuzz_x64.py", str(count), "1"], capture_output=True, text=True, timeout=3600)
+    return None if p.returncode == 0 else p.stdout[-800:]
+
+
+def own_test(path, tmp, extra=()):
     """Like a run test, but every allocation must also have been freed."""
     text = path.read_text()
     exe = tmp / ("own_" + path.stem)
-    p = child([CLAW, "build", path, "-o", exe, "--alloc-stats"], capture_output=True, text=True, env={"PATH": ""})
+    p = child([CLAW, "build", *extra, path, "-o", exe, "--alloc-stats"], capture_output=True, text=True, env={"PATH": ""})
     if p.returncode != 0:
         return f"compile failed:\n{p.stderr}"
     r = child([exe], capture_output=True, text=True, timeout=30)
@@ -450,6 +480,24 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL fmt-stable/{path.name}: {msg}")
+    # The second target: the same programs as x86-64 executables (Rosetta runs them).
+    # Every job has its own directory, and they run side by side: Rosetta translates each new binary on first run.
+    X64 = ("--target", "x86_64")
+    runs = sorted((ROOT / "tests/run").glob("*.claw"))
+    owns = sorted((ROOT / "tests/own").glob("*.claw"))
+    checks = sorted((ROOT / "tests/check").glob("*.claw"))
+    jobs = [("x86-64 encoder", encoder_x64)]
+    jobs += [(f"x86-64 {p.parent.name}/{p.name}", lambda p=p: in_temp(run_test, p, X64)) for p in runs + owns]
+    jobs += [(f"x86-64 check/{p.name}", lambda p=p: check_test(p, X64)) for p in checks]
+    jobs += [(f"x86-64 checked/{p.name}", lambda p=p: run_again_checked(p, X64)) for p in runs]
+    jobs += [("x86-64 fuzz", lambda: fuzz_x64(60))]
+    # Second batch: a few programs write to a fixed file, so no program runs twice at once.
+    jobs2 = [(f"x86-64 own/{p.name}", lambda p=p: in_temp(own_test, p, X64)) for p in owns]
+    for label, msg in parallel(jobs) + parallel(jobs2):
+        total += 1
+        if msg:
+            failures += 1
+            print(f"FAIL {label}: {msg}")
     for path in sorted((ROOT / "tests/err").glob("*.claw")):
         total += 1
         msg = err_test(path)

@@ -2,6 +2,7 @@
 //! The layout mirrors what clang + ld produce on macOS (checked with otool).
 
 use crate::codegen::Object;
+use crate::codegen_x64::ObjectX64;
 use crate::sha256::sha256;
 
 const BASE: u64 = 0x1_0000_0000;
@@ -100,7 +101,7 @@ fn linkedit_cmd(w: &mut W, cmd: u32, off: u64, size: u64) {
 }
 
 /// Chained fixups: every GOT slot binds to a libSystem symbol.
-fn chained_fixups(imports: &[String], got_seg_offset: u64) -> Vec<u8> {
+fn chained_fixups(imports: &[String], got_seg_offset: u64, page: u64) -> Vec<u8> {
     const SEG_COUNT: u32 = 5;
     const GOT_SEG_INDEX: usize = 2;
     let starts_offset = 32u32;
@@ -127,7 +128,7 @@ fn chained_fixups(imports: &[String], got_seg_offset: u64) -> Vec<u8> {
     w.pad_to((starts_offset + seg_info_offset) as usize);
 
     w.u32(seg_size);
-    w.u16(PAGE as u16);
+    w.u16(page as u16);
     w.u16(6); // DYLD_CHAINED_PTR_64_OFFSET
     w.u64(got_seg_offset);
     w.u32(0);
@@ -240,7 +241,7 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     let bss_addr = got_addr + data_size;
     let bss_vmsize = align(obj.bss_size.max(1), PAGE);
 
-    let fixups = chained_fixups(&obj.imports, got_off);
+    let fixups = chained_fixups(&obj.imports, got_off, PAGE);
     let trie = exports_trie();
 
     let mut strtab = vec![0u8];
@@ -383,6 +384,180 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     w.pad_to(got_off as usize);
 
     // GOT: a chain of binds, each pointing 8 bytes ahead to the next.
+    let n = obj.imports.len();
+    for i in 0..n {
+        let next = if i + 1 < n { 2u64 } else { 0 };
+        w.u64(i as u64 | (next << 51) | (1u64 << 63));
+    }
+    w.pad_to(linkedit_off as usize);
+
+    w.0.extend_from_slice(&fixups);
+    w.0.extend_from_slice(&trie);
+    w.0.extend_from_slice(&nlist.0);
+    w.0.extend_from_slice(&strtab);
+    w.pad_to(sig_off as usize);
+
+    let sig = sign(&w.0, ident, text_filesize);
+    debug_assert_eq!(sig.len() as u64, sig_size);
+    w.0.extend_from_slice(&sig);
+    w.0
+}
+
+/// x86-64 pages are 4 KB.
+const PAGE_X64: u64 = 0x1000;
+
+/// Patches the rip-relative `disp32` at `pos` so that it reaches `target`.
+fn rip_patch(code: &mut [u8], pos: usize, code_addr: u64, target: u64) {
+    let disp = target as i64 - (code_addr + pos as u64 + 4) as i64;
+    code[pos..pos + 4].copy_from_slice(&(disp as i32).to_le_bytes());
+}
+
+/// The x86-64 twin of `write_macho`: same commands, 4 KB pages, byte-addressed code.
+/// Compared with `clang -arch x86_64` (otool -l, dyld_info, codesign -dvvv).
+pub fn write_macho_x64(obj: &ObjectX64, ident: &str) -> Vec<u8> {
+    let sizeofcmds: u64 = 72 + (72 + 160) + (72 + 80) + (72 + 80) + 72 // segments
+        + 16 + 16 + 24 + 80 // fixups, trie, symtab, dysymtab
+        + 32 + 24 + 24 + 24 + 56 + 16; // dylinker, uuid, build, main, dylib, signature
+    const NCMDS: u32 = 15;
+
+    let text_off = align(32 + sizeofcmds, 16);
+    let code_size = obj.code.len() as u64;
+    let rodata_off = align(text_off + code_size, 8);
+    let text_end = rodata_off + obj.rodata.len() as u64;
+    let text_filesize = align(text_end.max(1), PAGE_X64);
+
+    let got_off = text_filesize;
+    let got_addr = BASE + got_off;
+    let got_size = obj.imports.len() as u64 * 8;
+    let data_size = align(got_size.max(1), PAGE_X64);
+    let linkedit_off = got_off + data_size;
+    let bss_addr = got_addr + data_size;
+    let bss_vmsize = align(obj.bss_size.max(1), PAGE_X64);
+
+    let fixups = chained_fixups(&obj.imports, got_off, PAGE_X64);
+    let trie = exports_trie();
+
+    let mut strtab = vec![0u8];
+    let mut nlist = W(Vec::new());
+    for (name, pos) in &obj.symbols {
+        nlist.u32(strtab.len() as u32);
+        nlist.u8(0x0e); // N_SECT, local
+        nlist.u8(1);
+        nlist.u16(0);
+        nlist.u64(BASE + text_off + *pos as u64);
+        strtab.extend_from_slice(name.as_bytes());
+        strtab.push(0);
+    }
+    strtab.resize(align(strtab.len() as u64, 8) as usize, 0);
+
+    let fixups_off = linkedit_off;
+    let trie_off = fixups_off + fixups.len() as u64;
+    let sym_off = trie_off + trie.len() as u64;
+    let str_off = sym_off + nlist.0.len() as u64;
+    let sig_off = align(str_off + strtab.len() as u64, 16);
+    let sig_size = signature_size(sig_off as usize, ident) as u64;
+    let linkedit_filesize = sig_off + sig_size - linkedit_off;
+
+    let mut code = obj.code.clone();
+    let code_addr = BASE + text_off;
+    let rodata_addr = BASE + rodata_off;
+    for (pos, off) in &obj.data_refs {
+        rip_patch(&mut code, *pos, code_addr, rodata_addr + *off as u64);
+    }
+    for (pos, off) in &obj.bss_refs {
+        rip_patch(&mut code, *pos, code_addr, bss_addr + *off);
+    }
+    for (pos, slot) in &obj.got_refs {
+        rip_patch(&mut code, *pos, code_addr, got_addr + *slot as u64 * 8);
+    }
+
+    let mut w = W(Vec::with_capacity((sig_off + sig_size) as usize));
+    w.u32(0xfeed_facf);
+    w.u32(0x0100_0007); // x86_64
+    w.u32(3); // CPU_SUBTYPE_X86_64_ALL
+    w.u32(2); // MH_EXECUTE
+    w.u32(NCMDS);
+    w.u32(sizeofcmds as u32);
+    w.u32(0x0020_0085); // NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
+    w.u32(0);
+
+    segment(&mut w, &Seg { name: "__PAGEZERO", vmaddr: 0, vmsize: BASE, fileoff: 0, filesize: 0, maxprot: 0, initprot: 0, flags: 0, nsects: 0 });
+    segment(&mut w, &Seg { name: "__TEXT", vmaddr: BASE, vmsize: text_filesize, fileoff: 0, filesize: text_filesize, maxprot: 5, initprot: 5, flags: 0, nsects: 2 });
+    section(&mut w, "__text", "__TEXT", code_addr, code_size, text_off as u32, 4, 0x8000_0400);
+    section(&mut w, "__const", "__TEXT", rodata_addr, obj.rodata.len() as u64, rodata_off as u32, 3, 0);
+    segment(&mut w, &Seg { name: "__DATA_CONST", vmaddr: got_addr, vmsize: data_size, fileoff: got_off, filesize: data_size, maxprot: 3, initprot: 3, flags: 0x10, nsects: 1 });
+    section(&mut w, "__got", "__DATA_CONST", got_addr, got_size, got_off as u32, 3, 0);
+    segment(&mut w, &Seg { name: "__DATA", vmaddr: bss_addr, vmsize: bss_vmsize, fileoff: linkedit_off, filesize: 0, maxprot: 3, initprot: 3, flags: 0, nsects: 1 });
+    section(&mut w, "__bss", "__DATA", bss_addr, obj.bss_size, 0, 4, 1);
+    segment(&mut w, &Seg {
+        name: "__LINKEDIT",
+        vmaddr: bss_addr + bss_vmsize,
+        vmsize: align(linkedit_filesize, PAGE_X64),
+        fileoff: linkedit_off,
+        filesize: linkedit_filesize,
+        maxprot: 1,
+        initprot: 1,
+        flags: 0,
+        nsects: 0,
+    });
+
+    linkedit_cmd(&mut w, 0x8000_0034, fixups_off, fixups.len() as u64);
+    linkedit_cmd(&mut w, 0x8000_0033, trie_off, trie.len() as u64);
+
+    let nsyms = obj.symbols.len() as u32;
+    w.u32(2); // LC_SYMTAB
+    w.u32(24);
+    w.u32(sym_off as u32);
+    w.u32(nsyms);
+    w.u32(str_off as u32);
+    w.u32(strtab.len() as u32);
+
+    w.u32(0x0b); // LC_DYSYMTAB
+    w.u32(80);
+    for v in [0, nsyms, nsyms, 0, nsyms, 0] {
+        w.u32(v);
+    }
+    for _ in 0..12 {
+        w.u32(0);
+    }
+
+    path_cmd(&mut w, 0x0e, "/usr/lib/dyld", &[]);
+
+    let mut body = code.clone();
+    body.extend_from_slice(&obj.rodata);
+    let digest = sha256(&body);
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&digest[..16]);
+    uuid[6] = (uuid[6] & 0x0F) | 0x40;
+    uuid[8] = (uuid[8] & 0x3F) | 0x80;
+    w.u32(0x1b);
+    w.u32(24);
+    w.0.extend_from_slice(&uuid);
+
+    w.u32(0x32); // LC_BUILD_VERSION
+    w.u32(24);
+    w.u32(1); // macOS
+    w.u32(0x000c_0000); // minos 12.0: the first release where x86_64 binaries use chained fixups
+    w.u32(0x000f_0000); // sdk 15.0
+    w.u32(0);
+
+    w.u32(0x8000_0028); // LC_MAIN
+    w.u32(24);
+    w.u64(text_off + obj.entry as u64);
+    w.u64(0);
+
+    path_cmd(&mut w, 0x0c, "/usr/lib/libSystem.B.dylib", &[2, 0x0001_0000, 0x0001_0000]);
+
+    linkedit_cmd(&mut w, 0x1d, sig_off, sig_size);
+
+    debug_assert_eq!(w.0.len() as u64, 32 + sizeofcmds);
+
+    w.pad_to(text_off as usize);
+    w.0.extend_from_slice(&code);
+    w.pad_to(rodata_off as usize);
+    w.0.extend_from_slice(&obj.rodata);
+    w.pad_to(got_off as usize);
+
     let n = obj.imports.len();
     for i in 0..n {
         let next = if i + 1 < n { 2u64 } else { 0 };
