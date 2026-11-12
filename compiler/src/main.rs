@@ -46,7 +46,7 @@ claw fix <file.claw>            apply the compiler's safe patches
 claw build <file.claw> [-o out] optimized executable; contracts with calls are left out
     --fast                      remove every run-time check: speed like C, risk like C
     --stats                     say how many checks were proved unnecessary
-    -g                          also write <out>.dSYM, so lldb can stop on source lines
+    -g                          debug info so lldb can stop on source lines (<out>.dSYM on macOS, inside the ELF on Linux)
 claw check <file.claw>          report errors only
 claw card                       the language on one page
 claw sig <file.claw> | std      only the signatures, with the effects worked out
@@ -256,11 +256,8 @@ fn compile(o: &Options, out: &Path, mode: Mode) {
 
 fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], out: &Path) {
     if let Some(libc) = o.linux {
-        if o.debug {
-            die("`-g` writes a macOS .dSYM; it is not available for Linux targets");
-        }
         match codegen::generate_linux(module, files, o.alloc_stats) {
-            Ok(obj) => write_executable(out, &elf::write_elf(&obj, libc)),
+            Ok(obj) => write_executable(out, &elf::write_elf(&obj, libc, if o.debug { Some(paths) } else { None })),
             Err(e) => {
                 eprintln!("{}:1:1 {e}", o.file);
                 exit(1);
@@ -269,13 +266,15 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
         return;
     }
     let ident = out.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "a.out".into());
-    let mut object = None;
+    let debug_info: Box<dyn Fn(u64, u64) -> Vec<(&'static str, Vec<u8>)>>;
     let bytes = if o.x86_64 {
-        if o.debug {
-            die("`-g` is only for the default arm64 target");
-        }
         match codegen_x64::generate(module, files, o.alloc_stats) {
-            Ok(obj) => macho::write_macho_x64(&obj, &ident),
+            Ok(obj) => {
+                let bytes = macho::write_macho_x64(&obj, &ident);
+                let files = paths.to_vec();
+                debug_info = Box::new(move |addr, size| dwarf::sections_of(&obj.symbols, &obj.lines, obj.code.len(), 1, addr, size, &files));
+                bytes
+            }
             Err(e) => {
                 eprintln!("{}:1:1 {e}", o.file);
                 exit(1);
@@ -285,7 +284,8 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
         match codegen::generate(module, files, o.alloc_stats) {
             Ok(obj) => {
                 let bytes = macho::write_macho(&obj, &ident);
-                object = Some(obj);
+                let files = paths.to_vec();
+                debug_info = Box::new(move |addr, size| dwarf::sections(&obj, addr, size, &files));
                 bytes
             }
             Err(e) => {
@@ -295,8 +295,8 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
         }
     };
     write_executable(out, &bytes);
-    if let (true, Some(object)) = (o.debug, &object) {
-        if let Err(e) = dwarf::write_dsym(out, object, &bytes, paths) {
+    if o.debug {
+        if let Err(e) = dwarf::write_dsym(out, &bytes, o.x86_64, &debug_info) {
             eprintln!("claw: {e}");
             exit(2);
         }

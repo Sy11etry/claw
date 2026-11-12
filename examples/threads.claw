@@ -1,0 +1,20 @@
+// expect: 4950
+// Threads without data races: a task takes its input with `own` and
+// hands the result back through `join`. Nothing is shared, so nothing can race.
+use par
+
+fn total(own xs []int) int {
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn main() {
+    mut a []int = []
+    mut b []int = []
+    for i in 0..50 { push(&a, i) }
+    for i in 50..100 { push(&b, i) }
+    ta := par.spawn(total, a)
+    tb := par.spawn(total, b)
+    print(par.join(ta) + par.join(tb))
+}

@@ -386,6 +386,78 @@ pub fn cvtsd2ss(o: &mut Vec<u8>, d: Xmm, s: Xmm) {
     emit(o, 0xF2, false, &[0x0F, 0x5A], d, Op::R(s), 0);
 }
 
+
+// ---- SSE packed (128-bit vectors) ----
+
+/// `movups xmm, m128`
+pub fn movups_load(o: &mut Vec<u8>, x: Xmm, m: Op) {
+    emit(o, 0, false, &[0x0F, 0x10], x, m, 0);
+}
+/// `movups m128, xmm`
+pub fn movups_store(o: &mut Vec<u8>, m: Op, x: Xmm) {
+    emit(o, 0, false, &[0x0F, 0x11], x, m, 0);
+}
+/// `movlps xmm, m64` / `movhps xmm, m64`: the low or high half, the other half stays.
+pub fn movlps_load(o: &mut Vec<u8>, x: Xmm, m: Op) {
+    emit(o, 0, false, &[0x0F, 0x12], x, m, 0);
+}
+pub fn movhps_load(o: &mut Vec<u8>, x: Xmm, m: Op) {
+    emit(o, 0, false, &[0x0F, 0x16], x, m, 0);
+}
+pub fn movlps_store(o: &mut Vec<u8>, m: Op, x: Xmm) {
+    emit(o, 0, false, &[0x0F, 0x13], x, m, 0);
+}
+pub fn movhps_store(o: &mut Vec<u8>, m: Op, x: Xmm) {
+    emit(o, 0, false, &[0x0F, 0x17], x, m, 0);
+}
+/// `addpd`, `addps` and so on: `double` picks two f64 lanes, else four f32.
+pub fn psse(o: &mut Vec<u8>, op: Sse, double: bool, d: Xmm, s: Op) {
+    emit(o, if double { 0x66 } else { 0 }, false, &[0x0F, op as u8], d, s, 0);
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PInt {
+    /// `paddd`
+    Add = 0xFE,
+    /// `psubd`
+    Sub = 0xFA,
+    /// `pxor`
+    Xor = 0xEF,
+}
+pub fn pint(o: &mut Vec<u8>, op: PInt, d: Xmm, s: Op) {
+    emit(o, 0x66, false, &[0x0F, op as u8], d, s, 0);
+}
+/// `pmulld`: four 32-bit products, low halves (SSE4.1).
+pub fn pmulld(o: &mut Vec<u8>, d: Xmm, s: Op) {
+    emit(o, 0x66, false, &[0x0F, 0x38, 0x40], d, s, 0);
+}
+/// `xorps`
+pub fn xorps(o: &mut Vec<u8>, d: Xmm, s: Xmm) {
+    emit(o, 0, false, &[0x0F, 0x57], d, Op::R(s), 0);
+}
+/// `unpcklpd d, s`: both lanes become the low lane of `d`/`s`.
+pub fn unpcklpd(o: &mut Vec<u8>, d: Xmm, s: Xmm) {
+    emit(o, 0x66, false, &[0x0F, 0x14], d, Op::R(s), 0);
+}
+/// `punpcklqdq d, s`
+pub fn punpcklqdq(o: &mut Vec<u8>, d: Xmm, s: Xmm) {
+    emit(o, 0x66, false, &[0x0F, 0x6C], d, Op::R(s), 0);
+}
+/// `shufps d, s, imm`
+pub fn shufps(o: &mut Vec<u8>, d: Xmm, s: Xmm, imm: u8) {
+    emit(o, 0, false, &[0x0F, 0xC6], d, Op::R(s), 0);
+    o.push(imm);
+}
+/// `pshufd d, s, imm`
+pub fn pshufd(o: &mut Vec<u8>, d: Xmm, s: Xmm, imm: u8) {
+    emit(o, 0x66, false, &[0x0F, 0x70], d, Op::R(s), 0);
+    o.push(imm);
+}
+/// `vfmadd231pd` / `vfmadd231ps` on xmm0..xmm7: `d += a * b`, one rounding (FMA3).
+pub fn vfmadd231(o: &mut Vec<u8>, double: bool, d: Xmm, a: Xmm, b: Xmm) {
+    debug_assert!(d < 8 && a < 8 && b < 8);
+    o.extend_from_slice(&[0xC4, 0xE2, ((double as u8) << 7) | ((!a & 15) << 3) | 1, 0xB8, 0xC0 | (d << 3) | b]);
+}
+
 /// Encodings checked against llvm-mc by `tools/check_encoder_x64.py`.
 /// Entries whose text ends in ` L` are branches to a label 200 bytes ahead.
 pub fn golden() -> Vec<(Vec<u8>, String)> {
@@ -536,5 +608,27 @@ pub fn golden() -> Vec<(Vec<u8>, String)> {
     g!("cvttss2si r11, xmm1", |o: &mut Vec<u8>| cvtts2si(o, 32, R11, 1));
     g!("cvtss2sd xmm0, xmm1", |o: &mut Vec<u8>| cvtss2sd(o, 0, 1));
     g!("cvtsd2ss xmm0, xmm1", |o: &mut Vec<u8>| cvtsd2ss(o, 0, 1));
+    g!("movups xmm0, xmmword ptr [rax + 16]", |o: &mut Vec<u8>| movups_load(o, 0, at(RAX, 16)));
+    g!("movups xmmword ptr [rcx], xmm2", |o: &mut Vec<u8>| movups_store(o, at(RCX, 0), 2));
+    g!("movlps xmm0, qword ptr [rbp - 8]", |o: &mut Vec<u8>| movlps_load(o, 0, at(RBP, -8)));
+    g!("movhps xmm1, qword ptr [rbp - 1000]", |o: &mut Vec<u8>| movhps_load(o, 1, at(RBP, -1000)));
+    g!("movlps qword ptr [rbp - 8], xmm0", |o: &mut Vec<u8>| movlps_store(o, at(RBP, -8), 0));
+    g!("movhps qword ptr [rbp - 24], xmm2", |o: &mut Vec<u8>| movhps_store(o, at(RBP, -24), 2));
+    for (name, op) in [("add", Sse::Add), ("mul", Sse::Mul), ("sub", Sse::Sub), ("div", Sse::Div)] {
+        g!(format!("{name}pd xmm0, xmm1"), |o: &mut Vec<u8>| psse(o, op, true, 0, reg(1)));
+        g!(format!("{name}ps xmm0, xmm1"), |o: &mut Vec<u8>| psse(o, op, false, 0, reg(1)));
+    }
+    g!("paddd xmm0, xmm1", |o: &mut Vec<u8>| pint(o, PInt::Add, 0, reg(1)));
+    g!("psubd xmm1, xmm0", |o: &mut Vec<u8>| pint(o, PInt::Sub, 1, reg(0)));
+    g!("pxor xmm1, xmm1", |o: &mut Vec<u8>| pint(o, PInt::Xor, 1, reg(1)));
+    g!("pmulld xmm0, xmm1", |o: &mut Vec<u8>| pmulld(o, 0, reg(1)));
+    g!("xorps xmm0, xmm1", |o: &mut Vec<u8>| xorps(o, 0, 1));
+    g!("unpcklpd xmm0, xmm0", |o: &mut Vec<u8>| unpcklpd(o, 0, 0));
+    g!("punpcklqdq xmm1, xmm1", |o: &mut Vec<u8>| punpcklqdq(o, 1, 1));
+    g!("shufps xmm0, xmm0, 0", |o: &mut Vec<u8>| shufps(o, 0, 0, 0));
+    g!("pshufd xmm1, xmm1, 0", |o: &mut Vec<u8>| pshufd(o, 1, 1, 0));
+    g!("vfmadd231pd xmm0, xmm1, xmm2", |o: &mut Vec<u8>| vfmadd231(o, true, 0, 1, 2));
+    g!("vfmadd231ps xmm0, xmm1, xmm2", |o: &mut Vec<u8>| vfmadd231(o, false, 0, 1, 2));
+    g!("vfmadd231pd xmm3, xmm5, xmm7", |o: &mut Vec<u8>| vfmadd231(o, true, 3, 5, 7));
     out
 }

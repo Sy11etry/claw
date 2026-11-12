@@ -13,6 +13,7 @@
 //! `push rbp`.
 
 use crate::cir::*;
+use crate::types::Vk;
 use crate::x64::*;
 
 const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"];
@@ -70,6 +71,8 @@ pub struct ObjectX64 {
     pub symbols: Vec<(String, usize)>,
     pub entry: usize,
     pub bss_size: u64,
+    /// `-g`: code position in bytes and the source line that starts there.
+    pub lines: Vec<(usize, crate::cir::Loc)>,
 }
 
 struct Gen {
@@ -87,6 +90,13 @@ struct Gen {
     too_large: Option<String>,
     /// Where each virtual register of the function being generated lives.
     pl: Vec<Place>,
+    /// Which registers of the function being generated are 128-bit vectors, and how many registers it has:
+    /// a vector keeps its low half in the usual slot and its high half in a second bank of slots.
+    vecs: Vec<bool>,
+    nv: u32,
+    lines: Vec<(usize, Loc)>,
+    /// Where the function being generated starts: its first line covers the prologue.
+    func_first: Option<usize>,
 }
 
 /// Where a virtual register lives.
@@ -107,7 +117,7 @@ const POOL: [Reg; 5] = [RBX, R12, R13, R14, R15];
 
 /// Decides where each register lives; `objects` are the stack objects' distances below rbp.
 /// Only optimized code gets anything but stack slots. Also returns the pool registers used.
-fn plan(f: &Func, objects: &[i32]) -> (Vec<Place>, Vec<Reg>) {
+fn plan(f: &Func, objects: &[i32], vecs: &[bool]) -> (Vec<Place>, Vec<Reg>) {
     let n = f.nvregs as usize;
     let mut places = vec![Place::Slot; n];
     if !f.optimized {
@@ -167,7 +177,7 @@ fn plan(f: &Func, objects: &[i32]) -> (Vec<Place>, Vec<Reg>) {
         }
     }
     // Each register used costs a save and a restore, so a value must be worth a few accesses.
-    let mut best: Vec<usize> = (0..n).filter(|v| places[*v] == Place::Slot && weight[*v] >= 6).collect();
+    let mut best: Vec<usize> = (0..n).filter(|v| places[*v] == Place::Slot && weight[*v] >= 6 && !vecs.get(*v).copied().unwrap_or(false)).collect();
     best.sort_by_key(|v| (std::cmp::Reverse(weight[*v]), *v));
     best.truncate(POOL.len());
     let mut used = Vec::new();
@@ -252,6 +262,11 @@ struct Frame {
 }
 
 /// The stack slot of a virtual register.
+/// The high half of vector `v` in a function with `nv` registers.
+fn hi_at(nv: u32, v: VReg) -> Op {
+    at(RBP, -((nv + v) as i32 + 1) * 8)
+}
+
 fn slot(v: VReg) -> Op {
     at(RBP, -(v as i32 + 1) * 8)
 }
@@ -365,6 +380,18 @@ impl Gen {
             }
             Place::Obj(_) => unreachable!("an address is not a float"),
         }
+    }
+
+    fn vld(&mut self, x: Xmm, v: VReg) {
+        movlps_load(&mut self.c, x, slot(v));
+        let h = hi_at(self.nv, v);
+        movhps_load(&mut self.c, x, h);
+    }
+
+    fn vst(&mut self, v: VReg, x: Xmm) {
+        movlps_store(&mut self.c, slot(v), x);
+        let h = hi_at(self.nv, v);
+        movhps_store(&mut self.c, h, x);
     }
 
     fn fst(&mut self, v: VReg, x: Xmm, bits: u8) {
@@ -766,20 +793,24 @@ impl Gen {
         for b in &f.blocks {
             for i in &b.insts {
                 match i {
-                    Inst::Call { args, .. } | Inst::CallInd { args, .. } => outgoing = outgoing.max(args.len() as u32 * 8),
+                    // Vector arguments put their high halves in a second row after the first.
+                    Inst::Call { args, vsig, .. } => outgoing = outgoing.max(args.len() as u32 * 8 * if *vsig & 0xFF != 0 { 2 } else { 1 }),
+                    Inst::CallInd { args, .. } => outgoing = outgoing.max(args.len() as u32 * 8),
                     Inst::CallC { args, .. } => outgoing = outgoing.max(assign_c(args).1),
                     _ => {}
                 }
             }
         }
-        let mut off = f.nvregs as u64 * 8;
+        let vecs = crate::regalloc::vec_classes(f);
+        let has_vec = vecs.iter().any(|v| *v);
+        let mut off = f.nvregs as u64 * 8 * if has_vec { 2 } else { 1 };
         let mut objects = Vec::with_capacity(f.objects.len());
         for (size, align) in &f.objects {
             let align = (*align).max(1);
             off = (off + size + align - 1) & !(align - 1);
             objects.push(off as i32);
         }
-        let (places, used) = plan(f, &objects);
+        let (places, used) = plan(f, &objects, &vecs);
         // Callee-saved registers that hold values are kept in the frame while we use them.
         let mut saves: Vec<(Reg, i32)> = Vec::new();
         for r in used {
@@ -793,7 +824,10 @@ impl Gen {
         }
         let fr = Frame { objects };
         self.pl = places;
+        self.vecs = vecs;
+        self.nv = f.nvregs;
 
+        self.func_first = Some(self.here());
         push(&mut self.c, RBP);
         mov(&mut self.c, reg(RBP), RSP);
         if size > 0 {
@@ -804,6 +838,13 @@ impl Gen {
         }
         for (i, p) in f.params.iter().enumerate() {
             let from = at(RBP, 16 + 8 * i as i32);
+            if i < 8 && f.vsig >> i & 1 != 0 {
+                mov_load(&mut self.c, RAX, from);
+                mov(&mut self.c, slot(*p), RAX);
+                mov_load(&mut self.c, RAX, at(RBP, 16 + 8 * (f.params.len() + i) as i32));
+                mov(&mut self.c, hi_at(self.nv, *p), RAX);
+                continue;
+            }
             match self.pl[*p as usize] {
                 Place::Reg(x) => mov_load(&mut self.c, x, from),
                 _ => {
@@ -888,7 +929,12 @@ impl Gen {
                 }
                 Term::Ret(v) => {
                     if let Some(v) = v {
-                        self.ld(RAX, *v);
+                        if f.vsig >> 8 & 1 != 0 {
+                            mov_load(&mut self.c, RAX, slot(*v));
+                            mov_load(&mut self.c, RDX, hi_at(self.nv, *v));
+                        } else {
+                            self.ld(RAX, *v);
+                        }
                     }
                     for (r, o) in &saves {
                         mov_load(&mut self.c, *r, at(RBP, -o));
@@ -1036,6 +1082,12 @@ impl Gen {
                     }
                 }
             },
+            Inst::Mov { d, s } if self.vecs.get(*d as usize).copied().unwrap_or(false) => {
+                mov_load(&mut self.c, RAX, slot(*s));
+                mov(&mut self.c, slot(*d), RAX);
+                mov_load(&mut self.c, RAX, hi_at(self.nv, *s));
+                mov(&mut self.c, hi_at(self.nv, *d), RAX);
+            }
             Inst::Mov { d, s } => match self.pl[*d as usize] {
                 Place::Reg(x) => self.ld(x, *s),
                 _ => {
@@ -1086,9 +1138,113 @@ impl Gen {
                 self.st(*d, RAX);
             }
             Inst::Phi { .. } | Inst::Pi { .. } => unreachable!("gone before code generation"),
-            Inst::ConstRef { .. } | Inst::Line { .. } | Inst::Note { .. } => unreachable!("only the interpreter sees these"),
-            Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VStore { .. } | Inst::VLane { .. } => {
-                unreachable!("`generate` refuses SIMD code before it gets here")
+            Inst::Line { loc } => {
+                let at = self.func_first.take().unwrap_or_else(|| self.here());
+                match self.lines.last_mut() {
+                    Some((p, l)) if *p == at => *l = *loc,
+                    Some((_, l)) if l == loc => {}
+                    _ => self.lines.push((at, *loc)),
+                }
+            }
+            Inst::ConstRef { .. } | Inst::Note { .. } => unreachable!("only the interpreter sees these"),
+            Inst::VBin { op, d, a, b, ty } => {
+                self.vld(0, *a);
+                self.vld(1, *b);
+                match ty {
+                    Vk::I32x4 => match op {
+                        FArith::Add => pint(&mut self.c, PInt::Add, 0, reg(1)),
+                        FArith::Sub => pint(&mut self.c, PInt::Sub, 0, reg(1)),
+                        FArith::Mul => pmulld(&mut self.c, 0, reg(1)),
+                        FArith::Div => unreachable!("sema refuses integer vector division"),
+                    },
+                    _ => {
+                        let sop = match op {
+                            FArith::Add => Sse::Add,
+                            FArith::Sub => Sse::Sub,
+                            FArith::Mul => Sse::Mul,
+                            FArith::Div => Sse::Div,
+                        };
+                        psse(&mut self.c, sop, *ty == Vk::F64x2, 0, reg(1));
+                    }
+                }
+                self.vst(*d, 0);
+            }
+            Inst::VFma { d, a, b, c, ty } => {
+                self.vld(0, *c);
+                self.vld(1, *a);
+                self.vld(2, *b);
+                vfmadd231(&mut self.c, *ty == Vk::F64x2, 0, 1, 2);
+                self.vst(*d, 0);
+            }
+            Inst::VNeg { d, s, ty } => {
+                self.vld(0, *s);
+                match ty {
+                    Vk::I32x4 => {
+                        pint(&mut self.c, PInt::Xor, 1, reg(1));
+                        pint(&mut self.c, PInt::Sub, 1, reg(0));
+                        movaps(&mut self.c, 0, 1);
+                    }
+                    Vk::F64x2 => {
+                        mov_ri64(&mut self.c, RAX, i64::MIN);
+                        movq_xr(&mut self.c, 1, RAX);
+                        punpcklqdq(&mut self.c, 1, 1);
+                        xorps(&mut self.c, 0, 1);
+                    }
+                    Vk::F32x4 => {
+                        mov_ri32(&mut self.c, RAX, 0x8000_0000);
+                        movd_xr(&mut self.c, 1, RAX);
+                        pshufd(&mut self.c, 1, 1, 0);
+                        xorps(&mut self.c, 0, 1);
+                    }
+                }
+                self.vst(*d, 0);
+            }
+            Inst::VSplat { d, s, ty } => {
+                match ty {
+                    Vk::F64x2 => {
+                        self.fld(0, *s, 64);
+                        unpcklpd(&mut self.c, 0, 0);
+                    }
+                    Vk::F32x4 => {
+                        self.fld(0, *s, 32);
+                        shufps(&mut self.c, 0, 0, 0);
+                    }
+                    Vk::I32x4 => {
+                        self.ld(RAX, *s);
+                        movd_xr(&mut self.c, 0, RAX);
+                        pshufd(&mut self.c, 0, 0, 0);
+                    }
+                }
+                self.vst(*d, 0);
+            }
+            Inst::VLoad { d, p, off } => {
+                let m = self.mem_at(*p, *off);
+                movups_load(&mut self.c, 0, m);
+                self.vst(*d, 0);
+            }
+            Inst::VStore { p, off, s } => {
+                self.vld(0, *s);
+                let m = self.mem_at(*p, *off);
+                movups_store(&mut self.c, m, 0);
+            }
+            Inst::VLane { d, s, lane, ty } => {
+                let word = if (*lane as u32) < ty.lanes() / 2 { slot(*s) } else { hi_at(self.nv, *s) };
+                match ty {
+                    Vk::F64x2 => mov_load(&mut self.c, RAX, word),
+                    _ => {
+                        // 32-bit lanes: two to a word, the odd one is the upper half.
+                        mov_load(&mut self.c, RAX, word);
+                        if *lane % 2 == 1 {
+                            shift_i(&mut self.c, Shift::Shr, RAX, 32);
+                        } else {
+                            mov32(&mut self.c, reg(RAX), RAX);
+                        }
+                        if *ty == Vk::I32x4 {
+                            movsx32(&mut self.c, RAX, reg(RAX));
+                        }
+                    }
+                }
+                self.st(*d, RAX);
             }
             Inst::DataAddr { d, bytes } => {
                 let off = self.add_str(bytes);
@@ -1212,13 +1368,25 @@ impl Gen {
                 }
                 self.fst(*d, 0, *to_bits);
             }
-            Inst::Call { d, f, args, .. } => {
+            Inst::Call { d, f, args, vsig } => {
                 for (n, a) in args.iter().enumerate() {
-                    self.store_arg(n, *a);
+                    if n < 8 && vsig >> n & 1 != 0 {
+                        mov_load(&mut self.c, RAX, slot(*a));
+                        mov(&mut self.c, at(RSP, 8 * n as i32), RAX);
+                        mov_load(&mut self.c, RAX, hi_at(self.nv, *a));
+                        mov(&mut self.c, at(RSP, 8 * (args.len() + n) as i32), RAX);
+                    } else {
+                        self.store_arg(n, *a);
+                    }
                 }
                 self.call_to(Target::User(*f));
                 if let Some(d) = d {
-                    self.st(*d, RAX);
+                    if vsig >> 8 & 1 != 0 {
+                        mov(&mut self.c, slot(*d), RAX);
+                        mov(&mut self.c, hi_at(self.nv, *d), RDX);
+                    } else {
+                        self.st(*d, RAX);
+                    }
                 }
             }
             Inst::CallInd { d, callee, args } => {
@@ -1653,9 +1821,6 @@ impl Gen {
 }
 
 pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<ObjectX64, String> {
-    if m.funcs.iter().filter(|f| !f.dead).any(|f| f.vsig != 0 || f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VStore { .. } | Inst::VLane { .. })))) {
-        return Err("E0907 SIMD vectors are not available on x86_64 yet; build for arm64".to_string());
-    }
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
     for f in m.funcs.iter().filter(|f| !f.dead) {
         for b in &f.blocks {
@@ -1681,6 +1846,10 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         imports: imports.clone(),
         too_large: None,
         pl: Vec::new(),
+        vecs: Vec::new(),
+        nv: 0,
+        lines: Vec::new(),
+        func_first: None,
     };
     let mut symbols: Vec<(String, usize)> = Vec::new();
 
@@ -1728,13 +1897,25 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     g.epilogue(&[]);
 
     let mut func_pos = Vec::with_capacity(m.funcs.len());
-    for f in &m.funcs {
+    // A thread's entry is called by `pthread_create` with the C convention (argument in rdi), while Claw
+    // functions read theirs from the stack: its address is that of a small shim that moves the argument over.
+    let mut shims: Vec<Option<usize>> = vec![None; m.funcs.len()];
+    for (id, f) in m.funcs.iter().enumerate() {
         func_pos.push(g.here());
         if f.dead {
             continue;
         }
         symbols.push((format!("_{}", f.name), g.here()));
         g.func(f, (fmt64, fmt32));
+        if f.name.starts_with("par.thread_main") {
+            shims[id] = Some(g.here());
+            g.prologue(&[]);
+            alu_i(&mut g.c, Alu::Sub, reg(RSP), 16);
+            mov(&mut g.c, at(RSP, 0), RDI);
+            g.call_to(Target::User(id));
+            lea(&mut g.c, RSP, at(RBP, 0));
+            g.epilogue(&[]);
+        }
     }
 
     for (pos, t) in std::mem::take(&mut g.calls) {
@@ -1755,7 +1936,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         patch_rel(&mut g.c, pos, dest);
     }
     for (pos, f) in std::mem::take(&mut g.func_refs) {
-        patch_rel(&mut g.c, pos, func_pos[f]);
+        patch_rel(&mut g.c, pos, shims[f].unwrap_or(func_pos[f]));
     }
 
     if let Some(name) = g.too_large {
@@ -1772,5 +1953,6 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         symbols,
         entry,
         bss_size: STATE + STATE_SIZE,
+        lines: g.lines,
     })
 }

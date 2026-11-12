@@ -1,0 +1,27 @@
+// expect: 9
+// expect: 2
+// Contracts: `need` is what the function asks for, `sure` is what it promises.
+// `claw run` checks every one; `claw build` drops those it can prove.
+fn avg(xs []int) int
+    need len(xs) > 0
+    sure ret <= max_of(xs)
+{
+    mut total := 0
+    for x in xs { total += x }
+    ret total / len(xs)
+}
+
+fn max_of(xs []int) int
+    need len(xs) > 0
+{
+    mut best := xs[0]
+    for x in xs {
+        if x > best { best = x }
+    }
+    ret best
+}
+
+fn main() {
+    print(avg([4, 8, 15]))
+    print(avg([1, 2, 3]))
+}

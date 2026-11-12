@@ -105,7 +105,8 @@ fn shdr(w: &mut W, name: u32, kind: u32, flags: u64, addr: u64, off: u64, size: 
     w.u64(entsize);
 }
 
-pub fn write_elf(obj: &Object, libc: Libc) -> Vec<u8> {
+/// `debug`: the source file names, when `-g` asks for DWARF inside the file.
+pub fn write_elf(obj: &Object, libc: Libc, debug: Option<&[String]>) -> Vec<u8> {
     // The imports of the program, then the one the start-up code needs.
     let mut imports: Vec<String> = obj.imports.iter().map(|n| libc_name(n)).collect();
     let start_import = imports.len();
@@ -237,13 +238,25 @@ pub fn write_elf(obj: &Object, libc: Libc) -> Vec<u8> {
     symtab.u64(code_addr + start as u64 * 4);
     symtab.u64(0);
 
+    // DWARF goes into sections the loader never maps, after the string tables.
+    let dwarf: Vec<(String, Vec<u8>)> = match debug {
+        Some(files) => crate::dwarf::sections(obj, code_addr, text_size, files).into_iter().map(|(n, b)| (format!(".{n}"), b)).collect(),
+        None => Vec::new(),
+    };
     let mut shstr = Strings::new();
     let names: Vec<u32> = [".text", ".rodata", ".dynamic", ".got", ".bss", ".symtab", ".strtab", ".shstrtab"].iter().map(|n| shstr.add(n)).collect();
+    let dwarf_names: Vec<u32> = dwarf.iter().map(|(n, _)| shstr.add(n)).collect();
 
     let symtab_off = align(got_off + got_size, 8);
     let strtab_off = symtab_off + symtab.0.len() as u64;
     let shstr_off = strtab_off + strtab.bytes.len() as u64;
-    let sh_off = align(shstr_off + shstr.bytes.len() as u64, 8);
+    let mut dwarf_offs = Vec::new();
+    let mut cursor = shstr_off + shstr.bytes.len() as u64;
+    for (_, bytes) in &dwarf {
+        dwarf_offs.push(cursor);
+        cursor += bytes.len() as u64;
+    }
+    let sh_off = align(cursor, 8);
 
     // ---- write
     let mut w = W(Vec::new());
@@ -259,7 +272,7 @@ pub fn write_elf(obj: &Object, libc: Libc) -> Vec<u8> {
     w.u16(56);
     w.u16(ph_count as u16);
     w.u16(64);
-    w.u16(9); // null + 8 sections
+    w.u16(9 + dwarf.len() as u16); // null + 8 sections + DWARF
     w.u16(8); // .shstrtab
 
     phdr(&mut w, PT_PHDR, PF_R, ph_off, ph_off, ph_count * 56, ph_count * 56, 8);
@@ -318,6 +331,9 @@ pub fn write_elf(obj: &Object, libc: Libc) -> Vec<u8> {
     w.0.extend_from_slice(&symtab.0);
     w.0.extend_from_slice(&strtab.bytes);
     w.0.extend_from_slice(&shstr.bytes);
+    for (_, bytes) in &dwarf {
+        w.0.extend_from_slice(bytes);
+    }
     w.pad_to(sh_off as usize);
 
     shdr(&mut w, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
@@ -329,5 +345,8 @@ pub fn write_elf(obj: &Object, libc: Libc) -> Vec<u8> {
     shdr(&mut w, names[5], 2, 0, 0, symtab_off, symtab.0.len() as u64, 7, obj.symbols.len() as u32 + 1, 8, 24); // SYMTAB, links to .strtab
     shdr(&mut w, names[6], 3, 0, 0, strtab_off, strtab.bytes.len() as u64, 0, 0, 1, 0);
     shdr(&mut w, names[7], 3, 0, 0, shstr_off, shstr.bytes.len() as u64, 0, 0, 1, 0);
+    for (((_, bytes), name), off) in dwarf.iter().zip(&dwarf_names).zip(&dwarf_offs) {
+        shdr(&mut w, *name, 1, 0, 0, *off, bytes.len() as u64, 0, 0, 1, 0); // PROGBITS, not allocated
+    }
     w.0
 }

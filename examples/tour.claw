@@ -1,0 +1,35 @@
+// expect: area 12
+// expect: parsed 42
+// expect: bad input, using 0
+// expect: sum 45
+// A quick tour: structs, variants, match, errors as values, loops.
+type Shape = Rect{w int, h int} | Dot
+type ParseErr = Empty | Bad{at int}
+
+fn area(s Shape) int {
+    match s { // must cover every case
+        Rect{w, h}: ret w * h
+        Dot: ret 0
+    }
+}
+
+fn parse(s str) int ! ParseErr {
+    if len(s) == 0 { fail Empty }
+    mut n := 0
+    for c, i in s {
+        if c < '0' or c > '9' { fail Bad { i } }
+        n = n * 10 + int(c - '0')
+    }
+    ret n
+}
+
+fn main() {
+    print("area {area(Rect{3, 4})}")
+    v := parse("42") else 0
+    print("parsed {v}")
+    n := parse("4x2") else 0 // or `?` to pass the error up
+    if n == 0 { print("bad input, using 0") }
+    mut sum := 0
+    for i in 0..10 { sum += i }
+    print("sum {sum}")
+}

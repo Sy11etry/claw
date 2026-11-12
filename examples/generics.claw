@@ -1,0 +1,18 @@
+// expect: 7
+// expect: 2.5
+// expect: 3
+// Templates and a hash map from the standard library.
+fn biggest[T](a T, b T) T {
+    if a > b { ret a }
+    ret b
+}
+
+fn main() {
+    print(biggest(3, 7))
+    print(biggest(2.5, 1.0))
+    mut m := new_map[str, int](hash_str)
+    put(&m, "a", 1)
+    put(&m, "b", 2)
+    put(&m, "a", 3)
+    print(get(m, "a") else 0)
+}

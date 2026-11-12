@@ -1,0 +1,18 @@
+// expect: 3 3
+// expect: cat dog bird
+// Memory without a garbage collector and without writing `free`.
+// Whoever owns a value frees it at the end of its scope; copies are asked for out loud.
+fn pets() []str {
+    mut a []str = []
+    push(&a, "cat")
+    push(&a, "dog")
+    push(&a, "bird")
+    ret a // handed over, not copied
+}
+
+fn main() {
+    a := pets()
+    b := copy(a) // an explicit, visible copy
+    print("{len(a)} {len(b)}")
+    print(join(a, " "))
+} // a and b are freed here

@@ -264,19 +264,24 @@ fn info(funcs: &[Func], files: &[String], text_addr: u64, text_size: u64) -> Vec
     out.0
 }
 
-/// Writes `<out>.dSYM` for the executable `exe` that `obj` became.
-pub fn write_dsym(out: &Path, obj: &Object, exe: &[u8], files: &[String]) -> Result<PathBuf, String> {
-    let img = read_image(exe).ok_or("cannot read the executable's layout")?;
-    let at = |i: usize| img.text_addr + i as u64 * 4;
+/// The DWARF sections for code that starts at `text_addr` (`text_size` bytes): name without any
+/// platform prefix (`debug_line`), and contents. Addresses are the ones in the finished file.
+pub fn sections(obj: &Object, text_addr: u64, text_size: u64, files: &[String]) -> Vec<(&'static str, Vec<u8>)> {
+    sections_of(&obj.symbols, &obj.lines, obj.code.len(), 4, text_addr, text_size, files)
+}
+
+/// The same for any code: positions in `symbols` and `lines` count `unit` bytes each (4 for ARM64 words, 1 for x86-64).
+pub fn sections_of(symbols: &[(String, usize)], lines: &[(usize, Loc)], code_len: usize, unit: u64, text_addr: u64, text_size: u64, files: &[String]) -> Vec<(&'static str, Vec<u8>)> {
+    let at = |i: usize| text_addr + i as u64 * unit;
 
     // Functions run from one symbol to the next; the runtime's own helpers have no source.
-    let mut syms: Vec<&(String, usize)> = obj.symbols.iter().collect();
+    let mut syms: Vec<&(String, usize)> = symbols.iter().collect();
     syms.sort_by_key(|s| s.1);
-    let mut rows: Vec<Row> = obj.lines.iter().map(|(i, l)| Row { addr: at(*i), loc: *l }).collect();
+    let mut rows: Vec<Row> = lines.iter().map(|(i, l)| Row { addr: at(*i), loc: *l }).collect();
     rows.sort_by_key(|r| r.addr);
     let mut funcs = Vec::new();
     for (k, (name, pos)) in syms.iter().enumerate() {
-        let end = syms.get(k + 1).map_or(obj.code.len(), |s| s.1);
+        let end = syms.get(k + 1).map_or(code_len, |s| s.1);
         let (start, stop) = (at(*pos), at(end));
         if let Some(first) = rows.iter().find(|r| r.addr >= start && r.addr < stop) {
             funcs.push(Func { name: name.clone(), start, end: stop, loc: first.loc });
@@ -290,12 +295,20 @@ pub fn write_dsym(out: &Path, obj: &Object, exe: &[u8], files: &[String]) -> Res
     }
     rows.sort_by_key(|r| r.addr);
 
-    let sections: Vec<(&str, Vec<u8>)> = vec![
-        ("__debug_line", line_table(&rows, files, img.text_addr, img.text_size)),
-        ("__debug_info", info(&funcs, files, img.text_addr, img.text_size)),
-        ("__debug_abbrev", abbrev()),
-        ("__debug_aranges", aranges(img.text_addr, img.text_size)),
-    ];
+    vec![
+        ("debug_line", line_table(&rows, files, text_addr, text_size)),
+        ("debug_info", info(&funcs, files, text_addr, text_size)),
+        ("debug_abbrev", abbrev()),
+        ("debug_aranges", aranges(text_addr, text_size)),
+    ]
+}
+
+/// Writes `<out>.dSYM` for the executable `exe`. `build` makes the DWARF sections once it is told where the
+/// code sits (`text_addr`, `text_size`); `x86` picks the CPU type the dSYM claims.
+pub fn write_dsym(out: &Path, exe: &[u8], x86: bool, build: impl Fn(u64, u64) -> Vec<(&'static str, Vec<u8>)>) -> Result<PathBuf, String> {
+    let img = read_image(exe).ok_or("cannot read the executable's layout")?;
+    let named: Vec<(String, Vec<u8>)> = build(img.text_addr, img.text_size).into_iter().map(|(n, b)| (format!("__{n}"), b)).collect();
+    let sections: Vec<(&str, Vec<u8>)> = named.iter().map(|(n, b)| (n.as_str(), b.clone())).collect();
 
     // Header, then the commands, then the section bytes one after another.
     let seg_cmd = |nsects: u32| 72 + 80 * nsects;
@@ -312,8 +325,8 @@ pub fn write_dsym(out: &Path, obj: &Object, exe: &[u8], files: &[String]) -> Res
 
     let mut w = W(Vec::new());
     w.u32(0xfeed_facf);
-    w.u32(0x0100_000c);
-    w.u32(0);
+    w.u32(if x86 { 0x0100_0007 } else { 0x0100_000c });
+    w.u32(if x86 { 3 } else { 0 });
     w.u32(0xA); // MH_DSYM
     w.u32(5);
     w.u32(sizeofcmds);

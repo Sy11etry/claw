@@ -112,7 +112,7 @@ def main():
             skipped += 1
             continue
         exe = work / (t.parent.name + "_" + t.stem + ".elf")
-        p = subprocess.run([str(CLAW), "build", "--target", "aarch64-linux-musl", str(t), "-o", str(exe)], capture_output=True, text=True)
+        p = subprocess.run([str(CLAW), "build", "-g", "--target", "aarch64-linux-musl", str(t), "-o", str(exe)], capture_output=True, text=True)
         if p.returncode != 0:
             print(f"FAIL {t.name}: compile failed: {p.stderr.strip()}")
             return 1

@@ -1,0 +1,23 @@
+// expect: 6
+// expect: 2
+// Two gears in one language: `fn` is safe and automatic, `claw fn` is C.
+extern fn strlen(s *u8) u64 // any libSystem function
+
+claw fn sum3() int {
+    p := alloc[int](3)
+    defer free(p) // runs when the block ends
+    p[0] = 1
+    p[1] = 2
+    q := p + 2
+    *q = 3
+    ret p[0] + p[1] + p[2]
+}
+
+claw fn length_of_hi() u64 {
+    ret strlen("hi")
+}
+
+fn main() {
+    print(sum3()) // safe code calls claw code
+    print(length_of_hi())
+}

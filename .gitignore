@@ -1,6 +1,11 @@
+# build output
 compiler/target/
-__pycache__/
-.DS_Store
-*.bin
 benchmarks/out/
 selfhost/build/
+*.bin
+*.dSYM/
+
+# tooling and local files
+__pycache__/
+.DS_Store
+.claude/

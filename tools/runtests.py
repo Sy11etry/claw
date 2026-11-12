@@ -23,6 +23,7 @@ tools/fuzz_opt.py  random programs: optimized and unoptimized builds must agree.
 tests/fmt/x.claw  must format to tests/fmt/x.out.
 tests/par/*.claw  tasks: checked run and real threads must print the same; err_*.claw must be rejected.
 tests/debug/*.claw  lldb stops at the right line.
+examples/*.claw  the showcase programs: built, run checked, and run as x86-64.
 tests/simd/*.claw  SIMD vectors: checked run, three build modes and the interpreter agree; err_*.claw must be rejected.
 Linux target: the ELF is checked, and with qemu and an Alpine image the programs run there too.
 
@@ -224,7 +225,7 @@ def debug_test(path, tmp):
         return None
     text = path.read_text()
     problems = []
-    for flags in ([], ["--no-opt"]):
+    for flags in ([], ["--no-opt"], ["--target", "x86_64"], ["--target", "x86_64", "--no-opt"]):
         exe = tmp / ("dbg" + "".join(f.strip("-") for f in flags) + "_" + path.stem)
         p = child([CLAW, "build", "-g", path, "-o", exe, *flags], capture_output=True, text=True, env={"PATH": ""})
         if p.returncode != 0:
@@ -237,12 +238,13 @@ def debug_test(path, tmp):
         r = child(["lldb", "-b", *cmds, str(exe)], capture_output=True, text=True, timeout=60)
         out = r.stdout + r.stderr
         # Optimized code may have inlined a callee, so only the plain build promises the call chain.
-        wanted = headers(text, "frame") if flags else [f"{path.name}:{line}"]
+        plain = "--no-opt" in flags
+        wanted = headers(text, "frame") if plain else [f"{path.name}:{line}"]
         for want in wanted:
             where = want.split(" at ")[-1]
             if not re.search(rf"at {re.escape(where)}", out):
                 problems.append(f"{' '.join(flags) or 'optimized'}: nothing at `{want}` in:\n{out}")
-        if flags:
+        if plain:
             for want in headers(text, "frame"):
                 fn, where = want.split(" at ")
                 if not re.search(rf"`{re.escape(fn)} at {re.escape(where)}", out):
@@ -379,7 +381,8 @@ def par_test(path, tmp):
     p = child([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
     if p.returncode != 0 or p.stdout.splitlines() != want:
         return f"claw run: exit {p.returncode}, got {p.stdout.splitlines()}, wanted {want}\n{p.stderr}"
-    for mode in ([], ["--fast"], ["--no-opt"]):
+    # The x86-64 target (Rosetta) starts its threads through a small shim: it must work too.
+    for mode in ([], ["--fast"], ["--no-opt"], ["--target", "x86_64"], ["--target", "x86_64", "--no-opt"]):
         exe = tmp / ("par_" + path.stem + "".join(mode))
         b = child([CLAW, "build", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
         if b.returncode != 0:
@@ -427,10 +430,15 @@ def simd_test(path, tmp):
         r = child(cmd, capture_output=True, text=True, env={"PATH": ""}, timeout=60)
         if r.returncode != 0 or r.stdout.splitlines() != want:
             return f"{what}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
-    # The x86-64 back end has no vector code yet: it must say so, not miscompile.
-    x = child([CLAW, "build", "--target", "x86_64", path, "-o", tmp / "simd_x86"], capture_output=True, text=True, env={"PATH": ""})
-    if x.returncode == 0 or "E0907" not in x.stderr:
-        return f"--target x86_64 should refuse SIMD with E0907, got exit {x.returncode}: {x.stderr}"
+    # The x86-64 back end (SSE, Rosetta here) must print the same.
+    for mode in ([], ["--no-opt"]):
+        exe = tmp / ("simd_x86_" + path.stem + "".join(mode))
+        b = child([CLAW, "build", "--target", "x86_64", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode != 0:
+            return f"x86-64 compile {mode} failed:\n{b.stderr}"
+        r = child([exe], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+        if r.returncode != 0 or r.stdout.splitlines() != want:
+            return f"x86-64 {' '.join(mode)}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
     return None
 
 
@@ -557,6 +565,12 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL simd/{path.name}: {msg}")
+        for path in sorted((ROOT / "examples").glob("*.claw")):
+            total += 1
+            msg = run_test(path, tmp) or check_test(path)
+            if msg:
+                failures += 1
+                print(f"FAIL examples/{path.name}: {msg}")
         total += 1
         msg, ran = linux_test(tmp)
         if msg:
@@ -613,7 +627,7 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL fmt/{path.name}: {msg}")
-        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "tests/check").glob("*.claw")) + list((ROOT / "tests/unit").glob("*.claw")) + list((ROOT / "tests/auto").glob("*.claw")) + list((ROOT / "tests/why").glob("*.claw")) + list((ROOT / "tests/fast").glob("*.claw")) + list((ROOT / "tests/stats").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw"))):
+        for path in sorted(list((ROOT / "tests/run").glob("*.claw")) + list((ROOT / "tests/own").glob("*.claw")) + list((ROOT / "tests/check").glob("*.claw")) + list((ROOT / "tests/unit").glob("*.claw")) + list((ROOT / "tests/auto").glob("*.claw")) + list((ROOT / "tests/why").glob("*.claw")) + list((ROOT / "tests/fast").glob("*.claw")) + list((ROOT / "tests/stats").glob("*.claw")) + list((ROOT / "std").glob("*.claw")) + list((ROOT / "benchmarks").glob("*.claw")) + list((ROOT / "examples").glob("*.claw"))):
             total += 1
             msg = fmt_stable(path, tmp)
             if msg:
@@ -625,7 +639,9 @@ def main():
     runs = sorted((ROOT / "tests/run").glob("*.claw"))
     owns = sorted((ROOT / "tests/own").glob("*.claw"))
     checks = sorted((ROOT / "tests/check").glob("*.claw"))
+    examples = sorted((ROOT / "examples").glob("*.claw"))
     jobs = [("x86-64 encoder", encoder_x64)]
+    jobs += [(f"x86-64 examples/{p.name}", lambda p=p: in_temp(run_test, p, X64)) for p in examples]
     jobs += [(f"x86-64 {p.parent.name}/{p.name}", lambda p=p: in_temp(run_test, p, X64)) for p in runs + owns]
     jobs += [(f"x86-64 check/{p.name}", lambda p=p: check_test(p, X64)) for p in checks]
     jobs += [(f"x86-64 checked/{p.name}", lambda p=p: run_again_checked(p, X64)) for p in runs]
