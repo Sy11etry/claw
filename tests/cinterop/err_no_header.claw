@@ -1,0 +1,6 @@
+// error: E0181
+use c "no_such_header_anywhere.h"
+
+fn main() {
+    print(1)
+}

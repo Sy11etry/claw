@@ -1,0 +1,8 @@
+// expect: HELLO, WORLD
+// expect: 42
+use greet
+
+fn main() {
+    print(greet.hello("world"))
+    print(greet.twice(21))
+}

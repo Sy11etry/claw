@@ -1,0 +1,25 @@
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+// expect: true
+use c "zlib.h"
+link "z"
+
+claw fn main() {
+    src := "hello hello hello hello hello hello hello hello"
+    n := u64(len(src))
+    mut dlen u64 = 200
+    dst := alloc[u8](200)
+    defer free(dst)
+    rc := compress(dst, &dlen, src.ptr, n)
+    print(rc == z_ok)
+    print(dlen < n)
+    mut back u64 = 200
+    out := alloc[u8](200)
+    defer free(out)
+    rc2 := uncompress(out, &back, dst, dlen)
+    print(rc2 == z_ok)
+    print(back == n)
+    print(zlibVersion() != none)
+}

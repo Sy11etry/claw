@@ -1,0 +1,2 @@
+// dependencies: a name and where it comes from
+greet ../greet

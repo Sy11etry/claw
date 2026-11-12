@@ -1,0 +1,16 @@
+fn find_max(a []int) ?int {
+    if len(a) == 0 { ret none }
+    mut m := a[0]
+    for v in a {
+        if v > m { m = v }
+    }
+    ret m
+}
+
+fn main() {
+    nums := [3, 9, 2, 7]
+    m := find_max(nums) else 0
+    print("max = {m}")
+    e := find_max([]) else 0
+    print("empty = {e}")
+}

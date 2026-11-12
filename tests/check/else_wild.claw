@@ -1,0 +1,19 @@
+// expect: 7
+// expect: -1
+type E = Bad | Worse
+
+fn f(x int) int ! E {
+    if x < 0 { fail Bad }
+    ret x
+}
+
+fn g(x int) int {
+    ret f(x) else _ {
+        ret -1
+    }
+}
+
+fn main() {
+    print(g(7))
+    print(g(-3))
+}

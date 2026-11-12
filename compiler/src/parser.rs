@@ -182,6 +182,19 @@ impl<'a> Parser<'a> {
                 Tok::Kw("type") => self.parse_type_decl(public).map(|t| p.types.push(t)),
                 Tok::Kw("const") => self.parse_const(public).map(|c| p.consts.push(c)),
                 Tok::Kw("extern") => self.parse_extern(public).map(|e| p.externs.push(e)),
+                Tok::Kw("use") if !public && matches!(self.peek_at(1), Tok::Ident(n) if n == "c") && matches!(self.peek_at(2), Tok::Str(_)) => {
+                    self.bump();
+                    let span = self.bump().span;
+                    let Tok::Str(path) = self.bump().tok else { unreachable!() };
+                    p.cimports.push((path, span));
+                    Ok(())
+                }
+                Tok::Ident(n) if n == "link" && !public && matches!(self.peek_at(1), Tok::Str(_)) => {
+                    self.bump();
+                    let Tok::Str(name) = self.bump().tok else { unreachable!() };
+                    p.links.push(name);
+                    Ok(())
+                }
                 Tok::Kw("use") if !public => self.parse_use().map(|u| p.uses.push(u)),
                 Tok::Kw("test") if !public => {
                     self.tests += 1;

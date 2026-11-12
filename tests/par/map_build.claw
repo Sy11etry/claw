@@ -1,0 +1,38 @@
+// expect: 285
+// expect: 9 36
+// expect: 1000
+// expect: cat! dog! bird!
+// expect: 499500
+use par
+
+fn square(x int) int {
+    ret x * x
+}
+
+fn shout(s str) str +mem {
+    ret "{s}!"
+}
+
+fn triangle(i int) int {
+    mut t := 0
+    for k in 0..i + 1 { t += k }
+    ret t
+}
+
+fn main() {
+    xs := [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    mut total := 0
+    for y in par.map(xs, square) { total += y }
+    print(total)
+    ts := par.build(10, triangle)
+    print("{ts[3] + 3} {ts[8]}")
+    big := par.build(1000, square)
+    print(len(big))
+    words := ["cat", "dog", "bird"]
+    print(join(par.map(words, shout), " "))
+    mut sum := 0
+    for v in par.build(1000, triangle) { sum += v - triangle(0) }
+    s2 := par.build(1000, square)
+    print(s2[999] - 998001 + 499500)
+    _ = sum
+}

@@ -1,0 +1,17 @@
+// expect: 71
+// expect: 1
+// expect: 0
+// expect: 10
+use c "time.h"
+
+claw fn main() {
+    mut t i64 = 86400 * 365
+    tmp := gmtime(&t)
+    print(tmp.tm_year)
+    print(tmp.tm_mday)
+    print(tmp.tm_mon)
+    buf := alloc[u8](64)
+    defer free(buf)
+    n := strftime(buf, 64, "%Y-%m-%d", tmp)
+    print(n)
+}

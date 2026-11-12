@@ -1,0 +1,10 @@
+fn avg(a []int) int {
+    mut s := 0
+    for v in a { s += v }
+    ret s / len(a)
+}
+
+fn main() {
+    print(avg([2, 4, 6]))
+    print(avg([]))
+}

@@ -5,6 +5,7 @@ mod ast;
 mod cir;
 mod codegen;
 mod codegen_x64;
+mod cheader;
 mod ctfe;
 mod diag;
 mod dwarf;
@@ -22,6 +23,7 @@ mod macho;
 mod modules;
 mod opt;
 mod parser;
+mod pkg;
 mod ranges;
 mod regalloc;
 mod sema;
@@ -46,9 +48,12 @@ claw fix <file.claw>            apply the compiler's safe patches
 claw build <file.claw> [-o out] optimized executable; contracts with calls are left out
     --fast                      remove every run-time check: speed like C, risk like C
     --stats                     say how many checks were proved unnecessary
+    -l name -L dir -I dir       C libraries to load and header folders
     -g                          debug info so lldb can stop on source lines (<out>.dSYM on macOS, inside the ELF on Linux)
 claw check <file.claw>          report errors only
 claw card                       the language on one page
+claw get [--update]             fetch the packages listed in claw.pkg into .claw/pkg, pinned by claw.lock
+claw cdecl <header.h> [-I dir]  print the Claw declarations made from a C header
 claw sig <file.claw> | std      only the signatures, with the effects worked out
     --pub                       only what the module exports
 claw ctx <file.claw> <fn>       one function and what it takes to change it
@@ -56,7 +61,7 @@ claw audit <file.claw>          every place the compiler has to trust
 claw fmt <file.claw> [--check]  put a file into the one standard format
 claw lsp                        language server on stdin and stdout, for editors
 claw --version
-flags: --json (errors as JSON), --emit-cir (print the IR)
+flags: --json (errors as JSON), --emit-cir (print the IR), -l name / -L dir / -I dir (C libraries and header folders)
        --target arm64|x86_64|aarch64-linux|aarch64-linux-musl (default arm64; Linux targets build only)
 ";
 
@@ -86,6 +91,37 @@ struct Options {
     test_name: Option<String>,
     /// `--target x86_64`: write an x86-64 executable instead of an arm64 one.
     x86_64: bool,
+    /// `-l name`, `-L dir`, `-I dir`: C libraries and headers.
+    libs: Vec<String>,
+    libdirs: Vec<String>,
+    incdirs: Vec<String>,
+    /// `claw run f.claw a b`: what the program itself receives.
+    prog_args: Vec<String>,
+}
+
+/// Libraries named by `link "..."` in the program; `front` fills it, `emit` reads it.
+static SOURCE_LINKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Turns `z` or `sqlite3` into the path the loader should open.
+fn resolve_libs(o: &Options) -> Vec<String> {
+    let mut names = o.libs.clone();
+    names.extend(SOURCE_LINKS.lock().unwrap().iter().cloned());
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        let path = if n.contains('/') || n.contains(".dylib") || n.contains(".so") {
+            n.clone()
+        } else if let Some(p) = o.libdirs.iter().chain(["/opt/homebrew/lib".to_string(), "/usr/local/lib".to_string()].iter()).map(|d| format!("{d}/lib{n}.dylib")).find(|p| std::path::Path::new(p).exists()) {
+            std::fs::canonicalize(&p).map(|c| c.to_string_lossy().into_owned()).unwrap_or(p)
+        } else {
+            // System libraries live in the dyld cache: no file, but the loader knows the name.
+            format!("/usr/lib/lib{n}.dylib")
+        };
+        let path = if o.linux.is_some() && !n.contains(".so") && !n.contains('/') { format!("lib{n}.so") } else if o.linux.is_some() { n.clone() } else { path };
+        if !out.contains(&path) && path != "/usr/lib/libSystem.B.dylib" && path != "/usr/lib/libc.dylib" && path != "/usr/lib/libm.dylib" {
+            out.push(path);
+        }
+    }
+    out
 }
 
 fn parse_options(args: &[String]) -> Options {
@@ -93,7 +129,15 @@ fn parse_options(args: &[String]) -> Options {
 }
 
 fn options(args: &[String], ctx: bool) -> Options {
-    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None, linux: None, x86_64: false };
+    options_ex(args, ctx, false)
+}
+
+fn parse_run_options(args: &[String]) -> Options {
+    options_ex(args, false, true)
+}
+
+fn options_ex(args: &[String], ctx: bool, run: bool) -> Options {
+    let mut o = Options { file: String::new(), out: None, json: false, emit_cir: false, check_only: false, alloc_stats: false, fast: false, stats: false, blocks: false, public: false, name: None, no_opt: false, debug: false, test_name: None, linux: None, x86_64: false, libs: Vec::new(), libdirs: Vec::new(), incdirs: Vec::new(), prog_args: Vec::new() };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -118,6 +162,26 @@ fn options(args: &[String], ctx: bool) -> Options {
                 }
             }
             "-g" => o.debug = true,
+            "-l" | "-L" | "-I" => {
+                let flag = args[i].clone();
+                i += 1;
+                match args.get(i) {
+                    Some(v) => match flag.as_str() {
+                        "-l" => o.libs.push(v.clone()),
+                        "-L" => o.libdirs.push(v.clone()),
+                        _ => o.incdirs.push(v.clone()),
+                    },
+                    None => die(&format!("`{flag}` needs a value")),
+                }
+            }
+            a if a.len() > 2 && (a.starts_with("-l") || a.starts_with("-L") || a.starts_with("-I")) => {
+                let v = a[2..].to_string();
+                match &a[..2] {
+                    "-l" => o.libs.push(v),
+                    "-L" => o.libdirs.push(v),
+                    _ => o.incdirs.push(v),
+                }
+            }
             "--pub" => o.public = true,
             "--test" => {
                 i += 1;
@@ -133,8 +197,13 @@ fn options(args: &[String], ctx: bool) -> Options {
                     None => die("`-o` needs a path"),
                 }
             }
-            a if a.starts_with('-') => die(&format!("unknown flag `{a}`")),
+            "--" if run => {
+                o.prog_args.extend(args[i + 1..].iter().cloned());
+                break;
+            }
+            a if a.starts_with('-') && !(run && !o.file.is_empty()) => die(&format!("unknown flag `{a}`")),
             a if o.file.is_empty() => o.file = a.to_string(),
+            a if run => o.prog_args.push(a.to_string()),
             a if ctx && o.name.is_none() => o.name = Some(a.to_string()),
             a => die(&format!("unexpected argument `{a}`")),
         }
@@ -144,6 +213,7 @@ fn options(args: &[String], ctx: bool) -> Options {
         die("no input file");
     }
     lower::LINUX.store(o.linux.is_some(), std::sync::atomic::Ordering::Relaxed);
+    modules::set_include_dirs(o.incdirs.iter().map(std::path::PathBuf::from).collect());
     o
 }
 
@@ -183,6 +253,7 @@ fn front(o: &Options, memory_checker: bool, tests_only: bool) -> Front {
         Ok(l) => l,
         Err((diags, files)) => report(o, diags, &files),
     };
+    *SOURCE_LINKS.lock().unwrap() = loaded.links.clone();
     let mut diags = Vec::new();
     let checked = sema::check(&loaded.units, loaded.core, tests_only, &mut diags);
     let effects = effects::check(&loaded.units, &checked, &mut diags);
@@ -257,7 +328,7 @@ fn compile(o: &Options, out: &Path, mode: Mode) {
 fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], out: &Path) {
     if let Some(libc) = o.linux {
         match codegen::generate_linux(module, files, o.alloc_stats) {
-            Ok(obj) => write_executable(out, &elf::write_elf(&obj, libc, if o.debug { Some(paths) } else { None })),
+            Ok(obj) => write_executable(out, &elf::write_elf(&obj, libc, if o.debug { Some(paths) } else { None }, &resolve_libs(o))),
             Err(e) => {
                 eprintln!("{}:1:1 {e}", o.file);
                 exit(1);
@@ -270,7 +341,7 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
     let bytes = if o.x86_64 {
         match codegen_x64::generate(module, files, o.alloc_stats) {
             Ok(obj) => {
-                let bytes = macho::write_macho_x64(&obj, &ident);
+                let bytes = macho::write_macho_x64(&obj, &ident, &resolve_libs(o));
                 let files = paths.to_vec();
                 debug_info = Box::new(move |addr, size| dwarf::sections_of(&obj.symbols, &obj.lines, obj.code.len(), 1, addr, size, &files));
                 bytes
@@ -283,7 +354,7 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
     } else {
         match codegen::generate(module, files, o.alloc_stats) {
             Ok(obj) => {
-                let bytes = macho::write_macho(&obj, &ident);
+                let bytes = macho::write_macho(&obj, &ident, &resolve_libs(o));
                 let files = paths.to_vec();
                 debug_info = Box::new(move |addr, size| dwarf::sections(&obj, addr, size, &files));
                 bytes
@@ -335,7 +406,7 @@ fn run(o: &Options) -> ! {
     }
     let exe = dir.join(default_out(&o.file));
     compile(o, &exe, Mode::Run);
-    let status = Command::new(&exe).status();
+    let status = Command::new(&exe).args(&o.prog_args).status();
     let _ = std::fs::remove_dir_all(&dir);
     match status {
         Ok(s) => {
@@ -636,7 +707,9 @@ fn real_main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("--version") | Some("-V") => println!("claw {VERSION}"),
-        Some("run") => run(&parse_options(&args[1..])),
+        Some("run") => run(&parse_run_options(&args[1..])),
+        // `claw script.claw a b`: the same as `claw run script.claw a b`.
+        Some(f) if f.ends_with(".claw") && std::path::Path::new(f).is_file() => run(&parse_run_options(&args)),
         Some("build") => {
             let o = parse_options(&args[1..]);
             let out = o.out.as_ref().map(PathBuf::from).unwrap_or_else(|| default_out(&o.file));
@@ -646,6 +719,27 @@ fn real_main() {
         Some("why") => why_file(&parse_options(&args[1..])),
         Some("fix") => fix_file(&parse_options(&args[1..])),
         Some("card") => print!("{}", info::CARD),
+        Some("get") => {
+            // Fetch the packages listed in claw.pkg (in this folder) into .claw/pkg and pin them in claw.lock.
+            let update = args.iter().any(|a| a == "--update");
+            match pkg::get(Path::new("."), update) {
+                Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
+                Err(e) => {
+                    eprintln!("claw: {e}");
+                    exit(1);
+                }
+            }
+        }
+        Some("cdecl") => {
+            // What `use c "x.h"` makes of a header: the Claw declarations, printed.
+            let o = parse_options(&args[1..]);
+            let dirs: Vec<PathBuf> = o.incdirs.iter().map(PathBuf::from).collect();
+            let Some(h) = cheader::locate(&o.file, Path::new("."), &dirs) else {
+                eprintln!("claw: cannot find the C header `{}`; add its folder with -I", o.file);
+                exit(2);
+            };
+            print!("{}", cheader::translate(&h, &dirs).source);
+        }
         Some("sig") if args.get(1).is_some_and(|a| a == "std") || args.get(2).is_some_and(|a| a == "std") => print!("{}", info::sig_std()),
         Some("sig") => {
             let o = parse_options(&args[1..]);

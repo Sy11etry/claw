@@ -1,5 +1,7 @@
 //! Turns a checked AST into CIR.
 
+/// The program has tasks: building output text must take a lock.
+pub static THREADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Set once by `--target aarch64-linux*`: the program is built for Linux.
 pub static LINUX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -152,6 +154,7 @@ pub fn lower<'a>(units: &'a [Unit], c: &'a Checked, files: &'a [String], opts: O
         list.push((f.name.clone(), f));
     }
     let ids: HashMap<String, FuncId> = list.iter().enumerate().map(|(i, (n, _))| (n.clone(), i)).collect();
+    THREADS.store(ids.keys().any(|k| k.starts_with("par.")) && !opts.interp, std::sync::atomic::Ordering::Relaxed);
     // Argument checks for the fuzzer take the ids right after the ordinary functions.
     let root_prefix = &units[root].prefix;
     let wanted: Vec<(&String, &'a ast::Func)> = if opts.interp {
@@ -283,7 +286,16 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
     // Parameters must take the first registers, in order, before anything else does.
     let regs: Vec<VReg> = f.params.iter().map(|_| l.vreg()).collect();
     l.mark(f.name_span);
+    let c_abi = c.callbacks.contains(full) || (full.starts_with("par.") && full.contains("_main"));
     for ((p, ty), v) in f.params.iter().zip(&sig.params).zip(regs) {
+        // C leaves the upper bits of a narrow argument undefined: load it back at its own width.
+        let v = if c_abi && matches!(c.types.kind(*ty), Kind::Int { bits, .. } if bits < 64) {
+            let a = l.temp_obj(INT);
+            l.store(a, 0, v, INT);
+            l.load(a, 0, *ty)
+        } else {
+            v
+        };
         l.vars.insert(p.name.clone(), v);
         l.note(&p.name, v, *ty);
         if c.types.is_ref(*ty) {
@@ -312,6 +324,7 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
     }
     let mut func = l.into_func(full.to_string(), nparams);
     func.vsig = c.types.vsig(&sig.params, sig.ret, c.types.is_aggregate(sig.ret));
+    func.c_abi = c_abi;
     func
 }
 
@@ -682,7 +695,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let zeros: Vec<Inst> = self.all_flags.iter().map(|d| Inst::Const { d: *d, v: 0 }).collect();
         blocks[0].insts.splice(0..0, zeros);
         let params = (0..nparams as VReg).collect();
-        Func { name, nparams, params, vsig: 0, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
+        Func { name, nparams, params, vsig: 0, c_abi: false, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
     }
 
     /// A new liveness flag, set right away.
@@ -1725,11 +1738,13 @@ impl<'a, 'i> FnLower<'a, 'i> {
             }
             ExprKind::Interp(parts) => {
                 let pieces = self.pieces(parts);
+                self.buf_lock();
                 self.emit(Inst::CaptureStart);
                 self.emit_pieces(pieces);
                 self.set_site(e.span);
                 let (ptr, len) = (self.vreg(), self.vreg());
                 self.emit(Inst::CaptureTake { ptr, len });
+                self.buf_unlock();
                 let a = self.temp_obj(STR);
                 self.store_seq(a, ptr, len, len);
                 a
@@ -2010,7 +2025,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let ty = e.ty.get();
         let res = e.res.borrow().clone();
         // `__entry[T, R]()` is the address of a function, not a call of it.
-        if let (Res::Func(full), "__entry") = (&res, name) {
+        if let (Res::Func(full), "__entry" | "__entry_map" | "__entry_build") = (&res, name) {
             let d = self.vreg();
             self.emit(Inst::FuncAddr { d, f: self.ids[full] });
             return Some(d);
@@ -2377,9 +2392,23 @@ impl<'a, 'i> FnLower<'a, 'i> {
             ExprKind::Interp(parts) => self.pieces(parts),
             _ => vec![Piece::Val(self.expr_value(a), a.ty.get())],
         };
+        self.buf_lock();
         self.emit_pieces(pieces);
         self.emit(Inst::BufStr { text: "\n".to_string() });
         self.emit(Inst::Flush { fd: 1 });
+        self.buf_unlock();
+    }
+
+    fn buf_lock(&mut self) {
+        if THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+            self.emit(Inst::BufLock);
+        }
+    }
+
+    fn buf_unlock(&mut self) {
+        if THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+            self.emit(Inst::BufUnlock);
+        }
     }
 
     fn lit(&mut self, s: &str) {

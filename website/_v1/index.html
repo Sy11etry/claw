@@ -1,0 +1,726 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Claw — code written by AI, answered for by humans</title>
+<meta name="description" content="Claw is a low-level compiled language written entirely by Claude. Small enough to fit in a prompt. Strict enough to trust.">
+<meta name="theme-color" content="#060606">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=Geist+Mono:wght@400..600&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="mark" viewBox="0 0 32 32">
+    <g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round">
+      <path d="M8.5 25.5 Q10.5 16 14.5 6.5"/><path d="M14.5 27 Q16.5 17.5 21 7.5"/><path class="mark-hot" d="M20.5 25.5 Q22.5 17 26 9.5"/>
+    </g>
+  </symbol>
+</svg>
+
+<div class="grain" aria-hidden="true"></div>
+<div class="progress" aria-hidden="true"><i></i></div>
+
+<!-- ───────────────────────── nav ───────────────────────── -->
+<header class="nav" id="nav">
+  <a class="brand" href="#top" aria-label="Claw home">
+    <svg class="brand-mark"><use href="#mark"/></svg>
+    <span>claw</span>
+  </a>
+  <nav class="nav-links" aria-label="Sections">
+    <a href="#question">Idea</a>
+    <a href="#prompt">Language</a>
+    <a href="#tools">Compiler</a>
+    <a href="#numbers">Numbers</a>
+    <a href="#start">Start</a>
+  </nav>
+  <button class="kbd-btn" id="open-palette" aria-label="Open command menu">
+    <span class="kbd-k">⌘K</span>
+  </button>
+  <span class="ver">v0.10</span>
+</header>
+
+<main>
+
+<!-- ───────────────────────── hero ───────────────────────── -->
+<section class="hero" id="top">
+  <canvas class="hero-canvas" id="scratch" aria-hidden="true"></canvas>
+  <div class="hero-glow" aria-hidden="true"></div>
+
+  <div class="wrap hero-inner">
+    <a class="pill-tag reveal" href="#metal">
+      <span class="dot-live"></span>
+      <span>A systems language written entirely by Claude</span>
+      <span class="pill-sep"></span>
+      <span class="pill-dim">0.10</span>
+    </a>
+
+    <h1 class="hero-title">
+      <span class="line"><span class="w">Code</span> <span class="w">written</span> <span class="w">by</span> <span class="w">AI.</span></span>
+      <span class="line"><em class="w">Answered for</em> <span class="w">by</span> <span class="w">humans.</span></span>
+    </h1>
+
+    <p class="hero-lead reveal">
+      Small enough to fit in a prompt. Strict enough to trust. C-level control, a compiler that
+      writes your tests and explains your crashes, and a signed native binary with
+      <span class="hi">no LLVM, no assembler, no linker</span> in between.
+    </p>
+
+    <div class="hero-cta reveal">
+      <a class="btn btn-solid" href="#start">Get started <span class="arr">→</span></a>
+      <a class="btn btn-ghost" href="#prompt">Read the whole language</a>
+      <button class="cmd-pill" data-copy="claw run examples/tour.claw" aria-label="Copy command">
+        <span class="cmd-dollar">$</span> claw run examples/tour.claw
+        <span class="cmd-copy" aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+
+  <!-- the demo -->
+  <div class="wrap">
+    <div class="stage reveal" id="hero-stage">
+      <div class="stage-ring" aria-hidden="true"></div>
+      <div class="stage-bar">
+        <div class="stage-file"><svg class="ico"><use href="#mark"/></svg>avg.claw</div>
+        <div class="stage-steps" role="tablist" aria-label="Demo steps">
+          <button class="step" data-step="0" role="tab">run</button>
+          <button class="step" data-step="1" role="tab">why</button>
+          <button class="step" data-step="2" role="tab">build</button>
+          <span class="step-ind" aria-hidden="true"></span>
+        </div>
+        <button class="stage-replay" id="hero-replay" aria-label="Replay demo">↺</button>
+      </div>
+      <div class="stage-body">
+        <div class="code" id="hero-code"></div>
+        <div class="term" id="hero-term" aria-live="polite"></div>
+      </div>
+      <div class="stage-caption" id="hero-caption">&nbsp;</div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <dl class="ticker reveal">
+      <div><dt>&lt; <b data-count="2000">2,000</b></dt><dd>tokens: the whole language</dd></div>
+      <div><dt><b data-count="28">28</b></dt><dd>keywords, all plain English</dd></div>
+      <div><dt><b data-count="0">0</b></dt><dd>external dependencies</dd></div>
+      <div><dt>~<b data-count="320">320</b>k</dt><dd>lines per second, to a signed binary</dd></div>
+      <div><dt>~<b data-count="2500">2,500</b></dt><dd>automatic tests</dd></div>
+    </dl>
+  </div>
+</section>
+
+<!-- ───────────────────────── manifesto ───────────────────────── -->
+<section class="manifesto" id="question">
+  <div class="wrap">
+    <p class="eyebrow"><span>The question</span></p>
+    <p class="mani-text" id="mani">
+      Almost every new language asks how to make C a little better. Claw asks something else:
+      what should a systems language look like when a model writes the code
+      <em>and a human has to answer for it?</em>
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────── 01 prompt ───────────────────────── -->
+<section class="sec" id="prompt">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>01</i><span>Fits in a prompt</span></p>
+      <h2>The whole language,<br><em>on one page.</em></h2>
+      <p class="lead"><code>claw card</code> prints the complete reference in under 2,000 tokens, and every feature has to pay
+        for its place on it. A model that has never seen Claw writes it from that page alone.</p>
+    </header>
+
+    <div class="split">
+      <div class="cardview glass reveal" id="cardview">
+        <div class="cv-top">
+          <span class="mono-s">$ claw card</span>
+          <span class="mono-s dim">docs/CARD.md</span>
+        </div>
+        <div class="cv-scroll"><pre id="card-pre"></pre></div>
+        <div class="cv-meter">
+          <div class="cv-meter-row"><span>The language</span><span class="mono-s">&lt; 2,000 tokens</span></div>
+          <div class="meter"><i style="--v:.92"></i></div>
+          <div class="cv-meter-row dim"><span>A typical model context</span><span class="mono-s">200,000 tokens</span></div>
+          <div class="meter meter-big"><i style="--v:.01"></i><span class="meter-note">Claw is the sliver on the left.</span></div>
+        </div>
+      </div>
+
+      <div class="exam reveal">
+        <p class="exam-k">The exam</p>
+        <p class="exam-q">Claude Haiku wrote programs from the card alone. One attempt per program.</p>
+        <div class="exam-round">
+          <div class="exam-num"><b>19</b><span>/24</span></div>
+          <div>
+            <div class="dots" data-of="24" data-ok="19"></div>
+            <p class="mono-s dim">Round one</p>
+          </div>
+        </div>
+        <div class="exam-round">
+          <div class="exam-num"><b>11</b><span>/12</span></div>
+          <div>
+            <div class="dots" data-of="12" data-ok="11"></div>
+            <p class="mono-s dim">New tasks, after fixing the card</p>
+          </div>
+        </div>
+        <p class="footnote">A small sample, and the tasks were written by the language’s author. We say so up front.</p>
+      </div>
+    </div>
+
+    <div class="kw reveal">
+      <div class="kw-head">
+        <h3>28 keywords. <em>No semicolons.</em> One format.</h3>
+        <p class="kw-hint mono-s" id="kw-hint"><span>hover a word</span></p>
+      </div>
+      <p class="kw-wall" id="kw-wall"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── 02 paw & claw ───────────────────────── -->
+<section class="sec gears" id="gears" data-gear="paw">
+  <div class="gears-glow" aria-hidden="true"></div>
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>02</i><span>Paw &amp; Claw</span></p>
+      <h2>Two gears.<br><em>One language.</em></h2>
+    </header>
+
+    <div class="gear-switch reveal" role="tablist" aria-label="Mode">
+      <button class="gs-btn on" data-gear="paw" role="tab" aria-selected="true"><span class="mono-s">fn</span> Paw</button>
+      <button class="gs-btn" data-gear="claw" role="tab" aria-selected="false"><span class="mono-s">claw fn</span> Claw</button>
+      <span class="gs-thumb" aria-hidden="true"></span>
+    </div>
+
+    <div class="split split-gear">
+      <div class="gear-copy reveal">
+        <div class="gc" data-for="paw">
+          <h3>Safe by construction.</h3>
+          <p><code>fn</code> has no pointers and no <code>free</code>. Values move, <code>&amp;</code> lends them, <code>copy</code> is
+            always explicit, and everything is released at the end of its scope. No garbage collector, no runtime.</p>
+          <ul class="ticks">
+            <li>No dangling references to be had</li>
+            <li>No leaks</li>
+            <li>No data races</li>
+          </ul>
+        </div>
+        <div class="gc" data-for="claw">
+          <h3>Plain C, on purpose.</h3>
+          <p><code>claw fn</code> is C: raw pointers, <code>alloc</code> / <code>free</code>, <code>defer</code>, <code>cast</code>, and any C
+            function through <code>extern</code>. Arithmetic and bounds stay checked; pointers don’t.</p>
+          <p>And <code>claw audit</code> lists every place the compiler takes your word for it.</p>
+        </div>
+        <p class="legend"><span class="sw"></span><span>On this page, orange means what it means to the compiler: <em>trust.</em></span></p>
+      </div>
+
+      <div class="gear-panel glass reveal">
+        <div class="code" id="gear-code"></div>
+        <div class="term term-inline" id="gear-term"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── 03 tools / playground ───────────────────────── -->
+<section class="sec" id="tools">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>03</i><span>The compiler</span></p>
+      <h2>It writes the tests.<br><em>It explains the crash.</em></h2>
+      <p class="lead">Every tool lives in the compiler itself. Type a command below, or pick one. The output is real,
+        recorded from <code>claw 0.10</code> on these exact files.</p>
+    </header>
+
+    <div class="play glass reveal" id="play">
+      <div class="play-files" role="tablist" aria-label="Files" id="play-files"></div>
+      <div class="play-body">
+        <div class="code code-play" id="play-code"></div>
+        <div class="play-term">
+          <div class="term term-live" id="play-term" aria-live="polite"></div>
+          <form class="play-input" id="play-form" autocomplete="off">
+            <span class="pr">~/claw</span><span class="pc">❯</span>
+            <input id="play-in" spellcheck="false" aria-label="Type a claw command" placeholder="claw test pick.claw">
+            <kbd>↵</kbd>
+          </form>
+        </div>
+      </div>
+      <div class="play-chips" id="play-chips"></div>
+    </div>
+
+    <div class="trio">
+      <article class="reveal">
+        <p class="mono-s">claw test</p>
+        <h3>Tests nobody wrote.</h3>
+        <p>Every function without <code>+io</code> gets hit with boundary values, random inputs and inputs chosen for code
+          coverage. A failure shrinks to the smallest example that still breaks.</p>
+        <p class="shrink-k">How shrinking works, in a picture:</p>
+        <div class="shrink" aria-hidden="true">
+          <span>pick([-38, 12, 99], 7)</span><span>pick([12], 3)</span><span>pick([], 1)</span><span class="hot">pick([], 0)</span>
+        </div>
+      </article>
+      <article class="reveal">
+        <p class="mono-s">claw why</p>
+        <h3>The cause, not the address.</h3>
+        <p>Only the lines that led to the failure, with the values they held. No hex, no stack of frames to walk by hand.</p>
+      </article>
+      <article class="reveal">
+        <p class="mono-s">claw fix</p>
+        <h3>Patches, not essays.</h3>
+        <p>Errors run 30–45 tokens and carry a ready patch with a stable code. <code>claw fix</code> applies the safe ones.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── 04 truth ───────────────────────── -->
+<section class="sec" id="truth">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>04</i><span>Signatures &amp; contracts</span></p>
+      <h2>The signature<br><em>tells the truth.</em></h2>
+      <p class="lead"><code>+mem</code> allocates. <code>+io</code> touches the world. No plus is a guarantee, so a reader, human or
+        model, never has to open the body.</p>
+    </header>
+
+    <div class="sigs reveal" id="sigs">
+      <div class="sig" data-say="Pure. No allocation, no I/O. claw test may call it with anything.">
+        <code><span class="k">fn</span> <span class="f">total</span>(xs []<span class="t">int</span>) <span class="t">int</span></code>
+        <span class="sig-badge">guaranteed pure</span>
+      </div>
+      <div class="sig" data-say="Allocates: it builds and returns a growable array. Still no I/O.">
+        <code><span class="k">fn</span> <span class="f">pets</span>() []<span class="t">str</span> <span class="e">+mem</span></code>
+        <span class="sig-badge">allocates</span>
+      </div>
+      <div class="sig" data-say="Allocates and prints. The effects were worked out by the compiler, not written by hand.">
+        <code><span class="k">fn</span> <span class="f">main</span>() <span class="e">+mem</span> <span class="e">+io</span></code>
+        <span class="sig-badge">allocates · touches the world</span>
+      </div>
+      <p class="sig-say mono-s" id="sig-say">$ claw sig pets.claw</p>
+    </div>
+
+    <div class="contract split">
+      <div class="reveal">
+        <h3 class="h3-big">Contracts are four things <em>at once.</em></h3>
+        <p class="body"><code>need</code> and <code>sure</code> are documentation, a run-time check, a test oracle and an
+          optimizer hint. What the compiler can prove, it removes and the code gets faster. The rest it checks, out loud.
+          Never silently.</p>
+        <div class="quad">
+          <span>docs</span><span>check</span><span>test</span><span>hint</span>
+        </div>
+      </div>
+      <div class="glass panel-pad reveal">
+        <div class="code" id="contract-code"></div>
+        <div class="term term-inline" id="contract-term"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── 05 tokens ───────────────────────── -->
+<section class="sec" id="tokens">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>05</i><span>Tokens</span></p>
+      <h2>Counted for the whole loop:<br><em>write, read, fix.</em></h2>
+    </header>
+
+    <div class="split split-tokens">
+      <div class="bars reveal" id="err-bars">
+        <p class="mono-s dim">Error messages for the same mistakes, in tokens</p>
+        <div class="bar-row"><span class="bar-l">claw</span><div class="bar"><i style="--v:.2144"></i></div><b data-count="288">288</b></div>
+        <div class="bar-row"><span class="bar-l">clang</span><div class="bar"><i style="--v:.4847"></i></div><b data-count="651">651</b></div>
+        <div class="bar-row"><span class="bar-l">rustc</span><div class="bar"><i style="--v:1"></i></div><b data-count="1343">1343</b></div>
+        <div class="errs">
+          <p><span class="loc">move.claw:4:15</span> <span class="ecode">E0151</span> `a` was moved away at line 3; fix: write `copy(a)` there</p>
+          <p><span class="loc">imm.claw:3:21</span> <span class="ecode">E0103</span> `count` cannot change; fix: declare `mut count`</p>
+          <p><span class="loc">miss.claw:4:5</span> <span class="ecode">E0120</span> `match` misses: Dot</p>
+        </div>
+      </div>
+
+      <div class="shorter reveal">
+        <div class="big-stat">
+          <b><span data-count="37.9" data-dec="1">37.9</span>%</b>
+          <span>shorter than C</span>
+        </div>
+        <div class="big-stat">
+          <b><span data-count="17.8" data-dec="1">17.8</span>%</b>
+          <span>shorter than Rust</span>
+        </div>
+        <p class="body">Short plain-English keywords, no <code>;</code>, one code format from <code>claw fmt</code>, and errors that
+          end in a patch.</p>
+        <p class="footnote">Estimated with two counting rules, not a real tokenizer. 21 small tasks with identical output in all
+          three languages; error totals across 8 typical mistakes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── 06 metal ───────────────────────── -->
+<section class="sec" id="metal">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>06</i><span>Down to the metal</span></p>
+      <h2>Source to binary.<br><em>Only our code.</em></h2>
+      <p class="lead">Its own ARM64 and x86-64 encoders, its own Mach-O and ELF writers, its own code signature. Even the
+        SHA-256 is written here.</p>
+    </header>
+
+    <div class="pipe reveal" id="pipe">
+      <div class="pipe-track" aria-hidden="true"><i class="pulse"></i></div>
+      <ol class="pipe-list" id="pipe-list"></ol>
+      <p class="pipe-say" id="pipe-say">&nbsp;</p>
+    </div>
+
+    <div class="nolist reveal">
+      <span><s>LLVM</s></span><span><s>as</s></span><span><s>ld</s></span><span><s>crates</s></span>
+    </div>
+
+    <div class="selfhost split">
+      <div class="reveal">
+        <h3 class="h3-big">It builds itself. <em>To a fixed point.</em></h3>
+        <p class="body">The compiler exists twice: about 25,000 lines of Rust with not one external dependency, and about 15,000
+          lines of Claw. The Claw one compiles its own source, and the result compiles it again, until the bytes stop
+          changing.</p>
+      </div>
+      <div class="loop reveal" aria-hidden="true">
+        <svg viewBox="0 0 320 320" class="loop-svg">
+          <circle cx="160" cy="160" r="118" class="loop-c"/>
+          <circle cx="160" cy="160" r="118" class="loop-run"/>
+        </svg>
+        <div class="loop-mid">
+          <b>c₂ ≡ c₃</b>
+          <span class="mono-s dim">byte for byte</span>
+        </div>
+        <span class="loop-n n1">rust → c₁</span>
+        <span class="loop-n n2">c₁ → c₂</span>
+        <span class="loop-n n3">c₂ → c₃</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── numbers ───────────────────────── -->
+<section class="sec" id="numbers">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>07</i><span>Measured</span></p>
+      <h2>Close to C.<br><em>With the checks on.</em></h2>
+      <p class="lead">Median of five runs against <code>clang -O2</code> on one Apple Silicon Mac. Claw keeps every check it could
+        not prove unnecessary. On some tasks it ties; on one it is almost three times behind. You get both.</p>
+    </header>
+
+    <div class="bench glass reveal" id="bench">
+      <div class="bench-head">
+        <span class="mono-s dim">benchmark</span>
+        <span class="bench-legend"><i class="lg-c"></i>clang -O2 <i class="lg-w"></i>claw build</span>
+        <span class="mono-s dim">claw / clang</span>
+      </div>
+      <div id="bench-rows"></div>
+      <div class="bench-axis mono-s dim"><span></span><div><span>0 s</span><span>0.1 s</span><span>0.2 s</span><span>0.3 s</span><span>0.4 s</span></div><span></span></div>
+    </div>
+
+    <div class="compile reveal">
+      <div>
+        <h3 class="h3-big">320,000 lines a second. <em>Signed.</em></h3>
+        <p class="body">44,000 lines to a signed executable in 137 ms. Press the button; the bar runs at the measured speed.</p>
+      </div>
+      <div class="compile-demo">
+        <button class="btn btn-solid" id="compile-btn">Compile 44,000 lines</button>
+        <div class="cbar"><i id="cbar"></i></div>
+        <p class="mono-s" id="compile-out"><span class="dim">ready</span></p>
+      </div>
+    </div>
+
+    <dl class="sizes reveal">
+      <div><dt>~25,000</dt><dd>lines of Rust in the compiler</dd></div>
+      <div><dt>0</dt><dd>crates it depends on</dd></div>
+      <div><dt>~15,000</dt><dd>lines of the same compiler in Claw</dd></div>
+      <div><dt>&lt; 900</dt><dd>lines of standard library</dd></div>
+    </dl>
+  </div>
+</section>
+
+<!-- ───────────────────────── spec ───────────────────────── -->
+<section class="sec" id="spec">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><i>08</i><span>Everything in 0.10</span></p>
+      <h2>The spec sheet.</h2>
+    </header>
+    <dl class="spec" id="spec-list"></dl>
+  </div>
+</section>
+
+<!-- ───────────────────────── limits ───────────────────────── -->
+<section class="sec limits" id="limits">
+  <div class="wrap">
+    <p class="eyebrow reveal"><span>Honest edges</span></p>
+    <p class="limits-text reveal">
+      Claw is young: version 0.10. The main platform is macOS on Apple Silicon. The x86-64 target is tested under Rosetta,
+      not on real Intel hardware; Linux is tested in a VM with musl. Loops are not vectorized for you; SIMD is written by
+      hand. There is no package manager. The self-hosted compiler covers the core language, but not threads, SIMD, Linux,
+      or <code>test</code>, <code>why</code> and <code>fix</code>. <em>A license has not been chosen yet.</em>
+    </p>
+  </div>
+</section>
+
+<!-- ───────────────────────── start ───────────────────────── -->
+<section class="sec start" id="start">
+  <div class="wrap">
+    <header class="sec-head reveal">
+      <p class="eyebrow"><span>Start</span></p>
+      <h2>Three commands.<br><em>Then it’s yours.</em></h2>
+      <p class="lead">You need macOS on Apple Silicon and Rust.</p>
+    </header>
+
+    <ol class="steps reveal">
+      <li><span class="n">1</span><button class="cmd-line" data-copy="cargo build --release --manifest-path compiler/Cargo.toml"><span class="cmd-dollar">$</span> cargo build --release --manifest-path compiler/Cargo.toml<span class="cmd-copy"></span></button></li>
+      <li><span class="n">2</span><button class="cmd-line" data-copy="python3 tools/install.py"><span class="cmd-dollar">$</span> python3 tools/install.py<span class="cmd-copy"></span></button></li>
+      <li><span class="n">3</span><button class="cmd-line" data-copy="claw run examples/tour.claw"><span class="cmd-dollar">$</span> claw run examples/tour.claw<span class="cmd-copy"></span></button></li>
+    </ol>
+
+    <div class="examples reveal">
+      <p class="mono-s dim">Seven short programs in <code>examples/</code></p>
+      <div class="ex-list">
+        <span>tour</span><span>contracts</span><span>ownership</span><span class="hot">paw_and_claw</span><span>simd_dot</span><span>threads</span><span>generics</span>
+      </div>
+    </div>
+
+    <div class="docs reveal">
+      <a href="#prompt"><span class="mono-s">docs/CARD.md</span><b>The language</b><span class="arr">→</span></a>
+      <a href="#spec"><span class="mono-s">docs/SPEC.md</span><b>The specification</b><span class="arr">→</span></a>
+      <a href="#limits"><span class="mono-s">docs/STATUS.md</span><b>What works today</b><span class="arr">→</span></a>
+      <a href="#about"><span class="mono-s">docs/DECISIONS.md</span><b>Why it is this way</b><span class="arr">→</span></a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<!-- ───────────────────────── footer ───────────────────────── -->
+<footer class="foot" id="about">
+  <div class="wrap">
+    <div class="foot-grid">
+      <p class="foot-about">Written entirely by Claude (Anthropic) at a human’s direction. The human set the goals and made the
+        calls; every decision and its reason is written down in <code>docs/DECISIONS.md</code>.</p>
+      <p class="foot-kw mono-s" id="foot-kw"></p>
+    </div>
+    <div class="foot-word reveal" aria-hidden="true">
+      <div class="fw">
+        <span>claw</span>
+        <svg class="foot-scratch" viewBox="0 0 300 100" preserveAspectRatio="none">
+          <path pathLength="1" d="M197 97 Q208 52 228 6"/>
+        </svg>
+      </div>
+    </div>
+    <div class="foot-bottom mono-s dim">
+      <span>Claw 0.10</span><span>macOS arm64 · macOS x86-64 · ARM64 Linux</span><span>No runtime. No GC.</span>
+    </div>
+  </div>
+</footer>
+
+<!-- ───────────────────────── command palette ───────────────────────── -->
+<div class="palette" id="palette" hidden>
+  <div class="palette-box" role="dialog" aria-modal="true" aria-label="Command menu">
+    <div class="palette-in">
+      <svg class="ico"><use href="#mark"/></svg>
+      <input id="palette-in" placeholder="Jump to… or run a command" spellcheck="false" autocomplete="off">
+      <kbd>esc</kbd>
+    </div>
+    <ul class="palette-list" id="palette-list" role="listbox"></ul>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+
+<!-- The real `claw card` output (docs/CARD.md), shown in section 01 -->
+<script type="text/plain" id="card-src"># Claw 0.10 card
+
+One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
+
+```claw
+type Point { x int, y int }
+type Shape = Circle{r f64} | Dot
+type ParseErr = Empty | Bad{at int}
+
+const limit = 100
+const big int = twice(limit)             // runs while compiling
+
+fn add(a Point, b Point) Point {
+    ret Point{a.x + b.x, a.y + b.y}      // struct fields are positional
+}
+
+fn area(s Shape) f64 {
+    match s {                            // must cover every case, or `_:`
+        Circle{r}: ret 3.14 * r * r
+        Dot: ret 0
+    }
+}
+
+fn digit(c u8) int ! ParseErr {
+    if c < '0' or c > '9' { fail Bad{0} }
+    ret int(c - '0')
+}
+
+fn find(a []int, x int) ?int {
+    for v, i in a {
+        if v == x { ret i }
+    }
+    ret none
+}
+
+fn main() {
+    x := 5                               // immutable
+    y i32 = 7
+    mut s := 0
+    for i in 0..10 { s += i }
+    for s > 40 { s -= 1 }                // while
+    for { break }
+    if s == 40 {
+        print("s = {s}, sum = {s + x}")
+    } else {
+        print(y)
+    }
+    mut a [4]int = [0...]                // all 0
+    a[1] = len(a)
+    b := [1, 2, 3]
+    d := digit('7')?                     // pass the failure up
+    e := digit('x') else 0               // or a default
+    f := find(b, 2) else {               // or a block that exits
+        ret
+    }
+    g := digit('x') else err {
+        print("{err}")
+        ret
+    }
+    print(a[1] + d + e + f + g)
+}
+```
+
+Types: `int` (= `i64`), `i8 i16 i32 u8 u16 u32 u64 f32 f64 bool str`, `[N]T`, `[]T`, `?T`, `T ! E`, `! E`. No implicit conversions:
+write `i32(x)`, `f64(n)`, `int(c)`. A number literal takes the type around it. `'a'` is a `u8`.
+
+Operators as in C, but `and or not`; no `++` or `?:`.
+Struct and array values copy on assignment. `==` works on numbers and bool; use `match` for variants.
+Names: types and variants start with a capital, everything else with a small letter.
+
+`print` takes one value of any type, or a string with `{expr}` (`{{` is a literal brace), and adds a newline.
+
+Errors, not warnings: unused variable or parameter (name it `_`), unused call result (`_ = f()`), reusing a name in
+any enclosing scope, `mut` that never changes, unreachable code, a function that can end without `ret`, ignoring a `T ! E`.
+
+Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index out of range,
+a conversion that does not fit a signed type. Unsigned types wrap.
+
+## Memory is automatic
+
+```claw
+fn names() []str {
+    mut a []str = []                     // growable
+    push(&a, "cat")
+    ret a
+}
+
+fn total(a []int) int { ... }            // read-only view; takes a `[N]int` too
+fn clear_it(a &[]int) { a = [] }         // `&`: may change it; call clear_it(&x)
+fn keep(own s str) Box { ... }           // `own`: takes it over; call keep(s)
+
+fn demo() {
+    a := names()
+    b := a                               // `a` moved
+    c := copy(b)
+    s := "n = {len(c)}"
+    v := b[1..]                          // also `[..2]`
+    print("{s} {v}")
+}                                        // the rest is freed here
+```
+
+Only a whole local variable can move. `x := a[i]` (or a field, or a slice) is a read-only view: `a` cannot change while
+`x` lives. To own one: `mut x := copy(a[i])`, `remove(&a, i)`, `swap(&a, &b)`.
+A collection cannot change while `for` walks it. One call cannot pass the same thing with `&` and without.
+`s[i]` is a `u8`; a `str` cannot change in place. A type may define `drop(x &T)`.
+
+Always available: `push pop insert remove clear reserve swap sort has index_of`,
+`find contains starts_with ends_with trim split lines join upper lower to_int`. Also `use fs`, `use math`.
+`claw sig std` lists their signatures.
+Threads (`use par`): `t := par.spawn(work, x)`, later `par.join(t)`. `work` is a `fn(own T) R +mem`; tasks share nothing.
+
+Map: `mut m := new_map[str, int](hash_str)` (or `hash_int`), `put(&m, k, v)`, `get(m, k) else 0`, `has_key(m, k)`,
+`del(&m, k)`, `for e in m.items { e.key, e.val }`, `len(m.items)`.
+
+## Templates and modules
+
+```claw
+use lib.geo                              // lib/geo.claw, known as `geo`
+
+type Pair[A, B] { a A, b B }
+type Tree[T] = Leaf | Node{v T, kids []Tree[T]}
+
+pub fn max[T](a T, b T) T {
+    if a > b { ret a }
+    ret b
+}
+
+fn demo() {
+    print(max(1, 2))
+    p := Pair[int, f64]{1, 2.5}
+    t Tree[int] = Node{1, []}            // type from the context, or `Node[int]{...}`
+    f fn(int) int = twice                // a named function as a value
+    print(geo.make(3))
+}
+```
+
+No methods. `+mem +io` may follow a function type. A template, an `extern` or a function with `need` cannot be a value.
+
+## Claw mode: `claw fn` is C
+
+```claw
+extern fn strlen(s *u8) u64              // any libSystem function
+
+claw fn sum() int {
+    p := alloc[int](3)
+    defer free(p)                        // when this block ends
+    p[0] = 1
+    q := p + 1
+    *q = 2
+    mut x := 5
+    r := &x                              // `&` needs a `mut`
+    *r += 1
+    print(strlen("hi"))
+    ret p[0] + p[1] + x
+}
+```
+
+`none` is null. Pointers, `alloc`, `free`, `cast[T](x)`, `defer`, `extern` calls: only in `claw fn`. `p.x` reads through a pointer.
+`sizeof[T]()` is in bytes. `cast` converts between pointers, `int` and `u64`. A string passed as `*u8` is NUL-terminated.
+Arithmetic and array bounds stay checked; raw pointers do not.
+
+## Contracts, effects, tests
+
+```claw
+pub fn div(a int, b int) int +io
+    need b != 0                          // checked at every call
+    sure ret * b <= a                    // checked at every return; `old(x)` is x on entry
+{
+    ret a / b
+}
+
+test "div" {
+    sure div(6, 2) == 3
+}
+```
+
+`+mem` allocates, `+io` touches the world. `pub` must declare them; private functions have them worked out.
+A contract only looks: no `&`, moves or effects.
+
+`claw run` and `claw test` check everything, also heap misuse and leaks. `claw build` leaves out contracts that call
+functions; `--fast` removes every check.
+`claw test` also fuzzes functions without `+io`. `claw why f.claw` explains a failure. `claw fix f.claw` applies patches.
+`claw sig f.claw`: signatures. `claw ctx f.claw name`: one function's context. `claw audit f.claw`: trusted code.</script>
+<script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+// expect: true
+// expect: 0
+// expect: true
+// expect: ok:1
+use c "sqlite3.h"
+link "sqlite3"
+
+claw fn main() {
+    mut db *u8 = none
+    rc := sqlite3_open(":memory:", &db)
+    print(rc == sqlite_ok)
+    print(sqlite_ok)
+    _ = sqlite3_close(db)
+    print(sqlite3_libversion_number() > 3000000)
+    print("ok:{sqlite_row - 99}")
+}

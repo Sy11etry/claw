@@ -1,0 +1,12 @@
+// error: E0180
+use c "stdlib.h"
+
+claw fn bad(a str, b *u8) i32 {
+    if b == none { ret 1 }
+    ret i32(len(a))
+}
+
+claw fn main() {
+    p := cast[*u8](bad)
+    print(p == none)
+}

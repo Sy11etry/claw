@@ -34,6 +34,8 @@ const ALLOC_COUNT: u64 = BUF_CAP + 16;
 const FREE_COUNT: u64 = BUF_CAP + 24;
 /// Words shared with the contract guard and the memory checker.
 const STATE: u64 = BUF_CAP + 32;
+/// One word after the runtime's state: held while one thread builds output text.
+const BUF_LOCK: u64 = STATE + STATE_SIZE;
 const STATE_SIZE: u64 = 128;
 const SITE_WORD: u64 = 8;
 
@@ -1530,6 +1532,23 @@ impl Gen {
                 self.load(fr, X1, *n);
                 self.call(BL, Target::BufStr);
             }
+            Inst::BufLock => {
+                self.bss_addr(X9);
+                self.mov_imm(X16, BUF_LOCK as i64);
+                self.e(add(X9, X9, X16));
+                // spin: wait until the word reads 0, then try to set it to 1
+                self.e(ldaxr_w(X10, X9));
+                self.e(cbnz(X10, -1));
+                self.e(movz(X10, 1, 0));
+                self.e(stxr_w(X16, X10, X9));
+                self.e(cbnz(X16, -4));
+            }
+            Inst::BufUnlock => {
+                self.bss_addr(X9);
+                self.mov_imm(X16, BUF_LOCK as i64);
+                self.e(add(X9, X9, X16));
+                self.e(stlr_w(XZR, X9));
+            }
             Inst::CaptureStart => {
                 self.bss_addr(X9);
                 self.mov_imm(X16, CAPTURE_FLAG as i64);
@@ -2027,6 +2046,12 @@ fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result
     symbols.push(("___claw_entry".to_string(), entry));
     g.e(stp_pre(FP, LR, SP, -16));
     g.e(mov_sp(FP, SP));
+    // `os.args()` reads argc and argv from the last two words of the runtime state.
+    g.bss_addr(X9);
+    g.mov_imm(X16, (STATE + 112) as i64);
+    g.e(add(X9, X9, X16));
+    g.e(str(X0, X9, 0));
+    g.e(str(X1, X9, 8));
     g.call(BL, Target::User(m.main));
     if let Some(c) = m.check {
         g.call(BL, Target::User(c.finish));
@@ -2083,6 +2108,6 @@ fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result
         symbols,
         lines: g.lines,
         entry,
-        bss_size: STATE + STATE_SIZE,
+        bss_size: STATE + STATE_SIZE + 8,
     })
 }

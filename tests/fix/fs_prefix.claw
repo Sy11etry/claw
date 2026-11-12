@@ -1,0 +1,5 @@
+use fs
+fn main() {
+    s := read("x.txt") else { ret }
+    print(s)
+}

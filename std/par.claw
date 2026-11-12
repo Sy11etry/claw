@@ -1,9 +1,14 @@
 // Threads without data races: a task owns its input and hands back its result.
 // Nothing is shared, so there is nothing to race on. `claw run` and `claw test`
 // run tasks one after another, so a failure replays the same way every time.
+//
+// `map` and `build` split one job over all cores. The input is only read while they run
+// (a view cannot change under its readers) and every worker fills its own slice of the
+// result, so there is still nothing to race on, and the answer does not depend on the core count.
 
 extern "pthread_create" fn c_create(t *u64, attr *u8, f *u8, arg *u8) i32
 extern "pthread_join" fn c_join(t u64, out *u8) i32
+extern "sysconf" fn c_sysconf(name i32) i64
 
 // Where a task leaves its result. `state` is 0 while a thread may still run, 1 after.
 type Cell[R] { state int, taken bool, out R }
@@ -59,4 +64,139 @@ claw fn drop[R](t &Task[R]) +mem {
     finish(t)
     if not t.cell.taken { discard(t.cell.out) }
     free(t.cell)
+}
+
+// ---- one job on all cores ----
+
+/// How many cores this machine has.
+pub claw fn cores() int {
+    mut name i32 = 58 // _SC_NPROCESSORS_ONLN on macOS
+    if __linux() { name = 84 }
+    n := c_sysconf(name)
+    if n < 1 { ret 1 }
+    ret n
+}
+
+// One worker's share: items lo..hi. `xs` is none for `build`, which feeds the index instead.
+type Part[T, R] { f fn(T) R +mem, xs *T, out *R, lo int, hi int }
+
+claw fn map_main[T, R](p *u8) *u8 +mem {
+    j := cast[*Part[T, R]](p)
+    f := j.f
+    mut i := j.lo
+    for i < j.hi {
+        j.out[i] = f(j.xs[i])
+        i += 1
+    }
+    ret none
+}
+
+type Gen[R] { f fn(int) R +mem, out *R, lo int, hi int }
+
+claw fn build_main[R](p *u8) *u8 +mem {
+    j := cast[*Gen[R]](p)
+    f := j.f
+    mut i := j.lo
+    for i < j.hi {
+        j.out[i] = f(i)
+        i += 1
+    }
+    ret none
+}
+
+/// How many workers for n items.
+claw fn workers_for(n int) int {
+    mut w := cores()
+    if w > 64 { w = 64 }
+    if w > n { w = n }
+    if __sequential() { w = 1 }
+    if w < 1 { w = 1 }
+    ret w
+}
+
+/// `map(xs, f)`: `[f(xs[0]), f(xs[1]), ...]`, computed on all cores. `f` may allocate but not touch the world.
+pub claw fn map[T, R](xs []T, f fn(T) R +mem) []R +mem {
+    n := len(xs)
+    mut out []R = []
+    if n == 0 { ret out }
+    reserve(&out, n)
+    w := workers_for(n)
+    parts := alloc[Part[T, R]](w)
+    tids := alloc[u64](w)
+    chunk := (n + w - 1) / w
+    mut k := 0
+    for k < w {
+        lo := k * chunk
+        mut hi := lo + chunk
+        if hi > n { hi = n }
+        parts[k].f = f
+        parts[k].xs = xs.ptr
+        parts[k].out = out.ptr
+        parts[k].lo = lo
+        parts[k].hi = hi
+        tids[k] = 0
+        k += 1
+    }
+    // The last share runs here; the others on new threads.
+    k = 0
+    for k < w - 1 {
+        if c_create(&tids[k], none, __entry_map[T, R](), cast[*u8](&parts[k])) != 0 {
+            _ = map_main[T, R](cast[*u8](&parts[k]))
+            tids[k] = 0
+        }
+        k += 1
+    }
+    _ = map_main[T, R](cast[*u8](&parts[w - 1]))
+    k = 0
+    for k < w - 1 {
+        if tids[k] != 0 { _ = c_join(tids[k], none) }
+        k += 1
+    }
+    out.len = n
+    free(parts)
+    free(tids)
+    ret out
+}
+
+/// `build(n, f)`: `[f(0), f(1), ..., f(n - 1)]`, computed on all cores.
+pub claw fn build[R](n int, f fn(int) R +mem) []R +mem
+    need n >= 0
+{
+    mut out []R = []
+    if n == 0 { ret out }
+    reserve(&out, n)
+    w := workers_for(n)
+    parts := alloc[Gen[R]](w)
+    tids := alloc[u64](w)
+    chunk := (n + w - 1) / w
+    mut k := 0
+    for k < w {
+        lo := k * chunk
+        mut hi := lo + chunk
+        if hi > n { hi = n }
+        parts[k].f = f
+        parts[k].out = out.ptr
+        parts[k].lo = lo
+        parts[k].hi = hi
+        tids[k] = 0
+        k += 1
+    }
+    k = 0
+    for k < w - 1 {
+        if c_create(&tids[k], none, __entry_build[R](), cast[*u8](&parts[k])) != 0 {
+            _ = build_main[R](cast[*u8](&parts[k]))
+            tids[k] = 0
+        }
+        k += 1
+    }
+    _ = build_main[R](cast[*u8](&parts[w - 1]))
+    k = 0
+    for k < w - 1 {
+        if tids[k] != 0 { _ = c_join(tids[k], none) }
+        k += 1
+    }
+    out.len = n
+    free(parts)
+    free(tids)
+    ret out
 }

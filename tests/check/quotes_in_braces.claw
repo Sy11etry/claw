@@ -1,0 +1,8 @@
+// expect: the = 3, none = 0
+// expect: {literal} 5 "q"
+fn main() {
+    mut m := new_map[str, int](hash_str)
+    put(&m, "the", 3)
+    print("the = {get(m, "the") else 0}, none = {get(m, "none") else 0}")
+    print("{{literal}} {len("hello")} \"q\"")
+}

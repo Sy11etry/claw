@@ -1,0 +1,24 @@
+type Pair[A, B] { a A, b B }
+
+pub fn max[T](a T, b T) T {
+    if a > b { ret a }
+    ret b
+}
+
+type Item { name str, cost int }
+
+fn cheapest(items []Item) Item {
+    mut best := copy(items[0])
+    for it in items {
+        if it.cost < best.cost { best = copy(it) }
+    }
+    ret best
+}
+
+fn main() {
+    p := Pair[int, f64]{1, 2.5}
+    print(max(3, 7))
+    items := [Item{"apple", 5}, Item{"pear", 2}]
+    print(cheapest(items).name)
+    print(p.b)
+}

@@ -1,0 +1,9 @@
+use shout
+
+pub fn hello(name str) str +mem {
+    ret shout.loud("hello, {name}")
+}
+
+pub fn twice(x int) int {
+    ret x * 2
+}

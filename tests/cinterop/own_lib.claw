@@ -1,0 +1,33 @@
+// expect: 6
+// expect: 7.5
+// expect: 3
+// expect: 4
+// expect: 1.5
+// expect: 0
+// expect: 5
+// expect: 18446744069414584320
+// expect: -5
+// expect: 3 3 6 17 3.5
+use c "mylib.h"
+link "mylib"
+
+extern fn strlen(s *u8) u64
+
+claw fn twice(v i32) i32 {
+    ret v * 2
+}
+
+claw fn main() {
+    print(my_add3(1, 2, 3))
+    print(my_scale(3.0, 2.5))
+    mut p My_point = My_point{0, 0, 0.0}
+    my_fill(&p, 3, 4)
+    print(p.x)
+    print(p.y)
+    print(p.w)
+    print(my_apply(cast[*u8](twice), 5))
+    print(strlen(my_name()))
+    print(my_big(4294967295))
+    print(my_neg8())
+    print("{my_version} {my_green - 2} {my_blue} {my_flag_a + my_flag_b} {my_pi}")
+}

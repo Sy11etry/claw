@@ -1,0 +1,21 @@
+#!/usr/bin/env claw
+// args: one two
+// expect: 2 args
+// expect: one
+// expect: two
+// expect: true
+// expect: unset
+// exit: 3
+use os
+
+fn main() {
+    a := os.args()
+    print("{len(a) - 1} args")
+    for x, i in a {
+        if i > 0 { print(x) }
+    }
+    home := os.env("HOME") else "?"
+    print(len(home) > 1)
+    print(os.env("NO_SUCH_VAR_X") else "unset")
+    os.exit(3)
+}

@@ -1,0 +1,14 @@
+pub fn div(a int, b int) int
+    need b != 0
+    sure ret * b <= a
+{
+    ret a / b
+}
+
+test "div works" {
+    sure div(6, 2) == 3
+}
+
+fn main() {
+    print(div(10, 3))
+}

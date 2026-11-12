@@ -1,80 +1,61 @@
-# Claw 0.10 card
+# Claw 0.11 card
 
-One statement per line. No `;`. A line ending in an operator, comma or open bracket continues.
+One statement per line, no `;`. A line ending in an operator, comma or open bracket continues.
 
 ```claw
-type Point { x int, y int }
+type Point { x int, y int }             // Point{1, 2}: fields are positional
 type Shape = Circle{r f64} | Dot
 type ParseErr = Empty | Bad{at int}
 
-const limit = 100
-const big int = twice(limit)             // runs while compiling
-
-fn add(a Point, b Point) Point {
-    ret Point{a.x + b.x, a.y + b.y}      // struct fields are positional
-}
+const limit = 100                        // `const` may call functions: it runs while compiling
 
 fn area(s Shape) f64 {
     match s {                            // must cover every case, or `_:`
-        Circle{r}: ret 3.14 * r * r
+        Circle{r}: ret 3 * r * r
         Dot: ret 0
     }
 }
 
 fn digit(c u8) int ! ParseErr {
-    if c < '0' or c > '9' { fail Bad{0} }
+    if c < '0' { fail Bad{0} }
     ret int(c - '0')
 }
 
-fn find(a []int, x int) ?int {
-    for v, i in a {
-        if v == x { ret i }
-    }
-    ret none
+fn first(a []int) ?int {
+    if len(a) == 0 { ret none }
+    ret a[0]
 }
 
 fn main() {
     x := 5                               // immutable
-    y i32 = 7
     mut s := 0
     for i in 0..10 { s += i }
-    for s > 40 { s -= 1 }                // while
-    for { break }
-    if s == 40 {
-        print("s = {s}, sum = {s + x}")
-    } else {
-        print(y)
-    }
+    for s > 40 { s -= 1 }                // while; `for { }` loops forever
+    if s == 40 { print("s = {s + x}") }
     mut a [4]int = [0...]                // all 0
-    a[1] = len(a)
-    b := [1, 2, 3]
+    a[1] = 2
+    b := [1, 2]
     d := digit('7')?                     // pass the failure up
     e := digit('x') else 0               // or a default
-    f := find(b, 2) else {               // or a block that exits
-        ret
-    }
-    g := digit('x') else err {
-        print("{err}")
-        ret
-    }
+    f := first(b) else { ret }           // or a block that exits
+    g := digit('x') else err { ret }     // `err` is the failure
     print(a[1] + d + e + f + g)
 }
 ```
 
-Types: `int` (= `i64`), `i8 i16 i32 u8 u16 u32 u64 f32 f64 bool str`, `[N]T`, `[]T`, `?T`, `T ! E`, `! E`. No implicit conversions:
-write `i32(x)`, `f64(n)`, `int(c)`. A number literal takes the type around it. `'a'` is a `u8`.
+Types: `int` (= `i64`), `i8 i16 i32 u8 u16 u32 u64 f32 f64 bool str`, `[N]T`, `[]T`, `?T`, `T ! E`, `! E`. No implicit
+conversions: `i32(x)`, `f64(n)`. A literal takes the type around it. `'a'` is a `u8`.
 
 Operators as in C, but `and or not`; no `++` or `?:`.
-Struct and array values copy on assignment. `==` works on numbers and bool; use `match` for variants.
-Names: types and variants start with a capital, everything else with a small letter.
+Structs and arrays copy on assignment. `==` works on numbers and bool; `match` variants.
+Types and variants start with a capital, the rest with a small letter.
 
-`print` takes one value of any type, or a string with `{expr}` (`{{` is a literal brace), and adds a newline.
+`print` takes one value or a string with `{expr}` (`{{` is a brace) and adds a newline.
 
-Errors, not warnings: unused variable or parameter (name it `_`), unused call result (`_ = f()`), reusing a name in
-any enclosing scope, `mut` that never changes, unreachable code, a function that can end without `ret`, ignoring a `T ! E`.
+Errors, not warnings: an unused variable, parameter (name it `_`) or result (`_ = f()`), a reused name,
+`mut` never changed, unreachable code, a missing `ret`, an ignored `T ! E`.
 
-Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index out of range,
-a conversion that does not fit a signed type. Unsigned types wrap.
+Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index or conversion. Unsigned types wrap.
 
 ## Memory is automatic
 
@@ -87,30 +68,29 @@ fn names() []str {
 
 fn total(a []int) int { ... }            // read-only view; takes a `[N]int` too
 fn clear_it(a &[]int) { a = [] }         // `&`: may change it; call clear_it(&x)
-fn keep(own s str) Box { ... }           // `own`: takes it over; call keep(s)
+fn keep(own s str) Box { ... }           // `own`: takes it; call keep(s)
 
 fn demo() {
     a := names()
     b := a                               // `a` moved
     c := copy(b)
-    s := "n = {len(c)}"
-    v := b[1..]                          // also `[..2]`
-    print("{s} {v}")
+    print("{len(c)} {b[1..]}")           // slices: `[1..]`, `[..2]`
 }                                        // the rest is freed here
 ```
 
-Only a whole local variable can move. `x := a[i]` (or a field, or a slice) is a read-only view: `a` cannot change while
-`x` lives. To own one: `mut x := copy(a[i])`, `remove(&a, i)`, `swap(&a, &b)`.
-A collection cannot change while `for` walks it. One call cannot pass the same thing with `&` and without.
-`s[i]` is a `u8`; a `str` cannot change in place. A type may define `drop(x &T)`.
+Only a whole local variable moves. `x := a[i]` (or a field, a slice) is a read-only view: `a` cannot change while
+`x` lives. To own one: `copy(a[i])`, `remove(&a, i)`, `swap(&a, &b)`.
+A collection cannot change while `for` walks it; one call cannot pass a thing with `&` and without.
+`s[i]` is a `u8`; a `str` is immutable. A type may define `drop(x &T)`.
 
-Always available: `push pop insert remove clear reserve swap sort has index_of`,
-`find contains starts_with ends_with trim split lines join upper lower to_int`. Also `use fs`, `use math`.
-`claw sig std` lists their signatures.
-Threads (`use par`): `t := par.spawn(work, x)`, later `par.join(t)`. `work` is a `fn(own T) R +mem`; tasks share nothing.
+Always available: `push pop insert remove clear reserve swap sort has index_of find contains starts_with ends_with
+trim split lines join upper lower to_int`; `claw sig std` lists them.
+Modules: `fs.read(path)`, `fs.write(path, s)`, `math`, `os.args()`, `os.env(name)`, `os.exit(n)`, `par`.
+Threads share nothing: `t := par.spawn(work, x)`, `par.join(t)`, `work` is `fn(own T) R +mem`.
+`par.map(xs, f)`, `par.build(n, f)` run `f` on all cores, results in order.
 
-Map: `mut m := new_map[str, int](hash_str)` (or `hash_int`), `put(&m, k, v)`, `get(m, k) else 0`, `has_key(m, k)`,
-`del(&m, k)`, `for e in m.items { e.key, e.val }`, `len(m.items)`.
+Map: `mut m := new_map[str, int](hash_str)` (or `hash_int`), `put(&m, copy(k), v)`, `get(m, k) else 0`, `has_key`,
+`del`, `for e in m.items { e.key, e.val }`.
 
 ## Templates and modules
 
@@ -126,15 +106,13 @@ pub fn max[T](a T, b T) T {
 }
 
 fn demo() {
-    print(max(1, 2))
-    p := Pair[int, f64]{1, 2.5}
     t Tree[int] = Node{1, []}            // type from the context, or `Node[int]{...}`
     f fn(int) int = twice                // a named function as a value
-    print(geo.make(3))
+    print(max(1, 2) + geo.make(3))
 }
 ```
 
-No methods. `+mem +io` may follow a function type. A template, an `extern` or a function with `need` cannot be a value.
+No methods. `+mem +io` may follow a function type. Templates, `extern` and `need` functions are not values.
 
 ## Claw mode: `claw fn` is C
 
@@ -144,20 +122,19 @@ extern fn strlen(s *u8) u64              // any libSystem function
 claw fn sum() int {
     p := alloc[int](3)
     defer free(p)                        // when this block ends
-    p[0] = 1
-    q := p + 1
-    *q = 2
+    *(p + 1) = 2
     mut x := 5
     r := &x                              // `&` needs a `mut`
-    *r += 1
-    print(strlen("hi"))
-    ret p[0] + p[1] + x
+    *r += strlen("hi")
+    ret p[1] + x
 }
 ```
 
-`none` is null. Pointers, `alloc`, `free`, `cast[T](x)`, `defer`, `extern` calls: only in `claw fn`. `p.x` reads through a pointer.
-`sizeof[T]()` is in bytes. `cast` converts between pointers, `int` and `u64`. A string passed as `*u8` is NUL-terminated.
-Arithmetic and array bounds stay checked; raw pointers do not.
+`none` is null. Pointers, `alloc`, `free`, `cast[T](x)`, `defer`, `extern` calls: only in `claw fn`; `p.x` works on pointers.
+`sizeof[T]()` is in bytes. `cast` converts between pointers, `int`, `u64`. A string literal as `*u8` is NUL-terminated;
+`s.ptr` is the bytes of a `str`. Raw pointers are unchecked.
+C: `use c "zlib.h"` brings `extern fn`, `type`, `const` from a header (`Z_OK` is `z_ok`, C `int` is `i32`);
+`link "z"` or `-l z` loads the library; `cast[*u8](f)` passes a `claw fn` to C as a callback.
 
 ## Contracts, effects, tests
 
@@ -174,10 +151,9 @@ test "div" {
 }
 ```
 
-`+mem` allocates, `+io` touches the world. `pub` must declare them; private functions have them worked out.
-A contract only looks: no `&`, moves or effects.
+`+mem` allocates, `+io` touches the world. `pub` declares them; private ones are inferred. A contract has no `&`, moves or effects.
 
-`claw run` and `claw test` check everything, also heap misuse and leaks. `claw build` leaves out contracts that call
-functions; `--fast` removes every check.
-`claw test` also fuzzes functions without `+io`. `claw why f.claw` explains a failure. `claw fix f.claw` applies patches.
-`claw sig f.claw`: signatures. `claw ctx f.claw name`: one function's context. `claw audit f.claw`: trusted code.
+`claw run` and `claw test` check everything, heap misuse and leaks too; `claw build` skips contracts that call
+functions, `--fast` every check. `claw test` also fuzzes functions without `+io`. `claw why f.claw` explains a failure,
+`fix` applies patches, `sig` lists signatures, `ctx f.claw name` gives one function's context, `audit` shows trusted code.
+`claw f.claw args` runs a script (`#!` works). Packages: `claw.pkg` lines `name source`, `claw get`, `use name`.

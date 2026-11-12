@@ -1,0 +1,45 @@
+// The command line, the environment and leaving early.
+
+extern "getenv" fn c_getenv(name *u8) *u8
+extern "strlen" fn c_strlen(s *u8) u64
+extern "exit" fn c_exit(code i32)
+
+// A copy of a C string as a `str` of its own.
+claw fn text_of(p *u8) str +mem {
+    n := int(c_strlen(p))
+    mut out := ""
+    if n > 0 {
+        q := alloc[u8](n)
+        for i in 0..n { q[i] = p[i] }
+        out.ptr = q
+        out.len = n
+        out.cap = n
+    }
+    ret out
+}
+
+/// What the user typed: `args()[0]` is the program, the rest are its arguments.
+pub claw fn args() []str +io +mem {
+    s := __state()
+    argc := s[14]
+    argv := cast[**u8](s[15])
+    mut out []str = []
+    for i in 0..argc { push(&out, text_of(argv[i])) }
+    ret out
+}
+
+/// An environment variable, or `none` if it is not set.
+pub claw fn env(name str) ?str +io +mem {
+    p := alloc[u8](len(name) + 1)
+    defer free(p)
+    for c, i in name { p[i] = c }
+    p[len(name)] = 0
+    v := c_getenv(p)
+    if v == none { ret none }
+    ret text_of(v)
+}
+
+/// Ends the program now, with this exit code.
+pub claw fn exit(code int) +io {
+    c_exit(i32(code))
+}

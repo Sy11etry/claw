@@ -106,7 +106,7 @@ fn shdr(w: &mut W, name: u32, kind: u32, flags: u64, addr: u64, off: u64, size: 
 }
 
 /// `debug`: the source file names, when `-g` asks for DWARF inside the file.
-pub fn write_elf(obj: &Object, libc: Libc, debug: Option<&[String]>) -> Vec<u8> {
+pub fn write_elf(obj: &Object, libc: Libc, debug: Option<&[String]>, libs: &[String]) -> Vec<u8> {
     // The imports of the program, then the one the start-up code needs.
     let mut imports: Vec<String> = obj.imports.iter().map(|n| libc_name(n)).collect();
     let start_import = imports.len();
@@ -127,6 +127,7 @@ pub fn write_elf(obj: &Object, libc: Libc, debug: Option<&[String]>) -> Vec<u8> 
 
     // ---- dynamic symbols and their names
     let mut dynstr = Strings::new();
+    needed.extend(libs.iter().map(|l| l.as_str()));
     let needed_names: Vec<u32> = needed.iter().map(|n| dynstr.add(n)).collect();
     let mut dynsym = W(vec![0u8; 24]);
     for n in &imports {

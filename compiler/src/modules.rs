@@ -11,6 +11,15 @@ thread_local! {
     static OVERLAY: std::cell::RefCell<HashMap<PathBuf, String>> = std::cell::RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// Directories given with `-I`: where `use c "x.h"` looks for headers.
+    static INCDIRS: std::cell::RefCell<Vec<PathBuf>> = std::cell::RefCell::new(Vec::new());
+}
+
+pub fn set_include_dirs(dirs: Vec<PathBuf>) {
+    INCDIRS.with(|d| *d.borrow_mut() = dirs);
+}
+
 pub fn set_overlay(files: HashMap<PathBuf, String>) {
     OVERLAY.with(|o| *o.borrow_mut() = files);
 }
@@ -43,10 +52,14 @@ pub struct Loaded {
     pub files: Vec<String>,
     /// Base names, for messages printed at run time.
     pub base_names: Vec<String>,
+    /// Shared libraries named by `link "name"` in any module.
+    pub links: Vec<String>,
 }
 
 struct Loader {
     std_root: Option<PathBuf>,
+    /// The folder of the program being built: packages are looked up from here.
+    root_dir: PathBuf,
     units: Vec<Unit>,
     files: Vec<String>,
     base_names: Vec<String>,
@@ -54,6 +67,7 @@ struct Loader {
     in_progress: Vec<PathBuf>,
     diags: Vec<Diag>,
     core: Option<usize>,
+    links: Vec<String>,
     /// Also load the memory checker written in Claw.
     check: bool,
 }
@@ -65,8 +79,39 @@ impl Loader {
         if local.is_file() {
             return Some(local);
         }
-        let in_std = self.std_root.as_ref()?.join(&rel);
-        in_std.is_file().then_some(in_std)
+        if let Some(in_std) = self.std_root.as_ref().map(|r| r.join(&rel)).filter(|p| p.is_file()) {
+            return Some(in_std);
+        }
+        // A package fetched by `claw get`, found from the program's own folder upward.
+        crate::pkg::locate(&self.root_dir, path)
+    }
+
+    /// `use c "x.h"`: the header's declarations join this module as if they were written here.
+    fn c_headers(&mut self, program: &mut Program, here: &Path) {
+        let incdirs = INCDIRS.with(|d| d.borrow().clone());
+        for (name, span) in std::mem::take(&mut program.cimports) {
+            let Some(h) = crate::cheader::locate(&name, here, &incdirs) else {
+                self.diags.push(Diag::new("E0181", span, format!("cannot find the C header `{name}`; add its folder with -I")));
+                continue;
+            };
+            let text = crate::cheader::translate(&h, &incdirs).source;
+            let file = self.files.len() as u32;
+            self.files.push(h.to_string_lossy().into_owned());
+            self.base_names.push(h.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+            let before = self.diags.len();
+            let toks = lexer::lex(&text, file, &mut self.diags);
+            if self.diags.len() > before {
+                continue;
+            }
+            let mut extra = parser::Parser::new(toks, &mut self.diags).with_source(&text).parse_program();
+            if self.diags.len() > before {
+                continue;
+            }
+            let have: HashSet<String> = program.externs.iter().map(|e| e.name.clone()).chain(program.funcs.iter().map(|f| f.name.clone())).chain(program.consts.iter().map(|c| c.name.clone())).chain(program.types.iter().map(|t| t.name.clone())).collect();
+            program.externs.extend(extra.externs.drain(..).filter(|e| !have.contains(&e.name)));
+            program.consts.extend(extra.consts.drain(..).filter(|c| !have.contains(&c.name)));
+            program.types.extend(extra.types.drain(..).filter(|t| !have.contains(&t.name)));
+        }
     }
 
     fn load_core(&mut self) {
@@ -122,6 +167,8 @@ impl Loader {
         if self.diags.len() > before {
             return None;
         }
+        self.links.extend(program.links.iter().cloned());
+        self.c_headers(&mut program, &path);
         computed_consts(&mut program);
 
         self.in_progress.push(key.clone());
@@ -239,6 +286,7 @@ pub fn std_programs() -> Vec<(String, Program)> {
 pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)> {
     let mut l = Loader {
         std_root: find_std(),
+        root_dir: Path::new(root).canonicalize().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_default(),
         units: Vec::new(),
         files: Vec::new(),
         base_names: Vec::new(),
@@ -246,6 +294,7 @@ pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)>
         in_progress: Vec::new(),
         diags: Vec::new(),
         core: None,
+        links: Vec::new(),
         check,
     };
     l.load(root.to_string(), PathBuf::from(root), String::new(), None);
@@ -253,5 +302,5 @@ pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)>
         return Err((l.diags, l.files));
     }
     let core = l.core.expect("core was loaded with the root");
-    Ok(Loaded { units: l.units, core, files: l.files, base_names: l.base_names })
+    Ok(Loaded { units: l.units, core, files: l.files, base_names: l.base_names, links: l.links })
 }

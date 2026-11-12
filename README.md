@@ -70,6 +70,13 @@ claw run examples/tour.claw
 | `claw sig` / `ctx` / `audit` / `card` | signatures only / one function's context / trusted code / the language on a page |
 | `claw fmt f.claw` | the one standard format |
 | `claw lsp` | language server for editors |
+| `claw f.claw args` | build and run a script at once (`#!/usr/bin/env claw` works) |
+| `claw get` | fetch the packages listed in `claw.pkg` and write `claw.lock` |
+| `claw cdecl x.h` | show what `use c "x.h"` turns a C header into |
+
+C libraries: `use c "zlib.h"` and `link "z"` (or `-l z`) call a C library with no hand-written declarations; tried on libc, zlib,
+sqlite3 and a library built from our own C. Threads: `par.map(xs, f)` and `par.build(n, f)` spread work over all cores with no
+shared memory, so no data races, and the answer is always the one a plain loop would give.
 
 Targets: macOS arm64 (default), macOS x86-64 (`--target x86_64`, runs under Rosetta), ARM64 Linux
 (`--target aarch64-linux-musl` or `aarch64-linux`, builds only).
@@ -93,8 +100,9 @@ Claw is a young language. The full list is in `docs/STATUS.md`; the main points:
   target runs in a virtual machine with musl; a glibc build is produced but has not been run.
 - No automatic vectorization (SIMD is written by hand in `claw fn`). Floating-point values on x86-64 live on the stack.
 - `clawc`, the compiler written in Claw, is a subset: it builds everything in `tests/run` byte for byte but does not know
-  threads, SIMD, Linux, `-g`, `test`, `why` or `fix`. The Rust compiler `claw` is the main one.
-- No package manager, no standard library beyond what `std/` shows (`claw sig std`).
+  threads, SIMD, C headers, packages, Linux, `-g`, `test`, `why` or `fix`. The Rust compiler `claw` is the main one.
+- Packages are folders or git URLs with a lock file: no registry, no version ranges. The standard library is what `std/` shows (`claw sig std`).
+- Not done: Windows, WebAssembly, Linux on x86-64, automatic vectorization, channels between threads.
 
 ## Repository
 

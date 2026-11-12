@@ -39,6 +39,10 @@ pub struct Program {
     pub consts: Vec<ConstDecl>,
     pub externs: Vec<ExternDecl>,
     pub uses: Vec<UseDecl>,
+    /// `link "z"`: a shared library this program needs.
+    pub links: Vec<String>,
+    /// `use c "zlib.h"`: a C header whose declarations become `extern fn`, `type` and `const`.
+    pub cimports: Vec<(String, Span)>,
 }
 
 /// `use a.b`: the file a/b.claw, known here as `b`.

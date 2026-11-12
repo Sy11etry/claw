@@ -442,6 +442,100 @@ def simd_test(path, tmp):
     return None
 
 
+def cinterop_test(path, tmp):
+    """C libraries and headers: `use c`, `link`, callbacks. A program that needs the test library gets it built
+    here with clang (a test fixture, never part of building Claw), once for each architecture."""
+    text = path.read_text()
+    want = headers(text, "expect")
+    needs_lib = 'link "mylib"' in text
+    modes = [[], ["--fast"], ["--no-opt"], ["--target", "x86_64"], ["--target", "x86_64", "--no-opt"]]
+    for mode in modes:
+        x86 = "x86_64" in mode
+        libdir = tmp / ("cilib_x86" if x86 else "cilib_arm")
+        extra = []
+        if needs_lib:
+            if not libdir.exists():
+                libdir.mkdir()
+                src = ROOT / "tests/cinterop/mylib.c"
+                arch = ["-arch", "x86_64"] if x86 else []
+                r = child(["clang", *arch, "-dynamiclib", "-o", libdir / "libmylib.dylib", src], capture_output=True, text=True)
+                if r.returncode != 0:
+                    return f"clang could not build the test library: {r.stderr}"
+            extra = ["-L", libdir]
+        exe = tmp / ("ci_" + path.stem + "".join(mode).replace("-", ""))
+        b = child([CLAW, "build", *mode, *extra, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode != 0:
+            return f"build {mode}: {b.stderr}"
+        r = child([exe], capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 or r.stdout.splitlines() != want:
+            return f"{mode}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
+    if not needs_lib:
+        r = child([CLAW, "run", path], capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+        if r.returncode != 0 or r.stdout.splitlines() != want:
+            return f"claw run: exit {r.returncode}, got {r.stdout.splitlines()}\n{r.stderr}"
+    return None
+
+
+def script_test(path, tmp):
+    """`claw script.claw args...` (a `#!` line is allowed), and the same program built for both architectures."""
+    text = path.read_text()
+    args = (headers(text, "args") or [""])[0].split()
+    want = headers(text, "expect")
+    want_exit = int((headers(text, "exit") or ["0"])[0])
+    r = child([CLAW, path, *args], capture_output=True, text=True, env={"PATH": "", "HOME": os.environ.get("HOME", "")})
+    if r.returncode != want_exit or r.stdout.splitlines() != want:
+        return f"script: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
+    for mode in ([], ["--fast"], ["--target", "x86_64"]):
+        exe = tmp / ("sc_" + path.stem + "".join(mode).replace("-", ""))
+        b = child([CLAW, "build", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode != 0:
+            return f"build {mode}: {b.stderr}"
+        r = child([exe, *args], capture_output=True, text=True, env={"PATH": "", "HOME": os.environ.get("HOME", "")})
+        if r.returncode != want_exit or r.stdout.splitlines() != want:
+            return f"{mode}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
+    return None
+
+
+def pkg_test(tmp):
+    """Packages: a folder dependency and a git dependency, pinned by claw.lock; a changed copy is refused."""
+    root = tmp / "pkgtest"
+    shutil.copytree(ROOT / "tests/pkg", root)
+    app = root / "app"
+    want = headers((app / "main.claw").read_text(), "expect")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+    r = child([CLAW, "get"], cwd=app, capture_output=True, text=True, env=env)
+    if r.returncode != 0 or "fetched" not in r.stdout:
+        return f"claw get: {r.stdout}{r.stderr}"
+    r = child([CLAW, "run", "main.claw"], cwd=app, capture_output=True, text=True, env=env)
+    if r.returncode != 0 or r.stdout.splitlines() != want:
+        return f"run with a folder package: {r.stdout.splitlines()} {r.stderr}"
+    if "up to date" not in child([CLAW, "get"], cwd=app, capture_output=True, text=True, env=env).stdout:
+        return "a second `claw get` should find the pinned copy"
+    # The same package from a git repository.
+    repo = root / "greet_repo"
+    shutil.copytree(root / "greet", repo)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+    for cmd in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-q", "-m", "x"]):
+        if child([*git, *cmd], cwd=repo, capture_output=True, text=True, env=env).returncode != 0:
+            return "git is needed for this test"
+    app2 = root / "app2"
+    shutil.copytree(app, app2, ignore=shutil.ignore_patterns(".claw", "claw.lock"))
+    (app2 / "claw.pkg").write_text(f"greet file://{repo}#main\n")
+    r = child([CLAW, "get"], cwd=app2, capture_output=True, text=True, env=env)
+    if r.returncode != 0:
+        return f"claw get from git: {r.stdout}{r.stderr}"
+    r = child([CLAW, "run", "main.claw"], cwd=app2, capture_output=True, text=True, env=env)
+    if r.returncode != 0 or r.stdout.splitlines() != want:
+        return f"run with a git package: {r.stdout.splitlines()} {r.stderr}"
+    # A copy edited by hand no longer matches the lock.
+    with open(app2 / ".claw/pkg/greet/greet.claw", "a") as f:
+        f.write("// edited\n")
+    r = child([CLAW, "get"], cwd=app2, capture_output=True, text=True, env=env)
+    if r.returncode == 0 or "changed" not in r.stderr:
+        return f"an edited package must be refused: {r.stdout}{r.stderr}"
+    return None
+
+
 def err_test(path):
     text = path.read_text()
     want = sorted(c.strip() for c in headers(text, "error"))
@@ -565,6 +659,23 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL simd/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/cinterop").glob("*.claw")):
+            total += 1
+            msg = err_test(path) if path.name.startswith("err_") else cinterop_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL cinterop/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/script").glob("*.claw")):
+            total += 1
+            msg = script_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL script/{path.name}: {msg}")
+        total += 1
+        msg = pkg_test(tmp)
+        if msg:
+            failures += 1
+            print(f"FAIL pkg: {msg}")
         for path in sorted((ROOT / "examples").glob("*.claw")):
             total += 1
             msg = run_test(path, tmp) or check_test(path)

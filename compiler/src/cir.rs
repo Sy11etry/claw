@@ -137,6 +137,9 @@ pub enum Inst {
     BufPtr { p: VReg, n: VReg },
     /// From here on the output buffer collects a string instead of printing.
     CaptureStart,
+    /// Only in programs with threads: the output buffer is shared, so building a line holds a lock.
+    BufLock,
+    BufUnlock,
     CaptureTake { ptr: VReg, len: VReg },
     BufBool { s: VReg },
     BufFloat { s: VReg, bits: u8 },
@@ -202,6 +205,8 @@ pub struct Func {
     pub params: Vec<VReg>,
     /// Which parameters (bit i, i < 8) and whether the result (bit 8) are 128-bit vectors.
     pub vsig: u16,
+    /// Called from C (a callback, a thread entry): arguments arrive by the C convention.
+    pub c_abi: bool,
     /// Written as `claw fn`: raw pointers may alias anything.
     pub claw: bool,
     /// Registers were allocated rather than every value living on the stack.
@@ -371,7 +376,7 @@ macro_rules! walk_inst {
                 $f(d, true);
             }
             Inst::Note { v, .. } => $f(v, false),
-            Inst::BufStr { .. } | Inst::CaptureStart | Inst::Flush { .. } | Inst::Exit { .. } | Inst::SetSite { .. } | Inst::Line { .. } => {}
+            Inst::BufStr { .. } | Inst::CaptureStart | Inst::BufLock | Inst::BufUnlock | Inst::Flush { .. } | Inst::Exit { .. } | Inst::SetSite { .. } | Inst::Line { .. } => {}
         }
     };
 }
@@ -408,7 +413,7 @@ impl Inst {
     /// Can a call's register rules touch this? Then x0-x7 are not safe across or into it.
     pub fn is_call(&self) -> bool {
         match self {
-            Inst::Call { .. } | Inst::CallInd { .. } | Inst::CallC { .. } | Inst::MemCopyDyn { .. } | Inst::Alloc { .. } | Inst::Free { .. } | Inst::BufStr { .. } | Inst::BufInt { .. } | Inst::BufPtr { .. } | Inst::CaptureTake { .. } | Inst::BufBool { .. } | Inst::BufFloat { .. } | Inst::Flush { .. } | Inst::Exit { .. } => true,
+            Inst::Call { .. } | Inst::CallInd { .. } | Inst::CallC { .. } | Inst::MemCopyDyn { .. } | Inst::Alloc { .. } | Inst::Free { .. } | Inst::BufStr { .. } | Inst::BufInt { .. } | Inst::BufPtr { .. } | Inst::CaptureTake { .. } | Inst::BufBool { .. } | Inst::BufFloat { .. } | Inst::BufLock | Inst::BufUnlock | Inst::Flush { .. } | Inst::Exit { .. } => true,
             Inst::MemCopy { size, .. } => *size > 64,
             _ => false,
         }

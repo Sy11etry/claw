@@ -1357,6 +1357,7 @@ impl<'m> Machine<'m> {
                             }
                         }
                         Inst::CaptureStart => self.capturing = true,
+                        Inst::BufLock | Inst::BufUnlock => {}
                         Inst::CaptureTake { ptr, len } => {
                             self.capturing = false;
                             let n = self.buf.len() as u64;

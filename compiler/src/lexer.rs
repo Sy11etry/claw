@@ -74,6 +74,12 @@ impl<'a> Lexer<'a> {
 
 pub fn lex(src: &str, file: u32, diags: &mut Vec<Diag>) -> Vec<Token> {
     let mut l = Lexer { src: src.as_bytes(), pos: 0, line: 1, col: 1, file };
+    // A script may start with `#!/usr/bin/env claw`: that line is for the shell.
+    if src.starts_with("#!") {
+        while l.pos < l.src.len() && l.peek(0) != b'\n' {
+            l.bump();
+        }
+    }
     let mut out: Vec<Token> = Vec::with_capacity(src.len() / 3);
     let mut brackets: Vec<u8> = Vec::new();
 
@@ -230,6 +236,8 @@ fn lex_string(l: &mut Lexer, diags: &mut Vec<Diag>) -> Token {
     let (start, line, col) = (l.pos, l.line, l.col);
     l.bump();
     let mut bytes = Vec::new();
+    // Inside `{...}` the text is code, so a string there may hold its own quotes.
+    let mut depth = 0usize;
     loop {
         if l.pos >= l.src.len() || l.peek(0) == b'\n' {
             let span = l.span_from(start, line, col);
@@ -238,6 +246,37 @@ fn lex_string(l: &mut Lexer, diags: &mut Vec<Diag>) -> Token {
         }
         let c = l.bump();
         match c {
+            b'{' if depth == 0 && l.peek(0) == b'{' => {
+                bytes.extend_from_slice(b"{{");
+                l.bump();
+            }
+            b'}' if depth == 0 && l.peek(0) == b'}' => {
+                bytes.extend_from_slice(b"}}");
+                l.bump();
+            }
+            b'{' => {
+                depth += 1;
+                bytes.push(c);
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                bytes.push(c);
+            }
+            // A quote is the start of a nested string only where code could begin a value (after `(`, `,`, an
+            // operator); after a name or a number it closes the string, and the open `{` is reported later.
+            b'"' if depth > 0 && bytes.iter().rev().find(|b| !b.is_ascii_whitespace()).is_some_and(|b| b"(,[=+-*/<>!&|:?{".contains(b)) => {
+                // A nested string: keep it as written, the embedded code is lexed again later.
+                bytes.push(b'"');
+                while l.pos < l.src.len() && l.peek(0) != b'\n' {
+                    let n = l.bump();
+                    bytes.push(n);
+                    if n == b'\\' && l.pos < l.src.len() && l.peek(0) != b'\n' {
+                        bytes.push(l.bump());
+                    } else if n == b'"' {
+                        break;
+                    }
+                }
+            }
             b'"' => break,
             b'\\' => {
                 let e = l.bump();

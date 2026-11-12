@@ -1492,6 +1492,12 @@ pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +me
     add_symbol(&symbols, "___claw_entry", entry)
     emit(&g, arm64.stp_pre(fp, lr, sp, -16))
     emit(&g, arm64.mov_sp(fp, sp))
+    // `os.args()` reads argc and argv from the last two words of the runtime state.
+    bss_addr(&g, x9)
+    mov_imm(&g, x16, state_at + 112)
+    emit(&g, arm64.add(x9, x9, x16))
+    emit(&g, arm64.str_x(x0, x9, 0))
+    emit(&g, arm64.str_x(x1, x9, 8))
     call(&g, bl_op, TgUser{m.main})
     if rtc.alloc != -1 {
         call(&g, bl_op, TgUser{rtc.finish})
@@ -1550,5 +1556,5 @@ pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +me
     swap(&bss_refs, &g.bss_refs)
     mut got_refs []Ref = []
     swap(&got_refs, &g.got_refs)
-    ret Object{code, rodata, data_refs, bss_refs, code_refs, got_refs, imports, symbols, entry, state_at + state_size}
+    ret Object{code, rodata, data_refs, bss_refs, code_refs, got_refs, imports, symbols, entry, state_at + state_size + 8}
 }

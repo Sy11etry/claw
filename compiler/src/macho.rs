@@ -93,6 +93,11 @@ fn path_cmd(w: &mut W, cmd: u32, path: &str, extra: &[u32]) {
     w.pad_to(start + size as usize);
 }
 
+/// Bytes taken by an `LC_LOAD_DYLIB` for this path.
+fn dylib_cmd_size(path: &str) -> u64 {
+    align((8 + 4 + 12 + path.len() + 1) as u64, 8)
+}
+
 fn linkedit_cmd(w: &mut W, cmd: u32, off: u64, size: u64) {
     w.u32(cmd);
     w.u32(16);
@@ -101,7 +106,7 @@ fn linkedit_cmd(w: &mut W, cmd: u32, off: u64, size: u64) {
 }
 
 /// Chained fixups: every GOT slot binds to a libSystem symbol.
-fn chained_fixups(imports: &[String], got_seg_offset: u64, page: u64) -> Vec<u8> {
+fn chained_fixups(imports: &[String], got_seg_offset: u64, page: u64, flat: bool) -> Vec<u8> {
     const SEG_COUNT: u32 = 5;
     const GOT_SEG_INDEX: usize = 2;
     let starts_offset = 32u32;
@@ -137,7 +142,10 @@ fn chained_fixups(imports: &[String], got_seg_offset: u64, page: u64) -> Vec<u8>
 
     let mut names = vec![0u8];
     for name in imports {
-        w.u32(1 | ((names.len() as u32) << 9)); // library ordinal 1 = libSystem
+        // Library ordinal 1 is libSystem. With extra libraries a symbol may be in any of them, so it is
+        // looked up in every loaded image (ordinal -2, like `-undefined dynamic_lookup`).
+        let ordinal = if flat { 0xFE } else { 1 };
+        w.u32(ordinal | ((names.len() as u32) << 9));
         names.extend_from_slice(name.as_bytes());
         names.push(0);
     }
@@ -220,11 +228,12 @@ fn sign(file: &[u8], ident: &str, text_filesize: u64) -> Vec<u8> {
     b
 }
 
-pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
+pub fn write_macho(obj: &Object, ident: &str, libs: &[String]) -> Vec<u8> {
     let sizeofcmds: u64 = 72 + (72 + 160) + (72 + 80) + (72 + 80) + 72 // segments
         + 16 + 16 + 24 + 80 // fixups, trie, symtab, dysymtab
-        + 32 + 24 + 24 + 24 + 56 + 16; // dylinker, uuid, build, main, dylib, signature
-    const NCMDS: u32 = 15;
+        + 32 + 24 + 24 + 24 + 56 + 16 // dylinker, uuid, build, main, dylib, signature
+        + libs.iter().map(|l| dylib_cmd_size(l)).sum::<u64>(); // dylibs named with -l or `link`
+    let ncmds: u32 = 15 + libs.len() as u32;
 
     let text_off = align(32 + sizeofcmds, 16);
     let code_size = obj.code.len() as u64 * 4;
@@ -241,7 +250,7 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     let bss_addr = got_addr + data_size;
     let bss_vmsize = align(obj.bss_size.max(1), PAGE);
 
-    let fixups = chained_fixups(&obj.imports, got_off, PAGE);
+    let fixups = chained_fixups(&obj.imports, got_off, PAGE, !libs.is_empty());
     let trie = exports_trie();
 
     let mut strtab = vec![0u8];
@@ -298,7 +307,7 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     w.u32(0x0100_000c); // arm64
     w.u32(0);
     w.u32(2); // MH_EXECUTE
-    w.u32(NCMDS);
+    w.u32(ncmds);
     w.u32(sizeofcmds as u32);
     w.u32(0x0020_0085); // NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
     w.u32(0);
@@ -370,6 +379,9 @@ pub fn write_macho(obj: &Object, ident: &str) -> Vec<u8> {
     w.u64(0);
 
     path_cmd(&mut w, 0x0c, "/usr/lib/libSystem.B.dylib", &[2, 0x0001_0000, 0x0001_0000]);
+    for l in libs {
+        path_cmd(&mut w, 0x0c, l, &[2, 0x0001_0000, 0x0001_0000]);
+    }
 
     linkedit_cmd(&mut w, 0x1d, sig_off, sig_size);
 
@@ -414,11 +426,12 @@ fn rip_patch(code: &mut [u8], pos: usize, code_addr: u64, target: u64) {
 
 /// The x86-64 twin of `write_macho`: same commands, 4 KB pages, byte-addressed code.
 /// Compared with `clang -arch x86_64` (otool -l, dyld_info, codesign -dvvv).
-pub fn write_macho_x64(obj: &ObjectX64, ident: &str) -> Vec<u8> {
+pub fn write_macho_x64(obj: &ObjectX64, ident: &str, libs: &[String]) -> Vec<u8> {
     let sizeofcmds: u64 = 72 + (72 + 160) + (72 + 80) + (72 + 80) + 72 // segments
         + 16 + 16 + 24 + 80 // fixups, trie, symtab, dysymtab
-        + 32 + 24 + 24 + 24 + 56 + 16; // dylinker, uuid, build, main, dylib, signature
-    const NCMDS: u32 = 15;
+        + 32 + 24 + 24 + 24 + 56 + 16 // dylinker, uuid, build, main, dylib, signature
+        + libs.iter().map(|l| dylib_cmd_size(l)).sum::<u64>(); // dylibs named with -l or `link`
+    let ncmds: u32 = 15 + libs.len() as u32;
 
     let text_off = align(32 + sizeofcmds, 16);
     let code_size = obj.code.len() as u64;
@@ -434,7 +447,7 @@ pub fn write_macho_x64(obj: &ObjectX64, ident: &str) -> Vec<u8> {
     let bss_addr = got_addr + data_size;
     let bss_vmsize = align(obj.bss_size.max(1), PAGE_X64);
 
-    let fixups = chained_fixups(&obj.imports, got_off, PAGE_X64);
+    let fixups = chained_fixups(&obj.imports, got_off, PAGE_X64, !libs.is_empty());
     let trie = exports_trie();
 
     let mut strtab = vec![0u8];
@@ -476,7 +489,7 @@ pub fn write_macho_x64(obj: &ObjectX64, ident: &str) -> Vec<u8> {
     w.u32(0x0100_0007); // x86_64
     w.u32(3); // CPU_SUBTYPE_X86_64_ALL
     w.u32(2); // MH_EXECUTE
-    w.u32(NCMDS);
+    w.u32(ncmds);
     w.u32(sizeofcmds as u32);
     w.u32(0x0020_0085); // NOUNDEFS | DYLDLINK | TWOLEVEL | PIE
     w.u32(0);
@@ -547,6 +560,9 @@ pub fn write_macho_x64(obj: &ObjectX64, ident: &str) -> Vec<u8> {
     w.u64(0);
 
     path_cmd(&mut w, 0x0c, "/usr/lib/libSystem.B.dylib", &[2, 0x0001_0000, 0x0001_0000]);
+    for l in libs {
+        path_cmd(&mut w, 0x0c, l, &[2, 0x0001_0000, 0x0001_0000]);
+    }
 
     linkedit_cmd(&mut w, 0x1d, sig_off, sig_size);
 

@@ -49,6 +49,8 @@ pub struct Checked {
     /// One checked copy of a template per set of type arguments.
     pub instances: Vec<Func>,
     pub computed: Vec<ComputedConst>,
+    /// Functions whose address goes to C with `cast[*u8](f)`.
+    pub callbacks: HashSet<String>,
 }
 
 struct Var {
@@ -100,6 +102,7 @@ struct Mod<'a> {
 
 struct Global<'a> {
     computed: Vec<ComputedConst>,
+    callbacks: HashSet<String>,
     types: Types,
     mods: Vec<Mod<'a>>,
     cur: usize,
@@ -975,6 +978,7 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
 /// `tests_only`: there is no program to start, so `main` is optional.
 pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag>) -> Checked {
     let mut g = Global {
+        callbacks: HashSet::new(),
         types: Types::new(),
         mods: units
             .iter()
@@ -1093,7 +1097,7 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
         }
     }
 
-    Checked { types: g.types, sigs: g.sigs, instances, computed: g.computed }
+    Checked { types: g.types, sigs: g.sigs, instances, computed: g.computed, callbacks: g.callbacks }
 }
 
 struct Ctx<'a, 'b> {
@@ -1885,9 +1889,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
         }
         match &e.kind {
             ExprKind::Var(n) => {
-                let Some(view) = self.lookup(n).map(|v| v.view) else { return };
+                let Some((view, line)) = self.lookup(n).map(|v| (v.view, v.span.line)) else { return };
                 if view {
-                    let d = Diag::new("E0152", e.span, format!("`{n}` is borrowed here, so it cannot be moved away")).fix(e.span, format!("copy({n})"), format!("write `copy({n})`"));
+                    let d = Diag::new("E0152", e.span, format!("`{n}` (line {line}) only looks at another value, so it cannot be moved or returned; copy it here or where it is declared")).fix(e.span, format!("copy({n})"), format!("write `copy({n})`"));
                     self.diags.push(d);
                     return;
                 }
@@ -2280,6 +2284,32 @@ impl<'a, 'b> Ctx<'a, 'b> {
         (*module == m && *name == d.name).then(|| args.clone())
     }
 
+    /// A bare function name inside `cast[...]`: its address, for C to call. C passes arguments in registers and
+    /// knows nothing of Claw types, so only numbers and pointers can cross.
+    fn callback(&mut self, e: &Expr) -> Option<Ty> {
+        let ExprKind::Var(name) = &e.kind else { return None };
+        if self.lookup(name).is_some() {
+            return None;
+        }
+        let m = self.g.cur;
+        let (generic, _) = self.g.mods[m].funcs.get(name.as_str()).copied()?;
+        let full = format!("{}{name}", self.g.mods[m].prefix);
+        let sig = self.g.sigs.get(&full).cloned()?;
+        if generic.is_some() || sig.ext.is_some() || sig.has_need {
+            self.diags.push(Diag::new("E0180", e.span, format!("`{name}` cannot go to C: no template, `extern fn` or `need`")));
+            return Some(ERR);
+        }
+        let plain = |g: &Types, t: Ty| g.is_ptr(t) || t == BOOL || matches!(g.kind(t), Kind::Int { .. });
+        if sig.params.len() > 6 || !sig.params.iter().all(|t| plain(&self.g.types, *t)) || !(sig.ret == VOID || plain(&self.g.types, sig.ret)) || sig.own.iter().any(|o| *o) {
+            self.diags.push(Diag::new("E0180", e.span, format!("`{name}` cannot be called from C: at most 6 parameters, only numbers, `bool` and pointers, no `own`")));
+            return Some(ERR);
+        }
+        *e.res.borrow_mut() = Res::Func(full.clone());
+        e.ty.set(U64);
+        self.g.callbacks.insert(full);
+        Some(U64)
+    }
+
     /// A function named where a value is expected: `apply(double, 3)`.
     fn func_value(&mut self, e: &Expr, m: usize, name: &str, span: Span, hint: Option<Ty>) -> Ty {
         let (generic, public) = self.g.mods[m].funcs[name];
@@ -2526,15 +2556,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
                 self.simd(name, span, args)
             }
-            "__state" if self.g.mods[self.g.cur].prefix == "__check." => self.g.types.intern(Kind::Pointer(INT)),
+            "__state" if matches!(self.g.mods[self.g.cur].prefix.as_str(), "__check." | "os.") => self.g.types.intern(Kind::Pointer(INT)),
             // For `std/par.claw` only: whether tasks must run one after another, and where a task's thread starts.
             "__sequential" if self.g.mods[self.g.cur].prefix == "par." => BOOL,
             // For `std/fs.claw` only: the values of `open` flags differ between macOS and Linux.
-            "__linux" if self.g.mods[self.g.cur].prefix == "fs." => BOOL,
-            "__entry" if self.g.mods[self.g.cur].prefix == "par." => {
+            "__linux" if matches!(self.g.mods[self.g.cur].prefix.as_str(), "fs." | "par.") => BOOL,
+            "__entry" | "__entry_map" | "__entry_build" if self.g.mods[self.g.cur].prefix == "par." => {
                 let targs = self.resolve_targs(targs)?;
                 let m = self.g.cur;
-                let (Some(f), _) = self.g.mods[m].funcs.get("thread_main").copied()? else { return Some(ERR) };
+                let target = match name { "__entry" => "thread_main", "__entry_map" => "map_main", _ => "build_main" };
+                let (Some(f), _) = self.g.mods[m].funcs.get(target).copied()? else { return Some(ERR) };
                 let full = self.g.instantiate_fn(f, m, targs, self.diags);
                 *e.res.borrow_mut() = Res::Func(full);
                 self.g.types.intern(Kind::Pointer(U8))
@@ -2596,7 +2627,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if args.len() != 1 {
                     return Some(self.err("E0106", span, "`cast[T](x)` converts 1 value"));
                 }
-                let from = self.expr(&args[0], None);
+                // `cast[*u8](cmp)`: a function handed to C as a callback.
+                let from = match self.callback(&args[0]) {
+                    Some(t) => t,
+                    None => self.expr(&args[0], None),
+                };
                 let Some(t) = t else { return Some(ERR) };
                 let word = |g: &Types, x: Ty| g.is_ptr(x) || x == INT || x == U64;
                 if from != ERR && (!word(&self.g.types, from) || !word(&self.g.types, t)) {
@@ -2900,7 +2935,20 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let entry = target.and_then(|m| self.g.mods[m].funcs.get(name).copied().map(|f| (m, f)));
         let Some((m, (generic, public))) = entry else {
             if module.is_none() || target.is_some() {
-                self.diags.push(Diag::new("E0101", span, format!("unknown function `{name}`")));
+                // The name may live in an imported module: say how to reach it.
+                let cur = self.g.cur;
+                let mut hint = None;
+                if module.is_none() {
+                    let mut aliases: Vec<(&String, &usize)> = self.g.mods[cur].imports.iter().collect();
+                    aliases.sort();
+                    hint = aliases.into_iter().find(|(_, m)| self.g.mods[**m].funcs.get(name).is_some_and(|f| f.1)).map(|(a, _)| a.clone());
+                }
+                let mut d = Diag::new("E0101", span, format!("unknown function `{name}`"));
+                if let Some(alias) = hint {
+                    d = Diag::new("E0101", span, format!("unknown function `{name}`; it is in module `{alias}`")).fix(Span { end: span.start, ..span }, format!("{alias}."), format!("write `{alias}.{name}`"));
+                    self.g.mods[cur].used.insert(alias);
+                }
+                self.diags.push(d);
             }
             for (i, a) in args.iter().enumerate() {
                 if !(i == 0 && first.is_some()) {
@@ -3222,7 +3270,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
                 let before = self.moved.clone();
                 self.scopes.push(HashMap::new());
-                if let Some((n, sp)) = binder {
+                if let Some((n, sp)) = binder.as_ref().filter(|b| b.0 != "_") {
                     match err {
                         Some(et) => self.declare(n, et, false, *sp, *sp),
                         None => {
@@ -3235,6 +3283,16 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     }
                 }
                 let ends = self.block(b);
+                if let Some((n, sp)) = binder.as_ref().filter(|b| b.0 != "_") {
+                    // An unused error name: `_` says so, and `claw fix` can write it.
+                    if let Some(v) = self.scopes.last_mut().unwrap().get_mut(n) {
+                        if !v.read {
+                            v.read = true;
+                            let d = Diag::new("E0105", *sp, format!("`{n}` is never read")).fix(*sp, "_", format!("rename `{n}` to `_`"));
+                            self.diags.push(d);
+                        }
+                    }
+                }
                 self.pop_scope();
                 self.moved = before;
                 if !ends {

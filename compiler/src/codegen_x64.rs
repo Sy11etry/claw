@@ -36,6 +36,8 @@ const ALLOC_COUNT: u64 = BUF_CAP + 16;
 const FREE_COUNT: u64 = BUF_CAP + 24;
 /// Words shared with the contract guard and the memory checker.
 const STATE: u64 = BUF_CAP + 32;
+/// One word after the runtime's state: held while one thread builds output text.
+const BUF_LOCK: u64 = STATE + STATE_SIZE;
 const STATE_SIZE: u64 = 128;
 const SITE_WORD: u64 = 8;
 
@@ -1473,6 +1475,18 @@ impl Gen {
                 self.ld(RSI, *n);
                 self.call_to(Target::BufStr);
             }
+            Inst::BufLock => {
+                self.lea_bss(RAX, BUF_LOCK);
+                let spin = self.c.len();
+                mov_ri32(&mut self.c, RCX, 1);
+                self.c.extend_from_slice(&[0x87, 0x08]); // xchg [rax], ecx
+                test(&mut self.c, RCX, RCX);
+                self.jcc_back(Cond::Ne, spin);
+            }
+            Inst::BufUnlock => {
+                self.lea_bss(RAX, BUF_LOCK);
+                mov_mi(&mut self.c, at(RAX, 0), 0);
+            }
             Inst::CaptureStart => {
                 self.lea_bss(RAX, CAPTURE_FLAG);
                 mov_mi(&mut self.c, at(RAX, 0), 1);
@@ -1886,6 +1900,10 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     let entry = g.here();
     symbols.push(("___claw_entry".to_string(), entry));
     g.prologue(&[]);
+    // `os.args()` reads argc and argv from the last two words of the runtime state.
+    g.lea_bss(RAX, STATE + 112);
+    mov(&mut g.c, at(RAX, 0), RDI);
+    mov(&mut g.c, at(RAX, 8), RSI);
     g.call_to(Target::User(m.main));
     if let Some(c) = m.check {
         g.call_to(Target::User(c.finish));
@@ -1907,11 +1925,15 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         }
         symbols.push((format!("_{}", f.name), g.here()));
         g.func(f, (fmt64, fmt32));
-        if f.name.starts_with("par.thread_main") {
+        if f.c_abi {
+            // Up to six integer arguments arrive in rdi, rsi, rdx, rcx, r8, r9; Claw wants them on the stack.
+            let n = f.nparams.min(6) as i32;
             shims[id] = Some(g.here());
             g.prologue(&[]);
-            alu_i(&mut g.c, Alu::Sub, reg(RSP), 16);
-            mov(&mut g.c, at(RSP, 0), RDI);
+            alu_i(&mut g.c, Alu::Sub, reg(RSP), ((n.max(1) * 8 + 15) / 16 * 16) as i32);
+            for (i, r) in [RDI, RSI, RDX, RCX, R8, R9].into_iter().take(n as usize).enumerate() {
+                mov(&mut g.c, at(RSP, i as i32 * 8), r);
+            }
             g.call_to(Target::User(id));
             lea(&mut g.c, RSP, at(RBP, 0));
             g.epilogue(&[]);
@@ -1952,7 +1974,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         imports,
         symbols,
         entry,
-        bss_size: STATE + STATE_SIZE,
+        bss_size: STATE + STATE_SIZE + 8,
         lines: g.lines,
     })
 }

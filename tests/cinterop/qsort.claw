@@ -1,0 +1,26 @@
+// expect: 1
+// expect: 2
+// expect: 5
+// expect: 7
+// expect: 9
+use c "stdlib.h"
+
+claw fn cmp(a *u8, b *u8) i32 {
+    x := *cast[*int](a)
+    y := *cast[*int](b)
+    if x < y { ret -1 }
+    if x > y { ret 1 }
+    ret 0
+}
+
+claw fn main() {
+    p := alloc[int](5)
+    defer free(p)
+    p[0] = 5
+    p[1] = 2
+    p[2] = 9
+    p[3] = 1
+    p[4] = 7
+    qsort(cast[*u8](p), 5, 8, cast[*u8](cmp))
+    for i in 0..5 { print(p[i]) }
+}

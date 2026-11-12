@@ -195,8 +195,15 @@ pub fn format(src: &str) -> Result<String, Vec<Diag>> {
     let mut blank_pending = false;
     let mut wrote_any = false;
 
-    for raw in src.split('\n') {
+    for (n, raw) in src.split('\n').enumerate() {
         let raw = raw.trim_end_matches('\r');
+        // The `#!` line of a script is for the shell: keep it as it is.
+        if n == 0 && raw.starts_with("#!") {
+            out.push_str(raw.trim_end());
+            out.push('\n');
+            wrote_any = true;
+            continue;
+        }
         if raw.trim().is_empty() {
             blank_pending = wrote_any;
             continue;

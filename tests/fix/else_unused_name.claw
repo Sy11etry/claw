@@ -1,0 +1,13 @@
+type E = Bad
+
+fn f(x int) int ! E {
+    if x < 0 { fail Bad }
+    ret x
+}
+
+fn main() {
+    a := f(-1) else err {
+        ret
+    }
+    print(a)
+}

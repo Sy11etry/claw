@@ -526,6 +526,9 @@ pub fn golden() -> Vec<(u32, String)> {
     let s = |w: u32, t: &str| (w, t.to_string());
     vec![
         s(movz(X0, 42, 0), "movz x0, #42"),
+        s(ldaxr_w(X10, X9), "ldaxr w10, [x9]"),
+        s(stxr_w(X16, X10, X9), "stxr w16, w10, [x9]"),
+        s(stlr_w(XZR, X9), "stlr wzr, [x9]"),
         s(movz(X9, 0xBEEF, 1), "movz x9, #48879, lsl #16"),
         s(movk(X9, 0x1234, 3), "movk x9, #4660, lsl #48"),
         s(movn(X10, 7, 0), "movn x10, #7"),
@@ -706,4 +709,17 @@ pub fn golden() -> Vec<(u32, String)> {
         (vsmov_s(X9, 16, 2), "smov x9, v16.s[2]"),
     ].into_iter().map(|(w, t)| (w, t.to_string())))
     .collect()
+}
+
+/// `ldaxr wt, [xn]`: load 32 bits, acquire, exclusive.
+pub fn ldaxr_w(rt: Reg, rn: Reg) -> u32 {
+    0x885F_FC00 | (rn << 5) | rt
+}
+/// `stxr ws, wt, [xn]`: store 32 bits if still exclusive; `ws` is 0 on success.
+pub fn stxr_w(rs: Reg, rt: Reg, rn: Reg) -> u32 {
+    0x8800_7C00 | (rs << 16) | (rn << 5) | rt
+}
+/// `stlr wt, [xn]`: store 32 bits, release.
+pub fn stlr_w(rt: Reg, rn: Reg) -> u32 {
+    0x889F_FC00 | (rn << 5) | rt
 }
