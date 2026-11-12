@@ -1,0 +1,57 @@
+// expect: 11
+// expect: 7
+// expect: 25
+// expect: 12
+// expect: 58
+claw fn add2(a f64x2, b f64x2) f64x2 {
+    ret a + b
+}
+
+claw fn scale(k f64, v f64x2) f64x2 {
+    ret f64x2(k) * v
+}
+
+claw fn dot(a f64x2, b f64x2) f64 {
+    p := a * b
+    ret lane(p, 0) + lane(p, 1)
+}
+
+claw fn mix(a i32x4, n int, b i32x4, x f64) i32x4 {
+    ret a * b + i32x4(i32(n)) + i32x4(i32(x))
+}
+
+// More live vectors than registers around a call: they must survive in the frame.
+claw fn crowd(a f64x2) f64 {
+    b := a + f64x2(1.0)
+    c := b * f64x2(2.0)
+    d := add2(c, a)
+    e := scale(3.0, d)
+    f := add2(e, b)
+    ret lane(a, 0) + lane(b, 1) + lane(c, 0) + lane(d, 1) + lane(e, 0) + lane(f, 1)
+}
+
+claw fn id(v f64x2) f64x2 {
+    ret v
+}
+
+claw fn main_simd() {
+    p := alloc[f64](4)
+    defer free(p)
+    p[0] = 1.0
+    p[1] = 2.0
+    p[2] = 3.0
+    p[3] = 4.0
+    x := vload(p)
+    y := vload(p + 2)
+    s := add2(x, y)                    // 4, 6
+    print(lane(s, 0) + lane(s, 1) + 1.0) // 11
+    print(dot(x, y) - 4.0)              // 3 + 8 - 4 = 7
+    print(lane(scale(5.0, id(y)), 0) + lane(id(scale(5.0, x)), 1))   // 15 + 10
+    iv := mix(i32x4(2), 3, i32x4(4), 0.0)  // 2 * 4 + 3 = 11
+    print(int(lane(iv, 3)) + 1)          // 12
+    print(crowd(x))
+}
+
+fn main() {
+    main_simd()
+}

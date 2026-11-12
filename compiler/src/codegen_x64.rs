@@ -1212,7 +1212,7 @@ impl Gen {
                 }
                 self.fst(*d, 0, *to_bits);
             }
-            Inst::Call { d, f, args } => {
+            Inst::Call { d, f, args, .. } => {
                 for (n, a) in args.iter().enumerate() {
                     self.store_arg(n, *a);
                 }
@@ -1653,7 +1653,7 @@ impl Gen {
 }
 
 pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<ObjectX64, String> {
-    if m.funcs.iter().filter(|f| !f.dead).any(|f| f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VStore { .. } | Inst::VLane { .. })))) {
+    if m.funcs.iter().filter(|f| !f.dead).any(|f| f.vsig != 0 || f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VBin { .. } | Inst::VFma { .. } | Inst::VNeg { .. } | Inst::VSplat { .. } | Inst::VLoad { .. } | Inst::VStore { .. } | Inst::VLane { .. })))) {
         return Err("E0907 SIMD vectors are not available on x86_64 yet; build for arm64".to_string());
     }
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();

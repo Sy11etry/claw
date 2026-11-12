@@ -310,7 +310,9 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
     } else {
         l.finish(Term::Unreachable);
     }
-    l.into_func(full.to_string(), nparams)
+    let mut func = l.into_func(full.to_string(), nparams);
+    func.vsig = c.types.vsig(&sig.params, sig.ret, c.types.is_aggregate(sig.ret));
+    func
 }
 
 fn build_synth<'a>(kind: JobKind, ty: Ty, env: &Env<'a, '_>) -> Func {
@@ -390,7 +392,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let text = self.place_text(s);
         self.emit(Inst::StrAddr { d: site, text });
         let n = self.constant(size as i64);
-        self.emit(Inst::Call { d: None, f: self.ids["__check.access"], args: vec![addr, n, site] });
+        self.emit(Inst::Call { d: None, f: self.ids["__check.access"], args: vec![addr, n, site], vsig: 0 });
     }
 
     /// Does this assignment target or read land in memory only a `claw fn` can get wrong?
@@ -680,7 +682,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let zeros: Vec<Inst> = self.all_flags.iter().map(|d| Inst::Const { d: *d, v: 0 }).collect();
         blocks[0].insts.splice(0..0, zeros);
         let params = (0..nparams as VReg).collect();
-        Func { name, nparams, params, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
+        Func { name, nparams, params, vsig: 0, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
     }
 
     /// A new liveness flag, set right away.
@@ -699,12 +701,12 @@ impl<'a, 'i> FnLower<'a, 'i> {
 
     fn drop_now(&mut self, addr: VReg, ty: Ty) {
         let f = self.synth.borrow_mut().id(JobKind::Drop, ty);
-        self.emit(Inst::Call { d: None, f, args: vec![addr] });
+        self.emit(Inst::Call { d: None, f, args: vec![addr], vsig: 0 });
     }
 
     fn copy_into(&mut self, dst: VReg, src: VReg, ty: Ty) {
         let f = self.synth.borrow_mut().id(JobKind::Copy, ty);
-        self.emit(Inst::Call { d: None, f, args: vec![dst, src] });
+        self.emit(Inst::Call { d: None, f, args: vec![dst, src], vsig: 0 });
     }
 
     /// A local takes ownership; it goes in the block around the current statement.
@@ -812,14 +814,14 @@ impl<'a, 'i> FnLower<'a, 'i> {
             }
             Kind::Struct(id) => {
                 if let Some(full) = self.t().user_drop.get(&ty) {
-                    self.emit(Inst::Call { d: None, f: self.ids[full], args: vec![v] });
+                    self.emit(Inst::Call { d: None, f: self.ids[full], args: vec![v], vsig: 0 });
                 }
                 let fields = self.t().structs[id].fields.clone();
                 self.drop_fields(v, &fields);
             }
             Kind::Enum(id) => {
                 if let Some(full) = self.t().user_drop.get(&ty) {
-                    self.emit(Inst::Call { d: None, f: self.ids[full], args: vec![v] });
+                    self.emit(Inst::Call { d: None, f: self.ids[full], args: vec![v], vsig: 0 });
                 }
                 let tag = self.load_tag(v);
                 let variants = self.t().enums[id].variants.clone();
@@ -1901,7 +1903,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
     fn compare_str(&mut self, op: BinOp, a: VReg, b: VReg) -> VReg {
         let d = self.vreg();
         if matches!(op, BinOp::Eq | BinOp::Ne) {
-            self.emit(Inst::Call { d: Some(d), f: self.ids["core.str_eq"], args: vec![a, b] });
+            self.emit(Inst::Call { d: Some(d), f: self.ids["core.str_eq"], args: vec![a, b], vsig: 0 });
             if op == BinOp::Eq {
                 return d;
             }
@@ -1909,7 +1911,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
             self.emit(Inst::BoolNot { d: n, s: d });
             return n;
         }
-        self.emit(Inst::Call { d: Some(d), f: self.ids["core.str_cmp"], args: vec![a, b] });
+        self.emit(Inst::Call { d: Some(d), f: self.ids["core.str_cmp"], args: vec![a, b], vsig: 0 });
         let zero = self.constant(0);
         let r = self.vreg();
         self.emit(Inst::Cmp { cc: cc(op), d: r, a: d, b: zero, unsigned: false });
@@ -2040,7 +2042,8 @@ impl<'a, 'i> FnLower<'a, 'i> {
         }
         self.check_needs(&full, &vals[sret.is_some() as usize..], e.span);
         let d = if ty == VOID || aggregate { None } else { Some(self.vreg()) };
-        self.emit(Inst::Call { d, f: self.ids[&full], args: vals });
+        let vsig = self.t().vsig(&sig.params, sig.ret, sret.is_some());
+        self.emit(Inst::Call { d, f: self.ids[&full], args: vals, vsig });
         if aggregate {
             sret
         } else {

@@ -1,5 +1,5 @@
-// error: E0906
-claw fn twice(v f64x2) f64x2 {
+// error: E0905
+fn twice(v f64x2) f64x2 {
     ret v + v
 }
 

@@ -1089,7 +1089,7 @@ fn rotate_loops(f: &mut Func) {
 }
 
 fn placeholder() -> Func {
-    Func { name: String::new(), nparams: 0, params: Vec::new(), claw: false, optimized: false, dead: true, nvregs: 0, objects: Vec::new(), blocks: Vec::new() }
+    Func { name: String::new(), nparams: 0, params: Vec::new(), vsig: 0, claw: false, optimized: false, dead: true, nvregs: 0, objects: Vec::new(), blocks: Vec::new() }
 }
 
 /// Functions nothing can reach get no code at all.

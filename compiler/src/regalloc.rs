@@ -102,9 +102,28 @@ fn classes(f: &Func) -> (Vec<bool>, Vec<bool>) {
     }
     let mut float = vec![false; n];
     let mut vecs = vec![false; n];
+    // Vectors that cross a call boundary are known only from the signatures.
+    for (k, p) in f.params.iter().enumerate().take(8) {
+        if f.vsig >> k & 1 != 0 {
+            vecs[*p as usize] = true;
+        }
+    }
     for b in &f.blocks {
+        if let (Term::Ret(Some(v)), true) = (&b.term, f.vsig >> 8 & 1 != 0) {
+            vecs[*v as usize] = true;
+        }
         for i in &b.insts {
             match i {
+                Inst::Call { d, args, vsig, .. } => {
+                    for (k, a) in args.iter().enumerate().take(8) {
+                        if vsig >> k & 1 != 0 {
+                            vecs[*a as usize] = true;
+                        }
+                    }
+                    if let (Some(d), true) = (d, vsig >> 8 & 1 != 0) {
+                        vecs[*d as usize] = true;
+                    }
+                }
                 Inst::Mov { d, s } | Inst::Pi { d, s, .. } => {
                     let (a, c) = (root(&mut parent, *d), root(&mut parent, *s));
                     parent[a as usize] = c;

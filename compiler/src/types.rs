@@ -243,6 +243,21 @@ impl Types {
         matches!(self.kind(t), Kind::Vec(_))
     }
 
+    /// The vector bits of a signature as `Func::vsig` and `Inst::Call::vsig` want them; an
+    /// aggregate result adds a hidden first parameter, so the real parameters move up one.
+    pub fn vsig(&self, params: &[Ty], ret: Ty, sret: bool) -> u16 {
+        let mut m = 0u16;
+        for (i, p) in params.iter().enumerate() {
+            if self.is_vec(*p) {
+                m |= 1 << (i + sret as usize).min(15);
+            }
+        }
+        if self.is_vec(ret) {
+            m |= 1 << 8;
+        }
+        m
+    }
+
     /// Whether a SIMD value is, or sits inside, `t`.
     pub fn holds_vec(&self, t: Ty) -> bool {
         self.holds_vec_seen(t, &mut Vec::new())

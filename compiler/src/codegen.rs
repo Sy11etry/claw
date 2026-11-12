@@ -183,7 +183,13 @@ impl Trap {
 enum Pending {
     B(usize, BlockId),
     Cond(usize, BlockId),
+    /// `tbz`/`tbnz`: only 14 bits of reach, so used just in small functions.
+    Bit(usize, BlockId),
 }
+
+/// Functions with at most this many instructions and blocks cannot be big enough
+/// (64 words per instruction is far above the worst expansion) for 14 bits to miss.
+const BIT_BRANCH_MAX_INSTS: usize = 100;
 
 struct Frame {
     /// Which values are 128-bit vectors (empty when the function uses none).
@@ -346,6 +352,49 @@ impl Gen {
         match f.place(v) {
             Place::Const(c) if (0..4096).contains(&c) => Some(c as u32),
             _ => None,
+        }
+    }
+
+    /// The block ends in `t = x & 2^k; c = t ==/!= 0; br c` with nothing else using `t` or `c`:
+    /// returns `(x, k, true when equal to zero)`.
+    fn bit_test(fr: &Frame, b: &Block, uses: &[u32]) -> Option<(VReg, u32, bool)> {
+        let Term::Br { c, .. } = b.term else { return None };
+        let n = b.insts.len();
+        if n < 2 {
+            return None;
+        }
+        let (Inst::Bin { op: Arith::And, d: t, a: x, b: m, .. }, Inst::Cmp { cc, d: cd, a: ca, b: z, .. }) = (&b.insts[n - 2], &b.insts[n - 1]) else { return None };
+        if *cd != c || ca != t || uses[c as usize] != 1 || uses[*t as usize] != 1 || Self::const_of(fr, *z) != Some(0) {
+            return None;
+        }
+        let mask = Self::const_of(fr, *m)? as u64;
+        if !mask.is_power_of_two() || !matches!(cc, Cc::Eq | Cc::Ne) {
+            return None;
+        }
+        Some((*x, mask.trailing_zeros(), matches!(cc, Cc::Eq)))
+    }
+
+    /// `(the other operand, k)` when one side of a 64-bit multiply is a constant worth a shift:
+    /// 2^n always, 2^n + 1 only where wrapping is allowed, and 3 in the checked case.
+    fn mul_by_const(fr: &Frame, num: &Num, a: VReg, b: VReg) -> Option<(VReg, i64)> {
+        if num.bits != 64 {
+            return None;
+        }
+        let (x, k) = match (Self::const_of(fr, a), Self::const_of(fr, b)) {
+            (_, Some(k)) => (a, k),
+            (Some(k), None) => (b, k),
+            _ => return None,
+        };
+        if !(2..=(1 << 30)).contains(&k) {
+            return None;
+        }
+        let wrap = !num.checked || !num.signed;
+        let pow2 = (k as u64).is_power_of_two();
+        let plus1 = ((k - 1) as u64).is_power_of_two();
+        if (wrap && (pow2 || plus1)) || (!wrap && (pow2 || k == 3)) {
+            Some((x, k))
+        } else {
+            None
         }
     }
 
@@ -769,9 +818,15 @@ impl Gen {
             self.e(sub_imm(SP, SP, size & 0xFFF));
         }
         self.save_regs(&fr, false);
+        // Vectors arrive in v0-v7; they go first, before a float parameter's home can overwrite one.
+        for (i, p) in f.params.iter().enumerate().take(8) {
+            if f.vsig >> i & 1 != 0 {
+                self.vdone(&fr, i as Reg, *p);
+            }
+        }
         for (i, p) in f.params.iter().enumerate() {
             let i = i as u32;
-            if fr.place(*p) == Place::None {
+            if fr.place(*p) == Place::None || (i < 8 && f.vsig >> i & 1 != 0) {
                 continue;
             }
             if i < 8 {
@@ -802,14 +857,18 @@ impl Gen {
             }
         }
 
+        let small = f.blocks.iter().map(|b| b.insts.len() + 1).sum::<usize>() <= BIT_BRANCH_MAX_INSTS;
         for (idx, b) in f.blocks.iter().enumerate() {
             block_pos[idx] = self.here();
+            // `x & (1 << k)` compared with 0 and branched on: one `tbz`/`tbnz` on bit k.
+            let bit = if f.optimized && small { Self::bit_test(&fr, b, &uses) } else { None };
             // A comparison used only by the branch right after it needs no 0-or-1 value.
-            let fused = match (&b.term, b.insts.last()) {
-                (Term::Br { c, .. }, Some(Inst::Cmp { d, .. } | Inst::FCmp { d, .. })) if f.optimized && c == d && uses[*c as usize] == 1 => true,
-                _ => false,
-            };
-            let count = b.insts.len() - fused as usize;
+            let fused = bit.is_none()
+                && match (&b.term, b.insts.last()) {
+                    (Term::Br { c, .. }, Some(Inst::Cmp { d, .. } | Inst::FCmp { d, .. })) if f.optimized && c == d && uses[*c as usize] == 1 => true,
+                    _ => false,
+                };
+            let count = b.insts.len() - fused as usize - if bit.is_some() { 2 } else { 0 };
             let mut k = 0;
             while k < count {
                 // `a[i]` loaded or stored at once: the address never needs a register.
@@ -821,6 +880,23 @@ impl Gen {
                 k += 1;
             }
             let next = idx + 1;
+            if let Some((x, k, eq)) = bit {
+                let Term::Br { t, f: fb, .. } = b.term else { unreachable!() };
+                let r = self.use_x(&fr, x, X9);
+                // `eq`: the branch is taken to `t` when the bit is clear.
+                if t == next {
+                    pending.push(Pending::Bit(self.here(), fb));
+                    self.e(if eq { tbnz(r, k, 0) } else { tbz(r, k, 0) });
+                } else {
+                    pending.push(Pending::Bit(self.here(), t));
+                    self.e(if eq { tbz(r, k, 0) } else { tbnz(r, k, 0) });
+                    if fb != next {
+                        pending.push(Pending::B(self.here(), fb));
+                        self.e(B);
+                    }
+                }
+                continue;
+            }
             if fused {
                 let Term::Br { t, f: fb, .. } = b.term else { unreachable!() };
                 let cond = match b.insts.last() {
@@ -871,7 +947,14 @@ impl Gen {
                 }
                 Term::Ret(v) => {
                     if let Some(v) = v {
-                        self.load(&fr, X0, *v);
+                        if f.vsig >> 8 & 1 != 0 {
+                            let r = self.vuse(&fr, *v, V0);
+                            if r != V0 {
+                                self.e(mov_v(V0, r));
+                            }
+                        } else {
+                            self.load(&fr, X0, *v);
+                        }
                     }
                     self.save_regs(&fr, true);
                     self.e(mov_sp(SP, FP));
@@ -886,6 +969,16 @@ impl Gen {
             let (at, target, is_cond) = match p {
                 Pending::B(at, t) => (at, t, false),
                 Pending::Cond(at, t) => (at, t, true),
+                Pending::Bit(at, t) => {
+                    let disp = block_pos[t] as i64 - at as i64;
+                    if !(-(1 << 13)..(1 << 13)).contains(&disp) {
+                        // Cannot happen under BIT_BRANCH_MAX_INSTS; refuse rather than miscompile.
+                        self.too_large = Some(f.name.clone());
+                    } else {
+                        self.code[at] |= (disp as u32 & 0x3FFF) << 5;
+                    }
+                    continue;
+                }
             };
             let disp = block_pos[target] as i64 - at as i64;
             if is_cond {
@@ -1047,6 +1140,38 @@ impl Gen {
                     self.load(fr, r, *s);
                     self.done_x(fr, r, *d);
                 }
+            }
+            // 64-bit `x * k` with a constant k: shifts and adds, no `smulh`.
+            Inst::Bin { op: Arith::Mul, d, a, b, num, loc } if Self::mul_by_const(fr, num, *a, *b).is_some() => {
+                let (x, k) = Self::mul_by_const(fr, num, *a, *b).unwrap();
+                let rx = self.use_x(fr, x, X9);
+                let rd = self.def_x(fr, *d, X11);
+                let n = (k as u64).trailing_zeros();
+                let wrap = !num.checked || !num.signed;
+                if wrap {
+                    if (k as u64).is_power_of_two() {
+                        self.e(lsl_imm(rd, rx, n));
+                    } else {
+                        // 2^n + 1
+                        self.e(add_lsl(rd, rx, rx, ((k - 1) as u64).trailing_zeros()));
+                    }
+                } else if k == 2 {
+                    self.e(adds(rd, rx, rx));
+                    self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                } else if k == 3 {
+                    // 2x overflows only if 3x does, and 2x + x is the 3x that must fit.
+                    self.e(adds(X12, rx, rx));
+                    self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                    self.e(adds(rd, X12, rx));
+                    self.trap_if(Cond::Vs, Trap::Overflow, *loc, traps);
+                } else {
+                    // Shifting back must give x again.
+                    self.e(lsl_imm(X12, rx, n));
+                    self.e(cmp_asr(rx, X12, n));
+                    self.trap_if(Cond::Ne, Trap::Overflow, *loc, traps);
+                    self.e(mov(rd, X12));
+                }
+                self.done_x(fr, rd, *d);
             }
             Inst::Bin { op, d, a, b, num, loc } => {
                 let ra = self.use_x(fr, *a, X9);
@@ -1277,17 +1402,28 @@ impl Gen {
                 self.e(if *to_bits == 64 { fcvt_s_to_d(D0, D0) } else { fcvt_d_to_s(D0, D0) });
                 self.fstore(fr, D0, *d, *to_bits);
             }
-            Inst::Call { d, f, args } => {
+            Inst::Call { d, f, args, vsig } => {
                 for (n, a) in args.iter().enumerate().skip(8) {
                     self.load(fr, X9, *a);
                     self.e(str(X9, SP, (n as u32 - 8) * 8));
                 }
                 for (n, a) in args.iter().enumerate().take(8) {
-                    self.load(fr, n as Reg, *a);
+                    if vsig >> n & 1 != 0 {
+                        let r = self.vuse(fr, *a, n as Reg);
+                        if r != n as Reg {
+                            self.e(mov_v(n as Reg, r));
+                        }
+                    } else {
+                        self.load(fr, n as Reg, *a);
+                    }
                 }
                 self.call(BL, Target::User(*f));
                 if let Some(d) = d {
-                    self.store(fr, X0, *d);
+                    if vsig >> 8 & 1 != 0 {
+                        self.vdone(fr, V0, *d);
+                    } else {
+                        self.store(fr, X0, *d);
+                    }
                 }
             }
             Inst::CallInd { d, callee, args } => {

@@ -1,0 +1,7 @@
+// error: E0906
+claw fn late(a int, b int, c int, d int, e int, f int, g int, h int, v f64x2) f64 {
+    ret lane(v, 0) + f64(a + b + c + d + e + f + g + h)
+}
+
+fn main() {
+}

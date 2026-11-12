@@ -111,7 +111,8 @@ pub enum Inst {
     IntToFloat { d: VReg, s: VReg, signed: bool, bits: u8 },
     FloatToInt { d: VReg, s: VReg, bits: u8, to: Num, loc: Loc },
     FloatCast { d: VReg, s: VReg, to_bits: u8 },
-    Call { d: Option<VReg>, f: FuncId, args: Vec<VReg> },
+    /// `vsig`: bit i (i < 8) says argument i is a 128-bit vector, bit 8 says the result is one.
+    Call { d: Option<VReg>, f: FuncId, args: Vec<VReg>, vsig: u16 },
     /// A call through a function value.
     CallInd { d: Option<VReg>, callee: VReg, args: Vec<VReg> },
     /// A function as a value.
@@ -199,6 +200,8 @@ pub struct Func {
     pub nparams: usize,
     /// The registers holding the parameters, in order.
     pub params: Vec<VReg>,
+    /// Which parameters (bit i, i < 8) and whether the result (bit 8) are 128-bit vectors.
+    pub vsig: u16,
     /// Written as `claw fn`: raw pointers may alias anything.
     pub claw: bool,
     /// Registers were allocated rather than every value living on the stack.

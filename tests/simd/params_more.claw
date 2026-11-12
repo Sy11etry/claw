@@ -1,0 +1,52 @@
+// expect: 25
+// expect: 40
+// expect: 20
+// expect: 0.5
+// expect: 6
+type Pair { x f64, y f64 }
+
+claw fn rec(v f64x2, n int) f64x2 {
+    if n == 0 { ret v }
+    ret rec(v + f64x2(1.0), n - 1)
+}
+
+claw fn add2(a f64x2, b f64x2) f64x2 {
+    ret a + b
+}
+
+claw fn seven(a int, b int, c int, d int, e int, f int, v f64x2) f64 {
+    ret lane(v, 1) + f64(a + b + c + d + e + f)
+}
+
+claw fn to_pair(v f64x2) Pair {
+    ret Pair{lane(v, 0), lane(v, 1)}
+}
+
+claw fn halve(p Pair, v f32x4) f32x4 {
+    ret v * f32x4(f32(p.x))
+}
+
+claw fn main_simd() {
+    base := f64x2(1.0)
+    r := rec(base, 24)                 // 25, 25
+    print(lane(r, 0))
+    mut acc := f64x2(0.0)
+    p := alloc[f64](2)
+    defer free(p)
+    p[0] = 1.0
+    p[1] = 3.0
+    v := vload(p)
+    for i in 0..5 {
+        acc = add2(acc, v * f64x2(f64(i)))  // sum i = 10: 10, 30
+    }
+    print(lane(acc, 0) + lane(acc, 1))     // 40
+    print(seven(1, 2, 3, 4, 5, 6, v) - 4.0)  // 3 + 21 - 4
+    q := to_pair(v)
+    print(q.x + q.y - 3.5)               // 4 - 3.5
+    w := halve(Pair{0.5, 0.0}, f32x4(3.0))
+    print(f64(lane(w, 2)) * 4.0)         // 6
+}
+
+fn main() {
+    main_simd()
+}

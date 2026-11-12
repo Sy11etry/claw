@@ -505,7 +505,7 @@ impl<'a> Global<'a> {
         self.cur = saved_cur;
         let params: Vec<Ty> = params;
         if params.iter().any(|t| self.types.holds_vec(*t)) || self.types.holds_vec(ret) {
-            diags.push(Diag::new("E0906", f.name_span, "a SIMD value cannot be a parameter or a result, also not through a template argument"));
+            diags.push(Diag::new("E0906", f.name_span, "a SIMD value cannot be a template argument"));
         }
         let own = f.params.iter().map(|p| p.own).collect();
         let has_need = f.contracts.iter().any(|c| !c.sure);
@@ -884,8 +884,13 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
                 diags.push(Diag::new("E0140", span, "pointers only exist inside `claw fn`").suggest(Span { start: f.name_span.start.saturating_sub(3), end: f.name_span.start.saturating_sub(3), ..f.name_span }, "claw ", "make it a `claw fn`"));
             }
         }
-        if let Some(span) = f.params.iter().zip(&params).find(|(_, t)| g.types.holds_vec(**t)).map(|(x, _)| x.span).or(if g.types.holds_vec(ret) { Some(f.name_span) } else { None }) {
-            diags.push(Diag::new("E0906", span, "a SIMD value cannot be a parameter or a result; pass a pointer to its lanes and use `vload`/`vstore`"));
+        // A vector parameter or result travels in a vector register: `claw fn` only, the first eight parameters.
+        let shift = g.types.is_aggregate(ret) as usize;
+        let bad_vec = f.params.iter().zip(&params).enumerate().find(|(i, (_, t))| g.types.holds_vec(**t) && (!g.types.is_vec(**t) || *i + shift >= 8)).map(|(_, (x, _))| x.span);
+        if let Some(span) = bad_vec.or(if g.types.holds_vec(ret) && !g.types.is_vec(ret) { Some(f.name_span) } else { None }) {
+            diags.push(Diag::new("E0906", span, "a SIMD value can be a parameter (among the first eight) or a result, but not part of another type"));
+        } else if !f.claw && (params.iter().any(|t| g.types.is_vec(*t)) || g.types.is_vec(ret)) {
+            diags.push(Diag::new("E0905", f.name_span, "SIMD vectors only exist inside `claw fn`"));
         }
         g.mods[g.cur].funcs.insert(f.name.clone(), (None, f.public));
         let own = f.params.iter().map(|p| p.own).collect();

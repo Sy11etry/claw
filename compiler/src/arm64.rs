@@ -498,6 +498,13 @@ pub fn cbz(rt: Reg, disp: i32) -> u32 {
 pub fn cbnz(rt: Reg, disp: i32) -> u32 {
     0xB500_0000 | ((disp as u32 & 0x7FFFF) << 5) | rt
 }
+/// Branch if bit `bit` of `rt` is zero; `disp` counts instructions and must fit 14 bits.
+pub fn tbz(rt: Reg, bit: u32, disp: i32) -> u32 {
+    0x3600_0000 | ((bit >> 5) << 31) | ((bit & 31) << 19) | ((disp as u32 & 0x3FFF) << 5) | rt
+}
+pub fn tbnz(rt: Reg, bit: u32, disp: i32) -> u32 {
+    0x3700_0000 | ((bit >> 5) << 31) | ((bit & 31) << 19) | ((disp as u32 & 0x3FFF) << 5) | rt
+}
 pub fn br(rn: Reg) -> u32 {
     0xD61F_0000 | (rn << 5)
 }
@@ -587,6 +594,10 @@ pub fn golden() -> Vec<(u32, String)> {
         s(b_cond(Cond::Vc, 4), "b.vc #16"),
         s(cbz(X9, 3), "cbz x9, #12"),
         s(cbnz(X9, -3), "cbnz x9, #-12"),
+        s(tbz(X9, 0, 4), "tbz x9, #0, #16"),
+        s(tbnz(X2, 7, -2), "tbnz x2, #7, #-8"),
+        s(tbz(X11, 40, 3), "tbz x11, #40, #12"),
+        s(tbnz(X0, 63, 100), "tbnz x0, #63, #400"),
         s(br(X16), "br x16"),
         s(blr(X16), "blr x16"),
         s(ret(), "ret"),

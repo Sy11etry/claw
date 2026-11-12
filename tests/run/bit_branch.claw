@@ -1,0 +1,63 @@
+// expect: 10
+// expect: 0
+// expect: 5
+// expect: 20
+// expect: 0
+// expect: 5
+// expect: 10
+// expect: 0
+// expect: 5
+// expect: 20
+// expect: 0
+// expect: 5
+// expect: 20
+// expect: 1
+// expect: 6
+// expect: 10
+// expect: 1
+// expect: 6
+// expect: 20
+// expect: 1
+// expect: 6
+// expect: 10
+// expect: 1
+// expect: 5
+// expect: 20
+// expect: 1
+// expect: 5
+// expect: 20
+// expect: 0
+// expect: 5
+// expect: 10
+// expect: 1
+// expect: 6
+// expect: 10
+// expect: 0
+// expect: 6
+// expect: 20
+// expect: 1
+// expect: 5
+// expect: 10
+// expect: 0
+// expect: 5
+fn bit0(x int) int {
+    if x % 2 == 0 { ret 10 }
+    ret 20
+}
+fn bit5(x int) int {
+    if x & 32 != 0 { ret 1 }
+    ret 0
+}
+fn bit62(x int) int {
+    if x & 0x4000000000000000 == 0 { ret 5 }
+    ret 6
+}
+
+fn main() {
+    bs := [0, 1, 2, 3, -1, -2, -3, 32, 33, 31, -32, 4611686018427387904, 4611686018427387903, -9223372036854775808]
+    for b in bs {
+        print(bit0(b))
+        print(bit5(b))
+        print(bit62(b))
+    }
+}

@@ -1,0 +1,10 @@
+// exit: 101
+// stderr: trap: integer overflow
+fn f3(x int) int { ret x * 3 }
+
+fn main() {
+    xs := [3074457345618258603]
+    for x in xs {
+        print(f3(x))
+    }
+}

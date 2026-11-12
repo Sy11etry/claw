@@ -1195,7 +1195,7 @@ impl<'m> Machine<'m> {
                         Inst::FuncAddr { d, f } => r!(*d) = FN_TAG | *f as u64,
                         Inst::Call { .. } | Inst::CallInd { .. } => {
                             let (d, f, args) = match inst {
-                                Inst::Call { d, f, args } => (*d, *f, args),
+                                Inst::Call { d, f, args, .. } => (*d, *f, args),
                                 Inst::CallInd { d, callee, args } => (*d, (r!(*callee) & !FN_TAG) as usize, args),
                                 _ => unreachable!("matched above"),
                             };
@@ -1209,6 +1209,7 @@ impl<'m> Machine<'m> {
                             };
                             for (p, a) in m.funcs[f].params.iter().zip(args) {
                                 self.regs[nb + *p as usize] = self.regs[base + *a as usize];
+                                self.hi[nb + *p as usize] = self.hi[base + *a as usize];
                                 if self.cfg.trace {
                                     self.trace.regs[nb + *p as usize] = self.trace.regs[base + *a as usize];
                                 }
@@ -1423,6 +1424,7 @@ impl<'m> Machine<'m> {
                     }
                     Term::Ret(v) => {
                         let value = v.map(|x| r!(x)).unwrap_or(0);
+                        let value_hi = v.map(|x| self.hi[base + x as usize]).unwrap_or(0);
                         let shadow = if self.cfg.trace { v.map(|x| self.sh(base, x)).unwrap_or(0) } else { 0 };
                         let dest = self.frames[top].ret;
                         self.pop_frame();
@@ -1432,6 +1434,7 @@ impl<'m> Machine<'m> {
                         if let Some(d) = dest {
                             let cb = self.frames.last().expect("checked").base;
                             self.regs[cb + d as usize] = value;
+                            self.hi[cb + d as usize] = value_hi;
                             if self.cfg.trace {
                                 self.trace.regs[cb + d as usize] = shadow;
                             }
