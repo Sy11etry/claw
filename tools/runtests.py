@@ -7,6 +7,7 @@ tests/run/*.claw  compiled and executed. Headers:
     // stderr: <substring>       (repeatable)
 tests/err/*.claw  must be rejected. Header:
     // error: E####              (repeatable; all must appear, nothing else)
+tests/err/<dir>/  a project (claw.pkg, main.claw) rejected after one of its packages changed: PROJECT_CHANGES says how.
 tests/own/*.claw  like run, built with --alloc-stats: allocations must equal frees.
 tests/check/*.claw  like run, but through `claw run`: every contract and the memory checker.
 tests/unit/*.claw  through `claw test --blocks`: the headers describe its report.
@@ -536,6 +537,54 @@ def pkg_test(tmp):
     return None
 
 
+def pkg_lock_test(tmp):
+    """claw.pkg and claw.lock: `claw get` refuses a source that changed (until `--update` takes it), run and build
+    refuse a copy edited by hand, and `claw get --update` puts either one back."""
+    root = tmp / "pkglock"
+    shutil.copytree(ROOT / "tests/pkg", root)
+    app = root / "app"
+    want = headers((app / "main.claw").read_text(), "expect")
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"}
+
+    def in_app(*args):
+        return child([CLAW, *args], cwd=app, capture_output=True, text=True, env=env)
+
+    if in_app("get").returncode != 0:
+        return "claw get failed"
+    for line in (app / "claw.lock").read_text().splitlines():
+        if len(line.split()) != 3:
+            return f"claw.lock should write `name source hash`, got: {line}"
+    # The source changes in claw.pkg: `claw get` refuses without --update, and run refuses too.
+    shutil.copytree(root / "greet", root / "greet_b")
+    (app / "claw.pkg").write_text("greet ../greet_b\n")
+    r = in_app("get")
+    if r.returncode == 0 or "claw.pkg says" not in r.stderr or "--update" not in r.stderr:
+        return f"claw get must refuse a changed source: {r.stdout}{r.stderr}"
+    r = in_app("run", "main.claw")
+    if r.returncode == 0 or "E0183" not in r.stderr or r.stdout:
+        return f"claw run must refuse a changed source: {r.stdout}{r.stderr}"
+    if in_app("get", "--update").returncode != 0:
+        return "claw get --update must take the new source"
+    r = in_app("run", "main.claw")
+    if r.returncode != 0 or r.stdout.splitlines() != want:
+        return f"run after --update: {r.stdout.splitlines()} {r.stderr}"
+    # A copy edited by hand: run and build refuse it, and `claw get --update` puts the source back.
+    with open(app / ".claw/pkg/greet/greet.claw", "a") as f:
+        f.write("// edited\n")
+    r = in_app("run", "main.claw")
+    if r.returncode == 0 or "E0183" not in r.stderr or "changed" not in r.stderr:
+        return f"claw run must refuse an edited copy: {r.stdout}{r.stderr}"
+    r = in_app("build", "main.claw", "-o", str(tmp / "pkglock_app"))
+    if r.returncode == 0 or "E0183" not in r.stderr:
+        return f"claw build must refuse an edited copy: {r.stdout}{r.stderr}"
+    if in_app("get", "--update").returncode != 0:
+        return "claw get --update must restore the copy"
+    r = in_app("run", "main.claw")
+    if r.returncode != 0 or r.stdout.splitlines() != want:
+        return f"run after restoring: {r.stdout.splitlines()} {r.stderr}"
+    return None
+
+
 def err_test(path):
     text = path.read_text()
     want = sorted(c.strip() for c in headers(text, "error"))
@@ -547,6 +596,51 @@ def err_test(path):
     got = sorted(re.findall(r"\bE\d{4}\b", " ".join(l.split(" ")[1] for l in p.stderr.splitlines())))
     if got != want:
         return f"errors {got}, wanted {want}\n{p.stderr}"
+    return None
+
+
+def pin_by_source(app):
+    """The package's line in claw.lock is rewritten as an older claw wrote it: name and hash only."""
+    name, _, digest = (app / "claw.lock").read_text().split()
+    (app / "claw.lock").write_text(f"{name} {digest}\n")
+
+
+def move_source(app):
+    """claw.pkg now names another folder than the one the lock pins."""
+    (app / "claw.pkg").write_text("geo ./geo_v2\n")
+
+
+def edit_copy(app):
+    """A copy of the package in .claw/pkg is changed by hand after `claw get`."""
+    (app / ".claw/pkg/geo/geo.claw").write_text("pub fn square(x int) int {\n    ret x * x + 1\n}\n")
+
+
+# What happens to each project in tests/err/<dir>/ after `claw get`, before `claw check` must reject it.
+PROJECT_CHANGES = {"pkg_edited": edit_copy, "pkg_moved_source": move_source, "pkg_old_lock": pin_by_source}
+
+
+def err_project_test(path):
+    """tests/err/<dir>/: a project (claw.pkg, main.claw) whose packages change after they were pinned. The
+    `// error:` header of its main.claw lists the codes that `claw check` must give."""
+    text = (path / "main.claw").read_text()
+    want = sorted(c.strip() for c in headers(text, "error"))
+    change = PROJECT_CHANGES.get(path.name)
+    if not want or change is None:
+        return "test has no // error: header, or no change is defined for it in PROJECT_CHANGES"
+    with tempfile.TemporaryDirectory() as d:
+        app = pathlib.Path(d) / path.name
+        shutil.copytree(path, app)
+        env = {"PATH": ""}
+        r = child([CLAW, "get"], cwd=app, capture_output=True, text=True, env=env)
+        if r.returncode != 0:
+            return f"claw get: {r.stderr}"
+        change(app)
+        p = child([CLAW, "check", app / "main.claw"], capture_output=True, text=True, env=env)
+        if p.returncode != 1:
+            return f"expected rejection, exit code {p.returncode}\n{p.stderr}"
+        got = sorted(re.findall(r"^\S+:\d+:\d+ (E\d{4}) ", p.stderr, re.M))
+        if got != want:
+            return f"errors {got}, wanted {want}\n{p.stderr}"
     return None
 
 
@@ -676,6 +770,11 @@ def main():
         if msg:
             failures += 1
             print(f"FAIL pkg: {msg}")
+        total += 1
+        msg = pkg_lock_test(tmp)
+        if msg:
+            failures += 1
+            print(f"FAIL pkg lock: {msg}")
         for path in sorted((ROOT / "examples").glob("*.claw")):
             total += 1
             msg = run_test(path, tmp) or check_test(path)
@@ -770,6 +869,12 @@ def main():
         if msg:
             failures += 1
             print(f"FAIL err/{path.name}: {msg}")
+    for path in sorted(p for p in (ROOT / "tests/err").iterdir() if p.is_dir() and (p / "main.claw").is_file()):
+        total += 1
+        msg = err_project_test(path)
+        if msg:
+            failures += 1
+            print(f"FAIL err/{path.name}/: {msg}")
     total += 1
     msg = card_size()
     if msg:

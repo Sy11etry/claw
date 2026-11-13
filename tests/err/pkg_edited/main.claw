@@ -1,0 +1,6 @@
+// error: E0183
+use geo
+
+fn main() {
+    print("square {geo.square(7)}")
+}

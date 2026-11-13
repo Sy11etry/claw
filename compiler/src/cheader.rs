@@ -160,6 +160,9 @@ struct Pre {
     out: Vec<T>,
     seen: HashSet<PathBuf>,
     depth: usize,
+    /// `#pragma pack` in force, and the states saved by `push`.
+    pack_on: bool,
+    pack_stack: Vec<bool>,
 }
 
 fn expand(toks: &[T], macros: &HashMap<String, Macro>, hide: &[String], budget: &mut usize) -> Vec<T> {
@@ -454,6 +457,31 @@ impl Pre {
         eval_expr(&ex, &HashMap::new(), false).unwrap_or(0) != 0
     }
 
+    /// `#pragma pack(...)` changes the packing of the structs after it. Returns false for other pragmas. Forms this
+    /// does not know count as packed: a struct they touch is refused, never laid out by guesswork.
+    fn pragma_pack(&mut self, rest: &str) -> bool {
+        let Some(args) = rest.trim().strip_prefix("pack") else { return false };
+        let args = args.trim();
+        if !args.is_empty() && !args.starts_with('(') {
+            return false;
+        }
+        let inner = args.strip_prefix('(').and_then(|a| a.strip_suffix(')')).unwrap_or("");
+        let parts: Vec<&str> = inner.split(',').map(str::trim).filter(|p| !p.is_empty()).collect();
+        match parts.as_slice() {
+            [] => self.pack_on = false,
+            ["push"] => self.pack_stack.push(self.pack_on),
+            ["push", n] => {
+                self.pack_stack.push(self.pack_on);
+                self.pack_on = *n != "0";
+            }
+            ["pop"] => self.pack_on = self.pack_stack.pop().unwrap_or(false),
+            ["show"] => {}
+            [n] => self.pack_on = *n != "0",
+            _ => self.pack_on = true,
+        }
+        true
+    }
+
     fn find(&self, name: &str, here: &Path) -> Option<PathBuf> {
         let local = here.parent().unwrap_or(Path::new(".")).join(name);
         if local.is_file() {
@@ -515,6 +543,13 @@ impl Pre {
                     }
                 }
                 _ if !live => {}
+                "pragma" => {
+                    // The packing state rides along in the token stream, so the struct reader sees it where it is.
+                    if self.pragma_pack(rest) {
+                        self.flush(&mut pending);
+                        self.out.push(T::P(if self.pack_on { "@p1" } else { "@p0" }.to_string()));
+                    }
+                }
                 "define" => {
                     self.flush(&mut pending);
                     let r = rest.trim_start();
@@ -603,6 +638,10 @@ struct Decls {
     structs: Vec<(String, Vec<(String, C)>)>,
     /// Struct names we saw defined, even if their fields cannot be written.
     opaque: HashSet<String>,
+    /// Structs laid out differently from Claw, by C name, and why (see `Header::packed`).
+    layout: Vec<(String, &'static str)>,
+    /// Typedef names whose type has a layout attribute (`vector_size`, `aligned`): a struct holding one changes too.
+    layout_typedefs: HashMap<String, &'static str>,
     protos: Vec<Proto>,
     enums: Vec<(String, i64)>,
 }
@@ -611,9 +650,15 @@ struct Parser<'a> {
     t: &'a [T],
     /// For each token: does it come from a file whose names the program should see?
     owns: &'a [bool],
+    /// For each token: is `#pragma pack` in force there?
+    packs: &'a [bool],
     i: usize,
     d: Decls,
     consts: HashMap<String, i64>,
+    /// The layout change the attributes skipped since the struct that is being read began (see `skip_attrs`).
+    layout: Option<&'static str>,
+    /// Layout attributes read by `declaration` before the type it is about to read.
+    decl_layout: Option<&'static str>,
 }
 
 const QUALIFIERS: &[&str] = &["const", "volatile", "restrict", "__restrict", "__restrict__", "_Nonnull", "_Nullable", "_Null_unspecified", "__nonnull", "__nullable", "__unused", "register", "_Noreturn", "__extension__", "inline", "__inline", "__inline__", "static", "extern", "_Atomic"];
@@ -673,19 +718,46 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Skips attributes and qualifiers. A layout attribute (`packed`, `aligned`, `_Alignas`) is noted in `self.layout`.
     fn skip_attrs(&mut self) {
         loop {
             match self.peek().and_then(|t| t.id()) {
-                Some("__attribute__" | "__attribute" | "__asm" | "__asm__" | "asm" | "__declspec" | "_Alignas" | "__alignof__") => {
+                Some("__attribute__" | "__attribute" | "__asm" | "__asm__" | "asm" | "__declspec" | "_Alignas" | "alignas" | "__alignof__") => {
+                    let from = self.i;
                     self.i += 1;
                     if self.at("(") {
                         self.skip_group();
+                    }
+                    if self.layout.is_none() {
+                        self.layout = self.layout_reason(from, self.i);
                     }
                 }
                 Some(q) if QUALIFIERS.contains(&q) => self.i += 1,
                 _ => break,
             }
         }
+    }
+
+    /// Skips attributes, and says which layout change they make, if any. The record of the struct being read is
+    /// left as it was.
+    fn skip_attrs_reason(&mut self) -> Option<&'static str> {
+        let outer = self.layout.take();
+        let from = self.i;
+        self.skip_attrs();
+        let r = self.layout_reason(from, self.i);
+        self.layout = outer;
+        r
+    }
+
+    /// The layout change made by the tokens from `from` to `to`, if any.
+    fn layout_reason(&self, from: usize, to: usize) -> Option<&'static str> {
+        let end = to.min(self.t.len());
+        self.t.get(from..end)?.iter().find_map(|t| match t.id()? {
+            "packed" | "__packed__" => Some("packed"),
+            "aligned" | "__aligned__" | "_Alignas" | "alignas" => Some("aligned"),
+            "vector_size" | "__vector_size__" | "ext_vector_type" => Some("vector type"),
+            _ => None,
+        })
     }
 
     /// Skip to just past the end of the current declaration.
@@ -710,13 +782,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A C type. A layout attribute met before a plain type (`__attribute__((aligned(8))) int x;`) changes the struct
+    /// around it, so it is noted there; before a struct definition it belongs to that struct.
     fn base_type(&mut self) -> Option<C> {
-        self.skip_attrs();
+        let mut pre = self.decl_layout.take();
+        let c = self.base_type_in(&mut pre);
+        add_reason(&mut self.layout, pre);
+        c
+    }
+
+    fn base_type_in(&mut self, pre: &mut Option<&'static str>) -> Option<C> {
+        let r = self.skip_attrs_reason();
+        add_reason(pre, r);
         let (mut unsigned, mut signed, mut longs, mut short, mut ch, mut int, mut float, mut double, mut void, mut boolean) = (false, false, 0, false, false, false, false, false, false, false);
         let mut named: Option<C> = None;
         let mut any = false;
         loop {
-            self.skip_attrs();
+            let r = self.skip_attrs_reason();
+            add_reason(pre, r);
             let Some(T::Id(w)) = self.peek().cloned() else { break };
             match w.as_str() {
                 "unsigned" => unsigned = true,
@@ -733,7 +816,10 @@ impl<'a> Parser<'a> {
                     if named.is_some() || any {
                         break;
                     }
+                    let kw = self.i;
                     self.i += 1;
+                    // Layout attributes from here on belong to this struct; one nested in its body keeps its own.
+                    let outer = self.layout.take();
                     self.skip_attrs();
                     let tag = self.peek().and_then(|t| t.id()).map(|s| s.to_string());
                     if tag.is_some() {
@@ -741,11 +827,25 @@ impl<'a> Parser<'a> {
                     }
                     let kind = w.clone();
                     let name = tag.clone().unwrap_or_else(|| format!("anon{}", self.i));
-                    if self.at("{") {
+                    let defines = self.at("{");
+                    let own_pre = if defines { pre.take() } else { None };
+                    let mut body = None;
+                    if defines {
                         if kind == "enum" {
                             self.enum_body();
                         } else {
-                            self.struct_body(&name, kind == "union");
+                            body = Some(self.struct_body(&name, kind == "union"));
+                            self.skip_attrs(); // after the closing brace: `} __attribute__((packed))`
+                        }
+                    }
+                    let pack = if self.packs.get(kw).copied().unwrap_or(false) { Some("#pragma pack") } else { None };
+                    let own = self.layout.take().or(own_pre).or(pack);
+                    self.layout = outer;
+                    if let Some((ok, fields)) = body {
+                        match own {
+                            Some(why) => self.d.layout.push((name.clone(), why)),
+                            None if ok && !fields.is_empty() && !self.d.structs.iter().any(|s| s.0 == name) => self.d.structs.push((name.clone(), fields)),
+                            None => {}
                         }
                     }
                     named = Some(if kind == "enum" { C::Enum } else { C::Struct(name) });
@@ -755,6 +855,9 @@ impl<'a> Parser<'a> {
                 _ => {
                     if named.is_some() || any {
                         break;
+                    }
+                    if let Some(&why) = self.d.layout_typedefs.get(&w) {
+                        add_reason(pre, Some(why));
                     }
                     if let Some(c) = builtin_typedef(&w).or_else(|| self.d.typedefs.get(&w).cloned()) {
                         named = Some(c);
@@ -845,7 +948,8 @@ impl<'a> Parser<'a> {
         self.eat("}");
     }
 
-    fn struct_body(&mut self, name: &str, is_union: bool) {
+    /// Reads a struct body. Returns whether every field can be written in Claw, and the fields.
+    fn struct_body(&mut self, name: &str, is_union: bool) -> (bool, Vec<(String, C)>) {
         self.eat("{");
         let mut fields = Vec::new();
         let mut ok = !is_union;
@@ -886,9 +990,7 @@ impl<'a> Parser<'a> {
         }
         self.eat("}");
         self.d.opaque.insert(name.to_string());
-        if ok && !fields.is_empty() && !self.d.structs.iter().any(|s| s.0 == name) {
-            self.d.structs.push((name.to_string(), fields));
-        }
+        (ok, fields)
     }
 
     /// One declarator: pointers, a name, array or function suffixes. Returns (name, type, parameters if a function).
@@ -1001,6 +1103,13 @@ impl<'a> Parser<'a> {
     }
 
     fn typedef(&mut self) {
+        // A layout attribute on the typedef (`typedef int v4 __attribute__((vector_size(16)));`) is noted for its name.
+        let outer = self.layout.take();
+        self.typedef_names();
+        self.layout = outer;
+    }
+
+    fn typedef_names(&mut self) {
         let Some(base) = self.base_type() else {
             self.recover();
             return;
@@ -1012,6 +1121,9 @@ impl<'a> Parser<'a> {
             };
             let ty = if f.is_some() { C::Func } else { ty };
             if !name.is_empty() {
+                if let Some(why) = self.layout {
+                    self.d.layout_typedefs.insert(name.clone(), why);
+                }
                 // `typedef struct tag tag;` keeps the struct name as the type.
                 self.d.typedefs.insert(name, ty);
             }
@@ -1039,9 +1151,11 @@ impl<'a> Parser<'a> {
             }
             s
         };
-        // Stray macro names in front of the type (`CURL_EXTERN CURLcode f(...)`).
+        // Stray macro names in front of the type (`CURL_EXTERN CURLcode f(...)`). Layout attributes met here
+        // belong to the type that follows, which `base_type` takes over.
+        let mut pre = None;
         loop {
-            self.skip_attrs();
+            add_reason(&mut pre, self.skip_attrs_reason());
             let Some(T::Id(w)) = self.peek().cloned() else { break };
             let known = builtin_typedef(&w).is_some() || self.d.typedefs.contains_key(&w) || matches!(w.as_str(), "unsigned" | "signed" | "long" | "short" | "char" | "int" | "float" | "double" | "void" | "_Bool" | "struct" | "union" | "enum");
             if known {
@@ -1057,6 +1171,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        self.decl_layout = pre;
         let Some(base) = self.base_type() else {
             self.recover();
             return;
@@ -1169,6 +1284,34 @@ impl Out<'_> {
 
 pub struct Header {
     pub source: String,
+    /// Structs that C lays out differently from Claw (packed, aligned, or under `#pragma pack`): the name a program
+    /// would use, and why. They are not written, so a program that names one gets E0182.
+    pub packed: Vec<(String, String)>,
+}
+
+/// Adds `r` unless a reason is already there.
+fn add_reason(to: &mut Option<&'static str>, r: Option<&'static str>) {
+    if to.is_none() {
+        *to = r;
+    }
+}
+
+/// Does a value of this type hold a packed struct by value, directly or in an array?
+fn holds_packed(c: &C, layout: &[(String, &'static str)]) -> bool {
+    match c {
+        C::Struct(n) => layout.iter().any(|(p, _)| p == n),
+        C::Array(e, _) => holds_packed(e, layout),
+        _ => false,
+    }
+}
+
+/// The name Claw gives a C struct or typedef name.
+fn claw_type_name(shown: &str) -> String {
+    let mut t = upper_first(shown.trim_start_matches('_'));
+    if t.is_empty() || claw_keywords().contains(&t.as_str()) {
+        t.push('T');
+    }
+    t
 }
 
 /// Reads `path` (and the quote includes inside it) and writes Claw source for it.
@@ -1180,27 +1323,42 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
             dirs.push(PathBuf::from(sys));
         }
     }
-    let mut pre = Pre { macros: HashMap::new(), defined_here: Vec::new(), incdirs: dirs, out: Vec::new(), seen: HashSet::new(), depth: 0 };
+    let mut pre = Pre { macros: HashMap::new(), defined_here: Vec::new(), incdirs: dirs, out: Vec::new(), seen: HashSet::new(), depth: 0, pack_on: false, pack_stack: Vec::new() };
     pre.predefine();
     pre.file(root, true, true);
-    // Pull the ownership markers out of the stream.
+    // Pull the ownership and packing markers out of the stream; each remaining token keeps their state.
     let mut toks = Vec::with_capacity(pre.out.len());
     let mut owns = Vec::with_capacity(pre.out.len());
+    let mut packs = Vec::with_capacity(pre.out.len());
     let mut own = true;
+    let mut pack = false;
     for t in &pre.out {
         match t {
             T::P(m) if m == "@1" => own = true,
             T::P(m) if m == "@0" => own = false,
+            T::P(m) if m == "@p1" => pack = true,
+            T::P(m) if m == "@p0" => pack = false,
             t => {
                 toks.push(t.clone());
                 owns.push(own);
+                packs.push(pack);
             }
         }
     }
-    let mut p = Parser { t: &toks, owns: &owns, i: 0, d: Decls::default(), consts: HashMap::new() };
+    let mut p = Parser { t: &toks, owns: &owns, packs: &packs, i: 0, d: Decls::default(), consts: HashMap::new(), layout: None, decl_layout: None };
     p.top();
     let consts_from_enums = p.consts.clone();
     let mut d = p.d;
+    // A struct that holds a packed one by value is laid out differently too; such structs are not written either.
+    loop {
+        let more: Vec<(String, &'static str)> = d.structs.iter().filter(|(n, _)| !d.layout.iter().any(|(p, _)| p == n)).filter(|(_, fields)| fields.iter().any(|(_, t)| holds_packed(t, &d.layout))).map(|(n, _)| (n.clone(), "contains a packed struct")).collect();
+        if more.is_empty() {
+            break;
+        }
+        d.layout.extend(more);
+    }
+    let layout = d.layout.clone();
+    d.structs.retain(|s| !layout.iter().any(|(p, _)| *p == s.0));
     // Only structs that some function (or another needed struct) mentions are written out.
     fn mentions(c: &C, out: &mut Vec<String>) {
         match c {
@@ -1235,14 +1393,25 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
     let alias_of: HashMap<String, String> = d.typedefs.iter().filter_map(|(k, v)| if let C::Struct(n) = v { Some((n.clone(), k.clone())) } else { None }).collect();
     for (name, _) in &d.structs {
         let shown = alias_of.get(name).cloned().unwrap_or_else(|| name.clone());
-        let mut t = upper_first(shown.trim_start_matches('_'));
-        if t.is_empty() || claw_keywords().contains(&t.as_str()) {
-            t.push('T');
-        }
+        let mut t = claw_type_name(&shown);
         while !used_names.insert(t.clone()) {
             t.push('_');
         }
         type_names.insert(name.clone(), t);
+    }
+    // The names a program would use for the structs it cannot have: the tag, and each typedef name for it.
+    let mut packed_names: Vec<(String, String)> = Vec::new();
+    for (c, why) in &layout {
+        let mut names: Vec<String> = Vec::new();
+        if !c.starts_with("anon") {
+            names.push(claw_type_name(c));
+        }
+        for (k, v) in &d.typedefs {
+            if matches!(v, C::Struct(n) if n == c) {
+                names.push(claw_type_name(k));
+            }
+        }
+        packed_names.extend(names.into_iter().map(|n| (n, why.to_string())));
     }
     let out = Out { d: &d, type_names };
     let _ = out.d;
@@ -1271,6 +1440,9 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
         } else {
             s.push_str(&format!("// struct {name}: some field has a type Claw cannot hold; used through `*u8`\n"));
         }
+    }
+    for (name, why) in &packed_names {
+        s.push_str(&format!("// struct {name}: laid out differently from Claw ({why}), so it is not written; a program that names it gets E0182\n"));
     }
     // Fix up: structs that failed above are not in the usable set; rebuild the map for the prototypes.
     let mut usable = HashMap::new();
@@ -1374,7 +1546,7 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
     if !skipped.is_empty() {
         s.push_str(&format!("// not translated (struct by value, union or unknown type): {}\n", skipped.join(" ")));
     }
-    Header { source: s }
+    Header { source: s, packed: packed_names }
 }
 
 const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/include", "/usr/local/include", "/usr/include", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include", "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"];

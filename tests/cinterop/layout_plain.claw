@@ -1,0 +1,12 @@
+// expect: 8
+// expect: the packed struct is only reachable through pointers
+use c "layout.h"
+
+claw fn plain() int {
+    ret int(sizeof[Plain]())
+}
+
+fn main() {
+    print("{plain()}")
+    print("the packed struct is only reachable through pointers")
+}

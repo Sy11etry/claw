@@ -90,6 +90,8 @@ fn prim(name: &str) -> Option<Ty> {
 struct Mod<'a> {
     prefix: String,
     imports: &'a HashMap<String, usize>,
+    /// C structs this module's headers declare but Claw cannot lay out: name, then why and the header.
+    packed: &'a HashMap<String, (String, String)>,
     used: HashSet<String>,
     /// Each entry remembers whether it is `pub`.
     names: HashMap<String, (NameDef, bool)>,
@@ -132,6 +134,11 @@ const MAX_TYPE_NEST: u32 = 64;
 
 fn private_msg(name: &str) -> String {
     format!("`{name}` is private to its module; mark it `pub` there")
+}
+
+/// A name for a C struct that C lays out differently from Claw (see `cheader::translate`).
+fn packed_msg(name: &str, why: &str, header: &str) -> String {
+    format!("`{name}` is a C struct or union that C lays out differently from Claw ({why}, in {header}); Claw pads its fields, so `{name}` cannot be used by name; read its fields through a `*u8` at their byte offsets")
 }
 
 fn type_list(types: &Types, args: &[Ty]) -> String {
@@ -323,6 +330,11 @@ impl<'a> Global<'a> {
                     if let Some((NameDef::Type(ty), true)) = self.mods[core].names.get(name).copied() {
                         return ty;
                     }
+                }
+                // A struct from a C header that C lays out differently: say why, and what to do instead.
+                if let Some((why, header)) = self.mods[m].packed.get(name) {
+                    diags.push(Diag::new("E0182", span, packed_msg(name, why, header)));
+                    return ERR;
                 }
                 diags.push(Diag::new("E0112", span, format!("unknown type `{name}`")));
                 ERR
@@ -985,6 +997,7 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
             .map(|u| Mod {
                 prefix: u.prefix.clone(),
                 imports: &u.imports,
+                packed: &u.packed,
                 used: HashSet::new(),
                 names: HashMap::new(),
                 consts: HashMap::new(),
@@ -3146,6 +3159,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
             None => {
                 check_all(self);
+                let packed = self.g.mods[m].packed.get(name).map(|(why, header)| packed_msg(name, why, header));
+                if let Some(msg) = packed {
+                    return self.err("E0182", span, msg);
+                }
                 return self.err("E0112", span, format!("unknown type `{name}`"));
             }
         };

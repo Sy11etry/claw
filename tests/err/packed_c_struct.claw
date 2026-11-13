@@ -1,0 +1,12 @@
+// error: E0182
+// error: E0182
+// error: E0182
+// error: E0182
+// error: E0182
+use c "packed_c_struct.h"
+
+type Holder { p Pk, q TPk, r Pp, a Al }
+
+fn main() {
+    print("{sizeof[Pk]()}")
+}

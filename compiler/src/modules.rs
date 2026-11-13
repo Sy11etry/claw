@@ -41,6 +41,8 @@ pub struct Unit {
     pub import_spans: HashMap<String, Span>,
     /// Part of the standard library rather than the user's program.
     pub is_std: bool,
+    /// Structs of the C headers this module reads that Claw cannot lay out: name, then why and the header.
+    pub packed: HashMap<String, (String, String)>,
 }
 
 pub struct Loaded {
@@ -73,31 +75,38 @@ struct Loader {
 }
 
 impl Loader {
-    fn locate(&self, dir: &Path, path: &[String]) -> Option<PathBuf> {
+    /// The file a `use` names: next to the program, in the standard library, or in a package. `Err` when the
+    /// package does not match its lines in claw.pkg and claw.lock.
+    fn locate(&self, dir: &Path, path: &[String]) -> Result<Option<PathBuf>, String> {
         let rel: PathBuf = path.iter().collect::<PathBuf>().with_extension("claw");
         let local = dir.join(&rel);
         if local.is_file() {
-            return Some(local);
+            return Ok(Some(local));
         }
         if let Some(in_std) = self.std_root.as_ref().map(|r| r.join(&rel)).filter(|p| p.is_file()) {
-            return Some(in_std);
+            return Ok(Some(in_std));
         }
         // A package fetched by `claw get`, found from the program's own folder upward.
         crate::pkg::locate(&self.root_dir, path)
     }
 
     /// `use c "x.h"`: the header's declarations join this module as if they were written here.
-    fn c_headers(&mut self, program: &mut Program, here: &Path) {
+    fn c_headers(&mut self, program: &mut Program, here: &Path, packed: &mut HashMap<String, (String, String)>) {
         let incdirs = INCDIRS.with(|d| d.borrow().clone());
         for (name, span) in std::mem::take(&mut program.cimports) {
             let Some(h) = crate::cheader::locate(&name, here, &incdirs) else {
                 self.diags.push(Diag::new("E0181", span, format!("cannot find the C header `{name}`; add its folder with -I")));
                 continue;
             };
-            let text = crate::cheader::translate(&h, &incdirs).source;
+            let out = crate::cheader::translate(&h, &incdirs);
+            let text = out.source;
+            let base = h.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            for (ty, why) in out.packed {
+                packed.insert(ty, (why, base.clone()));
+            }
             let file = self.files.len() as u32;
             self.files.push(h.to_string_lossy().into_owned());
-            self.base_names.push(h.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default());
+            self.base_names.push(base);
             let before = self.diags.len();
             let toks = lexer::lex(&text, file, &mut self.diags);
             if self.diags.len() > before {
@@ -168,7 +177,8 @@ impl Loader {
             return None;
         }
         self.links.extend(program.links.iter().cloned());
-        self.c_headers(&mut program, &path);
+        let mut packed = HashMap::new();
+        self.c_headers(&mut program, &path, &mut packed);
         computed_consts(&mut program);
 
         self.in_progress.push(key.clone());
@@ -185,9 +195,16 @@ impl Loader {
                 continue;
             }
             let dotted = u.path.join(".");
-            let Some(found) = self.locate(&dir, &u.path) else {
-                self.diags.push(Diag::new("E0146", u.span, format!("cannot find module `{dotted}`")));
-                continue;
+            let found = match self.locate(&dir, &u.path) {
+                Ok(Some(f)) => f,
+                Ok(None) => {
+                    self.diags.push(Diag::new("E0146", u.span, format!("cannot find module `{dotted}`")));
+                    continue;
+                }
+                Err(msg) => {
+                    self.diags.push(Diag::new("E0183", u.span, msg));
+                    continue;
+                }
             };
             let name = found.to_string_lossy().into_owned();
             if let Some(i) = self.load(name, found, format!("{dotted}."), Some(u.span)) {
@@ -198,7 +215,7 @@ impl Loader {
         self.in_progress.pop();
 
         let is_std = self.std_root.as_ref().is_some_and(|r| r.canonicalize().map(|c| key.starts_with(c)).unwrap_or(false));
-        self.units.push(Unit { prefix, program, imports, import_spans, is_std });
+        self.units.push(Unit { prefix, program, imports, import_spans, is_std, packed });
         let idx = self.units.len() - 1;
         self.done.insert(key, idx);
         Some(idx)
