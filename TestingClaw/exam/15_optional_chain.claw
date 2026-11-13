@@ -1,0 +1,18 @@
+// expect: q8 2
+// expect: q6 -1
+fn half_of(x int) ?int {
+    if x % 2 != 0 { ret none }
+    ret x / 2
+}
+
+fn quarter(x int) ?int {
+    h := half_of(x)?
+    ret half_of(h)?
+}
+
+fn main() {
+    a := quarter(8) else -1
+    b := quarter(6) else -1
+    print("q8 {a}")
+    print("q6 {b}")
+}

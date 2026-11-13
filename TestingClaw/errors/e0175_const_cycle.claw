@@ -1,0 +1,9 @@
+// code: E0175
+fn fa() int {
+    ret b
+}
+const a int = fa()
+const b int = a + 1
+fn main() {
+    print(a)
+}

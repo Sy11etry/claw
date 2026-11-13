@@ -1,0 +1,6 @@
+// code: E0129
+type P { x int }
+fn main() {
+    p := P{1}
+    print(p.zz)
+}

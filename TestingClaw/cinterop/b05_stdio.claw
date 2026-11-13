@@ -1,0 +1,43 @@
+// c: b05_stdio.c
+// x64: yes
+// expect: len 4
+// expect: first 52
+// expect: read 4
+use c "stdio.h"
+
+claw fn fmt_len() int {
+    buf := alloc[u8](64)
+    defer free(buf)
+    n := snprintf(buf, 64, "%d-%s", 42, "x")
+    ret int(n)
+}
+
+claw fn fmt_first() int {
+    buf := alloc[u8](64)
+    defer free(buf)
+    _ = snprintf(buf, 64, "%d-%s", 42, "x")
+    ret int(buf[0])
+}
+
+claw fn file_round() int {
+    buf := alloc[u8](64)
+    defer free(buf)
+    n := snprintf(buf, 64, "%d-%s", 42, "x")
+    f := fopen("b05_out.txt", "w")
+    if f == none { ret -1 }
+    _ = fwrite(buf, 1, u64(n), f)
+    _ = fclose(f)
+    back := alloc[u8](64)
+    defer free(back)
+    g := fopen("b05_out.txt", "r")
+    if g == none { ret -2 }
+    got := fread(back, 1, 64, g)
+    _ = fclose(g)
+    ret int(got)
+}
+
+fn main() {
+    print("len {fmt_len()}")
+    print("first {fmt_first()}")
+    print("read {file_round()}")
+}

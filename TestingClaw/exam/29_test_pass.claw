@@ -1,0 +1,12 @@
+// cmd: test
+fn add(a int, b int) int {
+    ret a + b
+}
+
+test "adds two numbers" {
+    sure add(2, 3) == 5
+}
+
+test "order does not matter" {
+    sure add(2, 3) == add(3, 2)
+}

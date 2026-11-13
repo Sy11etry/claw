@@ -1,0 +1,12 @@
+// expect-compile-error
+use par
+
+fn work(x int) int +io {
+    print("x {x}")
+    ret x
+}
+
+fn main() {
+    ys := par.build(3, work)
+    print("n {len(ys)}")
+}

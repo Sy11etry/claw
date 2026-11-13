@@ -1,0 +1,9 @@
+use c "sizes_sizeof.h"
+
+claw fn f() int {
+    ret 1
+}
+
+fn main() {
+    print("f {f()}")
+}

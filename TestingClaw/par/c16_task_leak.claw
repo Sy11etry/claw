@@ -1,0 +1,15 @@
+// expect: start
+// expect: rows 3
+use par
+
+claw fn leaky(n int) int {
+    p := alloc[int](4)
+    p[0] = n
+    ret p[0]
+}
+
+fn main() {
+    print("start")
+    rows := par.build(3, leaky)
+    print("rows {len(rows)}")
+}

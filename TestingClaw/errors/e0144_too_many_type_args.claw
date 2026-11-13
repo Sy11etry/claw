@@ -1,0 +1,7 @@
+// code: E0144
+fn pair[A](a A) A {
+    ret a
+}
+fn main() {
+    print(pair[int, int](1))
+}

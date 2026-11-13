@@ -1,0 +1,5 @@
+// code: E0004
+fn main() {
+    s := "a\q"
+    print(s)
+}

@@ -1,0 +1,6 @@
+type P { s str }
+fn main() {
+    x := 3
+    p := P{"n{x}"}
+    print(p.s)
+}

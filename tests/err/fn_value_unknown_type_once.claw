@@ -1,0 +1,12 @@
+// error: E0123
+use par
+
+fn square(x int) int {
+    ret x * x
+}
+
+fn main() {
+    g := square
+    r := par.build(3, g)
+    print(len(r))
+}

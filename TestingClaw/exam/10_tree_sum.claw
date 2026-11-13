@@ -1,0 +1,18 @@
+// expect: sum 6
+type Tree = Leaf | Node{v int, kids []Tree}
+
+fn total(t Tree) int {
+    match t {
+        Leaf: ret 0
+        Node{v, kids}: {
+            mut s := v
+            for k in kids { s += total(k) }
+            ret s
+        }
+    }
+}
+
+fn main() {
+    t := Node{1, [Leaf, Node{2, [Leaf]}, Node{3, []}]}
+    print("sum {total(t)}")
+}

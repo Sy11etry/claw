@@ -1,0 +1,5 @@
+// code: E0905
+fn main() {
+    v := f64x2(1.0)
+    print(1)
+}

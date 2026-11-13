@@ -1,0 +1,15 @@
+// expect: mid 9
+// expect: head 3
+// expect: tail 9
+fn sum(xs []int) int {
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn main() {
+    a := [1, 2, 3, 4, 5]
+    print("mid {sum(a[1..4])}")
+    print("head {sum(a[..2])}")
+    print("tail {sum(a[3..])}")
+}

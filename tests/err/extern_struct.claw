@@ -1,5 +1,6 @@
 // error: E0149
-type P { x int }
+// A struct by value can go to C, but not one that holds something Claw owns (here a `str`).
+type P { x int, name str }
 
 extern fn f(p P)
 

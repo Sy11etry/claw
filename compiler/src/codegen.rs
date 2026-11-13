@@ -15,13 +15,18 @@ const V0: Reg = 0;
 const V1: Reg = 1;
 const V2: Reg = 31;
 
-const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"];
+const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free", "_strtod"];
 const IMP_WRITE: usize = 0;
 const IMP_EXIT: usize = 1;
 const IMP_SNPRINTF: usize = 2;
 const IMP_MEMCPY: usize = 3;
 const IMP_MALLOC: usize = 4;
 const IMP_FREE: usize = 5;
+/// Reads a printed float back, to find the shortest text that gives the same number (see `rt_buf_float`).
+const IMP_STRTOD: usize = 6;
+/// macOS only: set up the handler that reports a stack overflow (see `rt_segv`).
+const IMP_SIGALTSTACK: usize = 7;
+const IMP_SIGACTION: usize = 8;
 
 /// Output buffer: 8 bytes of length, then the bytes.
 const BUF_CAP: u64 = 1 << 16;
@@ -93,6 +98,8 @@ struct Gen {
     files: Vec<String>,
     imports: Vec<String>,
     too_large: Option<String>,
+    /// Where a C call that returns a struct keeps the destination address across the call: `[sp + ret_slot]`.
+    ret_slot: u32,
 }
 
 /// Where one C argument travels.
@@ -161,6 +168,7 @@ enum Trap {
     DivZero,
     Shift,
     Bounds,
+    Slice,
     Convert,
     AllocSize,
     OutOfMemory,
@@ -174,6 +182,7 @@ impl Trap {
             Trap::DivZero => "division by zero",
             Trap::Shift => "shift out of range",
             Trap::Bounds => "index out of bounds",
+            Trap::Slice => "slice bounds out of range",
             Trap::Convert => "value does not fit the target type",
             Trap::AllocSize => "invalid allocation size",
             Trap::OutOfMemory => "out of memory",
@@ -741,22 +750,114 @@ impl Gen {
 
     /// `__claw_buf_float(d0 = value, x2 = format)`, via libSystem's snprintf.
     /// On Apple ARM64 the variadic double is passed on the stack; on Linux it stays in d0.
-    fn rt_buf_float(&mut self) -> usize {
+    /// `__claw_buf_float(d0 = value, x2 = most digits: 17 for f64, 9 for f32)`: the shortest `%g` text that reads
+    /// back as the same number, as Python prints it. The exponent form is taken only for |x| >= 1e16 or < 1e-4.
+    fn rt_buf_float(&mut self, fmt: usize) -> usize {
+        const X22: Reg = 22;
+        const D2: Reg = 2;
+        const D8: Reg = 8;
         let pos = self.here();
-        self.e(stp_pre(FP, LR, SP, -16));
+        self.e(stp_pre(FP, LR, SP, -64));
         self.e(mov_sp(FP, SP));
-        self.e(sub_imm(SP, SP, 80));
-        if !self.linux {
-            self.e(str_d(D0, SP, 0));
+        self.e(stp(X19, X20, SP, 16));
+        self.e(stp(X21, X22, SP, 32));
+        self.e(str_d(D8, SP, 48));
+        self.e(sub_imm(SP, SP, 96));
+        self.e(fmov_d_d(D8, D0));
+        self.e(mov(X20, X2));
+        // x22: may the exponent form be used? NaN, infinities, |x| >= 1e16, and 0 < |x| < 1e-4.
+        self.e(movz(X22, 1, 0));
+        self.e(fcmp(D8, D8, 64));
+        let nan = self.here();
+        self.e(0);
+        self.e(fmov_x_d(X9, D8));
+        self.e(movz(X10, 1, 0));
+        self.e(lsl(X9, X9, X10));
+        self.e(lsr(X9, X9, X10));
+        self.e(fmov_d_x(D1, X9));
+        self.mov_imm(X10, 1e16f64.to_bits() as i64);
+        self.e(fmov_d_x(D2, X10));
+        self.e(fcmp(D1, D2, 64));
+        let big = self.here();
+        self.e(0);
+        self.e(cmp_imm(X9, 0));
+        let zero = self.here();
+        self.e(0);
+        self.mov_imm(X10, 1e-4f64.to_bits() as i64);
+        self.e(fmov_d_x(D2, X10));
+        self.e(fcmp(D1, D2, 64));
+        let small = self.here();
+        self.e(0);
+        let fixed = self.here();
+        self.e(movz(X22, 0, 0));
+        let start = self.here();
+        self.code[nan] = b_cond(Cond::Vs, (start - nan) as i32);
+        self.code[big] = b_cond(Cond::Ge, (start - big) as i32);
+        self.code[zero] = b_cond(Cond::Eq, (fixed - zero) as i32);
+        self.code[small] = b_cond(Cond::Mi, (start - small) as i32);
+        self.e(movz(X19, 1, 0));
+        let top = self.here();
+        if self.linux {
+            self.e(mov(3, X19));
+            self.e(fmov_d_d(D0, D8));
+        } else {
+            self.e(str(X19, SP, 0));
+            self.e(str_d(D8, SP, 8));
         }
         self.e(add_imm(X0, SP, 16));
         self.e(movz(X1, 64, 0));
+        self.data_addr(X2, fmt);
         self.call(BL, Target::Import(IMP_SNPRINTF));
-        self.e(mov(X1, X0));
+        self.e(mov(X21, X0));
+        self.e(cmp(X19, X20));
+        let last = self.here();
+        self.e(0);
+        self.e(add_imm(X0, SP, 16));
+        self.e(movz(X1, 0, 0));
+        self.call(BL, Target::Import(IMP_STRTOD));
+        // An f32 is compared as an f32: round what was read to single precision first.
+        self.e(cmp_imm(X20, 9));
+        self.e(b_cond(Cond::Ne, 3));
+        self.e(fcvt_d_to_s(D0, D0));
+        self.e(fcvt_s_to_d(D0, D0));
+        self.e(fcmp(D0, D8, 64));
+        let differs = self.here();
+        self.e(0);
+        let take = self.here();
+        self.e(0);
+        // Fixed notation wanted: try more digits while the text has an `e`.
+        self.e(movz(X9, 0, 0));
+        let scan = self.here();
+        self.e(cmp(X9, X21));
+        let scanned = self.here();
+        self.e(0);
+        self.e(add_imm(X10, SP, 16));
+        self.e(add(X10, X10, X9));
+        self.e(ldrb(X11, X10, 0));
+        self.e(cmp_imm(X11, b'e' as u32));
+        let has_e = self.here();
+        self.e(0);
+        self.e(add_imm(X9, X9, 1));
+        let back = self.here();
+        self.e(B | ((scan as i32 - back as i32) as u32 & 0x03FF_FFFF));
+        let next = self.here();
+        self.e(add_imm(X19, X19, 1));
+        let again = self.here();
+        self.e(B | ((top as i32 - again as i32) as u32 & 0x03FF_FFFF));
+        let done = self.here();
+        self.code[last] = b_cond(Cond::Ge, (done - last) as i32);
+        self.code[differs] = b_cond(Cond::Ne, (next - differs) as i32);
+        self.code[take] = cbnz(X22, (done - take) as i32);
+        self.code[scanned] = b_cond(Cond::Ge, (done - scanned) as i32);
+        self.code[has_e] = b_cond(Cond::Eq, (next - has_e) as i32);
+        self.e(mov(X1, X21));
         self.e(add_imm(X0, SP, 16));
         self.call(BL, Target::BufStr);
         self.e(mov_sp(SP, FP));
-        self.e(ldp_post(FP, LR, SP, 16));
+        self.e(ldp(X19, X20, SP, 16));
+        self.e(ldp(X21, X22, SP, 32));
+        self.e(ldr_d(D8, SP, 48));
+        self.e(ldp_post(FP, LR, SP, 64));
         self.e(ret());
         pos
     }
@@ -776,6 +877,54 @@ impl Gen {
         pos
     }
 
+    /// `__claw_segv(signo, info, context)`: runs on its own stack when the program touches memory it must not.
+    /// If the address is next to the stack pointer, the stack is full: recursion too deep. Either way it says so
+    /// after flushing what was printed, then returns; the handler was reset, so the same access ends the program
+    /// as before (SIGSEGV, exit status 139).
+    fn rt_segv(&mut self) -> usize {
+        let stack_msg = "trap: stack overflow: the recursion is too deep for the stack\n";
+        let bad_msg = "trap: bad memory access: a pointer in `claw fn` points nowhere valid\n";
+        let stack_off = self.add_str(stack_msg.as_bytes());
+        let bad_off = self.add_str(bad_msg.as_bytes());
+        let pos = self.here();
+        self.e(stp_pre(FP, LR, SP, -48));
+        self.e(mov_sp(FP, SP));
+        self.e(str(X19, SP, 16));
+        self.e(mov(X19, X2));
+        // Both signals back to their default action first, so this runs once and the program then ends.
+        self.e(str(XZR, SP, 24));
+        self.e(str(XZR, SP, 32));
+        for signo in [11, 10] {
+            self.e(movz(X0, signo, 0));
+            self.e(add_imm(X1, SP, 24));
+            self.e(movz(X2, 0, 0));
+            self.call(BL, Target::Import(IMP_SIGACTION));
+        }
+        self.e(movz(X0, 1, 0));
+        self.call(BL, Target::Flush);
+        // The fault address (`__es.__far`) and the stack pointer (`__ss.__sp`) of the interrupted code.
+        self.e(ldr(X9, X19, 48));
+        self.e(ldr(X10, X9, 0));
+        self.e(ldr(X11, X9, 264));
+        self.e(sub(X12, X10, X11));
+        self.mov_imm(X13, 0x80_0000);
+        self.e(add(X12, X12, X13));
+        self.mov_imm(X13, 0x100_0000);
+        self.e(cmp(X12, X13));
+        self.e(b_cond(Cond::Hs, 5));
+        self.data_addr(X1, stack_off);
+        self.e(movz(X2, stack_msg.len() as u32, 0));
+        self.e(B | 4);
+        self.data_addr(X1, bad_off);
+        self.e(movz(X2, bad_msg.len() as u32, 0));
+        self.e(movz(X0, 2, 0));
+        self.call(BL, Target::Import(IMP_WRITE));
+        self.e(ldr(X19, SP, 16));
+        self.e(ldp_post(FP, LR, SP, 48));
+        self.e(ret());
+        pos
+    }
+
     fn func(&mut self, f: &Func, fmts: (usize, usize)) {
         self.func_first = Some(self.here());
         let mut outgoing = 0u32;
@@ -788,6 +937,12 @@ impl Gen {
                     outgoing = outgoing.max((assign_c(args, *variadic, self.linux).1 + 7) & !7);
                 }
             }
+        }
+        let struct_ret = f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::CallC { ret: CRet::Parts { .. } | CRet::Indirect { .. }, .. }));
+        if struct_ret {
+            outgoing = (outgoing + 15) & !15;
+            self.ret_slot = outgoing;
+            outgoing += 16;
         }
         let alloc = if f.optimized { regalloc::allocate(f) } else { regalloc::naive(f) };
         let save_base = outgoing;
@@ -1523,9 +1678,9 @@ impl Gen {
                 self.load(fr, X2, *n);
                 self.call(BL, Target::Import(IMP_MEMCPY));
             }
-            Inst::BoundsDyn { idx, len, loc } => {
+            Inst::BoundsDyn { idx, len, loc, slice } => {
                 self.compare(fr, *idx, *len);
-                self.trap_if(Cond::Hs, Trap::Bounds, *loc, traps);
+                self.trap_if(Cond::Hs, if *slice { Trap::Slice } else { Trap::Bounds }, *loc, traps);
             }
             Inst::BufPtr { p, n } => {
                 self.load(fr, X0, *p);
@@ -1630,7 +1785,8 @@ impl Gen {
                 if *bits == 32 {
                     self.e(fcvt_s_to_d(D0, D0));
                 }
-                self.data_addr(X2, if *bits == 64 { fmts.0 } else { fmts.1 });
+                let _ = fmts;
+                self.e(movz(X2, if *bits == 64 { 17 } else { 9 }, 0));
                 self.call(BL, Target::BufFloat);
             }
             Inst::WideBin { op, dlo, dhi, alo, ahi, blo, bhi, loc } => {
@@ -1728,6 +1884,11 @@ impl Gen {
                 });
             }
         }
+        // The address a struct result goes to must outlive the call: it waits in the frame.
+        if let CRet::Parts { dest, .. } | CRet::Indirect { dest } = ret {
+            self.load(fr, X9, dest);
+            self.e(str(X9, SP, self.ret_slot));
+        }
         for (a, slot) in args.iter().zip(&slots) {
             match slot {
                 Slot::X(r) => self.load(fr, *r, a.v),
@@ -1735,12 +1896,25 @@ impl Gen {
                 Slot::Stack(_) => {}
             }
         }
+        if let CRet::Indirect { .. } = ret {
+            self.e(ldr(8, SP, self.ret_slot));
+        }
         let want = format!("_{sym}");
         let index = self.imports.iter().position(|n| *n == want).expect("imports were collected up front");
         self.call(BL, Target::Import(index));
         // C leaves the upper bits of a narrow result undefined.
         match ret {
-            CRet::None => {}
+            CRet::None | CRet::Indirect { .. } => {}
+            CRet::Parts { parts, n, .. } => {
+                self.e(ldr(X9, SP, self.ret_slot));
+                for p in &parts[..n as usize] {
+                    self.e(match p.class {
+                        0 => str(p.reg as Reg, X9, p.off),
+                        32 => str_s(p.reg as Reg, X9, p.off),
+                        _ => str_d(p.reg as Reg, X9, p.off),
+                    });
+                }
+            }
             CRet::Float(bits) => {
                 if let Some(d) = d {
                     self.fstore(fr, D0, d, bits);
@@ -1975,6 +2149,10 @@ pub fn generate_linux(m: &Module, files: &[String], alloc_stats: bool) -> Result
 
 fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result<Object, String> {
     let mut imports: Vec<String> = IMPORTS.iter().map(|s| s.to_string()).collect();
+    if !linux {
+        imports.push("_sigaltstack".to_string());
+        imports.push("_sigaction".to_string());
+    }
     for f in m.funcs.iter().filter(|f| !f.dead) {
         for b in &f.blocks {
             for i in &b.insts {
@@ -2001,11 +2179,12 @@ fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result
         files: files.to_vec(),
         imports: imports.clone(),
         too_large: None,
+        ret_slot: 0,
     };
     let mut symbols: Vec<(String, usize)> = Vec::new();
 
-    let fmt64 = g.add_str(b"%.15g\0");
-    let fmt32 = g.add_str(b"%.7g\0");
+    let fmt = g.add_str(b"%.*g\0");
+    let (fmt64, fmt32) = (fmt, fmt);
 
     let stubs: Vec<usize> = (0..imports.len()).map(|s| g.import_stub(s)).collect();
     // Every allocation passes through these two, so a later version can record them.
@@ -2026,7 +2205,9 @@ fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result
     let buf_int = g.rt_buf_num(true);
     let buf_uint = g.rt_buf_num(false);
     let buf_bool = g.rt_buf_bool();
-    let buf_float = g.rt_buf_float();
+    let buf_float = g.rt_buf_float(fmt);
+    let segv = if linux { None } else { Some(g.rt_segv()) };
+    let mut segv_refs: Vec<(usize, usize)> = Vec::new();
     for (n, p) in [
         ("alloc", rt_alloc),
         ("free", rt_free),
@@ -2052,6 +2233,33 @@ fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result
     g.e(add(X9, X9, X16));
     g.e(str(X0, X9, 0));
     g.e(str(X1, X9, 8));
+    if let Some(handler) = segv {
+        // A stack overflow is reported, not a silent crash: the handler needs a stack of its own to run on.
+        g.mov_imm(X0, 65536);
+        g.call(BL, Target::Import(IMP_MALLOC));
+        g.e(sub_imm(SP, SP, 64));
+        g.e(str(X0, SP, 0));
+        g.mov_imm(X9, 65536);
+        g.e(str(X9, SP, 8));
+        g.e(str(XZR, SP, 16));
+        g.e(mov_sp(X0, SP));
+        g.e(movz(X1, 0, 0));
+        g.call(BL, Target::Import(IMP_SIGALTSTACK));
+        // struct sigaction { handler, mask 0, flags SA_ONSTACK | SA_SIGINFO }
+        segv_refs.push((g.here(), handler));
+        g.e(adrp(X9, 0));
+        g.e(add_imm(X9, X9, 0));
+        g.e(str(X9, SP, 24));
+        g.mov_imm(X9, 0x41 << 32);
+        g.e(str(X9, SP, 32));
+        for signo in [11, 10] {
+            g.e(movz(X0, signo, 0));
+            g.e(add_imm(X1, SP, 24));
+            g.e(movz(X2, 0, 0));
+            g.call(BL, Target::Import(IMP_SIGACTION));
+        }
+        g.e(add_imm(SP, SP, 64));
+    }
     g.call(BL, Target::User(m.main));
     if let Some(c) = m.check {
         g.call(BL, Target::User(c.finish));
@@ -2091,7 +2299,8 @@ fn build(m: &Module, files: &[String], alloc_stats: bool, linux: bool) -> Result
         g.code[at] = b_at(g.code[at], (dest as i64 - at as i64) as i32);
     }
 
-    let code_refs = std::mem::take(&mut g.func_refs).into_iter().map(|(at, f)| (at, func_pos[f])).collect();
+    let mut code_refs: Vec<(usize, usize)> = std::mem::take(&mut g.func_refs).into_iter().map(|(at, f)| (at, func_pos[f])).collect();
+    code_refs.extend(segv_refs);
 
     if let Some(name) = g.too_large {
         return Err(format!("E0901 function `{name}` is too large for this version: at most 1 MB of code and 7 MB of local data"));

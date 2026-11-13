@@ -1,0 +1,21 @@
+// Deep recursion fits in every mode: the main thread and every task have 64 MB of stack.
+// expect: 300000
+// expect: 300003
+use par
+
+fn down(n int) int {
+    if n == 0 {
+        ret 0
+    }
+    ret 1 + down(n - 1)
+}
+
+fn work(i int) int {
+    ret down(300000 + i)
+}
+
+fn main() {
+    print(down(300000))
+    r := par.build(4, work)
+    print(r[3])
+}

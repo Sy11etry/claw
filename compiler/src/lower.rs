@@ -4,6 +4,8 @@
 pub static THREADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Set once by `--target aarch64-linux*`: the program is built for Linux.
 pub static LINUX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Building for x86-64: C structs by value follow its rules (see `cabi`).
+pub static X86: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 use crate::ast::{self, BinOp, Coerce, Else, ElseKind, Expr, ExprKind, Part, Pat, Res, Stmt, StmtKind, UnOp};
 use crate::cir::*;
@@ -323,6 +325,7 @@ fn lower_func<'a>(full: &str, f: &'a ast::Func, env: &Env<'a, '_>) -> Func {
         l.finish(Term::Unreachable);
     }
     let mut func = l.into_func(full.to_string(), nparams);
+    func.at = loc(f.name_span);
     func.vsig = c.types.vsig(&sig.params, sig.ret, c.types.is_aggregate(sig.ret));
     func.c_abi = c_abi;
     func
@@ -695,7 +698,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         let zeros: Vec<Inst> = self.all_flags.iter().map(|d| Inst::Const { d: *d, v: 0 }).collect();
         blocks[0].insts.splice(0..0, zeros);
         let params = (0..nparams as VReg).collect();
-        Func { name, nparams, params, vsig: 0, c_abi: false, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
+        Func { name, at: Loc { line: 0, col: 0, file: 0 }, nparams, params, vsig: 0, c_abi: false, claw: self.is_claw, optimized: false, dead: false, nvregs: self.nvregs, objects: self.objects, blocks }
     }
 
     /// A new liveness flag, set right away.
@@ -1175,7 +1178,7 @@ impl<'a, 'i> FnLower<'a, 'i> {
         if matches!(self.t().kind(array), Kind::Slice(_) | Kind::Str) {
             let (p, len) = self.seq(array, addr);
             let idx = self.expr_value(i);
-            self.emit(Inst::BoundsDyn { idx, len, loc: loc(span) });
+            self.emit(Inst::BoundsDyn { idx, len, loc: loc(span), slice: false });
             let d = self.vreg();
             let size = self.t().size(self.elem_of(array));
             self.emit(Inst::IndexAddr { d, base: p, idx, size });
@@ -1948,10 +1951,10 @@ impl<'a, 'i> FnLower<'a, 'i> {
         // 0 <= start <= end <= len, checked as two unsigned comparisons.
         let n_plus = self.vreg();
         self.emit(Inst::AddImm { d: n_plus, s: n, imm: 1 });
-        self.emit(Inst::BoundsDyn { idx: end, len: n_plus, loc: loc(span) });
+        self.emit(Inst::BoundsDyn { idx: end, len: n_plus, loc: loc(span), slice: true });
         let end_plus = self.vreg();
         self.emit(Inst::AddImm { d: end_plus, s: end, imm: 1 });
-        self.emit(Inst::BoundsDyn { idx: start, len: end_plus, loc: loc(span) });
+        self.emit(Inst::BoundsDyn { idx: start, len: end_plus, loc: loc(span), slice: true });
 
         let size = self.t().size(self.elem_of(base_ty));
         let first = self.vreg();
@@ -2161,10 +2164,34 @@ impl<'a, 'i> FnLower<'a, 'i> {
     }
 
     fn call_c(&mut self, sym: String, fixed: usize, variadic: bool, args: &'a [Expr], ty: Ty) -> Option<VReg> {
+        use crate::cabi::{classify, is_c_struct, Pass};
+        let x86 = X86.load(std::sync::atomic::Ordering::Relaxed);
         let mut out = Vec::with_capacity(args.len());
+        // A struct result too big for registers: C writes it to memory we give it.
+        let mut result = None;
+        if is_c_struct(self.t(), ty) {
+            let obj = self.padded_obj(ty);
+            if x86 && matches!(classify(self.t(), ty, true), Pass::Memory) {
+                out.push(CArg { v: obj, float: None, size: 8 });
+            }
+            result = Some(obj);
+        }
         for (i, a) in args.iter().enumerate() {
             let mut v = self.expr_value(a);
             let mut at = a.ty.get();
+            // A struct goes as its register-sized pieces, read from a copy padded to whole registers.
+            if is_c_struct(self.t(), at) {
+                let Pass::Regs(pieces) = classify(self.t(), at, x86) else { unreachable!("sema refuses bigger structs") };
+                let copy = self.padded_obj(at);
+                self.emit(Inst::MemCopy { dst: copy, src: v, size: self.t().size(at) });
+                for p in pieces {
+                    let piece = self.vreg();
+                    let (mem, size) = if p.float == Some(32) { (Mem::U32, 4) } else { (Mem::X64, 8) };
+                    self.emit(Inst::Load { d: piece, p: copy, off: p.off, mem });
+                    out.push(CArg { v: piece, float: p.float, size });
+                }
+                continue;
+            }
             // C's default promotion: a variadic float travels as a double.
             if variadic && i >= fixed && at == F32 {
                 let d = self.vreg();
@@ -2174,6 +2201,31 @@ impl<'a, 'i> FnLower<'a, 'i> {
             }
             out.push(CArg { v, float: self.float_bits(at), size: self.t().size(at) as u32 });
         }
+        if let Some(dest) = result {
+            let ret = match classify(self.t(), ty, x86) {
+                Pass::Memory if x86 => CRet::None,
+                Pass::Memory => CRet::Indirect { dest },
+                Pass::Regs(pieces) => {
+                    let mut parts = [RetPart { class: 0, reg: 0, off: 0 }; 4];
+                    let (mut ints, mut floats) = (0u8, 0u8);
+                    for (k, p) in pieces.iter().enumerate() {
+                        let (class, reg) = match p.float {
+                            Some(bits) => (bits, floats),
+                            None => (0, ints),
+                        };
+                        if p.float.is_some() {
+                            floats += 1;
+                        } else {
+                            ints += 1;
+                        }
+                        parts[k] = RetPart { class, reg, off: p.off as u32 };
+                    }
+                    CRet::Parts { dest, parts, n: pieces.len() as u8 }
+                }
+            };
+            self.emit(Inst::CallC { d: None, sym, args: out, variadic: variadic.then_some(fixed), ret });
+            return Some(dest);
+        }
         let ret = match self.t().kind(ty) {
             Kind::Void => CRet::None,
             Kind::Float { bits } => CRet::Float(bits),
@@ -2181,6 +2233,15 @@ impl<'a, 'i> FnLower<'a, 'i> {
         };
         let d = if ty == VOID { None } else { Some(self.vreg()) };
         self.emit(Inst::CallC { d, sym, args: out, variadic: variadic.then_some(fixed), ret });
+        d
+    }
+
+    /// A stack object for a C struct, rounded up to whole 8-byte registers so they can be read and written whole.
+    fn padded_obj(&mut self, ty: Ty) -> VReg {
+        let (size, align) = self.t().layout(ty);
+        self.objects.push((size.div_ceil(8).max(1) * 8, align.max(8)));
+        let d = self.vreg();
+        self.emit(Inst::ObjAddr { d, obj: self.objects.len() - 1 });
         d
     }
 

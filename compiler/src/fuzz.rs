@@ -10,6 +10,7 @@ use std::collections::HashSet;
 
 const RUN_STEPS: u64 = 200_000;
 const RUNS: u32 = 4_000;
+const TOO_LONG: u32 = 25;
 /// All steps one function may use, and all that a file may use.
 const FUNC_STEPS: u64 = 20_000_000;
 const FILE_STEPS: u64 = 300_000_000;
@@ -83,6 +84,8 @@ fn int_range(bits: u8, signed: bool) -> (i128, i128) {
 enum Outcome {
     Fine,
     Discard,
+    /// Ran out of steps: the input loops, or recurses too deep. Thrown away like `Discard`.
+    TooLong,
     Skip,
     Failed(Box<Failure>),
 }
@@ -403,7 +406,8 @@ impl Fuzzer<'_, '_> {
                 }
                 Outcome::Fine
             }
-            Stop::Exit(_) | Stop::Limit(_) | Stop::NeedConst(_) => Outcome::Discard,
+            Stop::Limit(_) => Outcome::TooLong,
+            Stop::Exit(_) | Stop::NeedConst(_) => Outcome::Discard,
             Stop::Unsupported(_) => Outcome::Skip,
             Stop::Fail(f) => match f.kind {
                 Fail::OutOfMemory | Fail::ContractMath => Outcome::Discard,
@@ -702,7 +706,9 @@ fn fuzz_one(fz: &mut Fuzzer, a: &Auto) -> FuncReport {
     let mut next_planned = 0;
     let start = fz.total;
     let mut runs = 0;
-    while runs < RUNS && fz.total - start < FUNC_STEPS {
+    // A function that does not end on most inputs would only burn its whole budget: stop once most inputs did that.
+    let mut too_long = 0;
+    while runs < RUNS && fz.total - start < FUNC_STEPS && !(too_long >= TOO_LONG && too_long * 2 > runs) {
         runs += 1;
         let vals: Vec<Val> = if next_planned < plan.len() {
             next_planned += 1;
@@ -735,6 +741,7 @@ fn fuzz_one(fz: &mut Fuzzer, a: &Auto) -> FuncReport {
                 }
             }
             Outcome::Discard => {}
+            Outcome::TooLong => too_long += 1,
             Outcome::Skip => return FuncReport { inputs, result: Found::Skip },
             Outcome::Failed(f) if f.kind == Fail::Overflow => {
                 if overflow.is_none() {

@@ -1,0 +1,5 @@
+use nested
+
+fn main() {
+    print("n {nested.f()}")
+}

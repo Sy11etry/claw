@@ -1,0 +1,12 @@
+// expect: 8
+// expect: 40
+// expect: 16
+use c "sizes.h"
+
+claw fn main() {
+    b := alloc[Bitset](1)
+    defer free(b)
+    print(len(b.bits))
+    print(sizeof[Bitset]())
+    print(pair_size)
+}

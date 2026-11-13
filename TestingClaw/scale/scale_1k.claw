@@ -1,0 +1,1315 @@
+type P0 { a int, b int }
+type P1 { a int, b int }
+type Big = V0 | V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12 | V13 | V14 | V15 | V16 | V17 | V18 | V19 | V20 | V21 | V22 | V23 | V24 | V25 | V26 | V27 | V28 | V29 | V30 | V31 | V32 | V33 | V34 | V35 | V36 | V37 | V38 | V39 | V40 | V41 | V42 | V43 | V44 | V45 | V46 | V47 | V48 | V49 | V50 | V51 | V52 | V53 | V54 | V55 | V56 | V57 | V58 | V59 | V60 | V61 | V62 | V63 | V64 | V65 | V66 | V67 | V68 | V69 | V70 | V71 | V72 | V73 | V74 | V75 | V76 | V77 | V78 | V79 | V80 | V81 | V82 | V83 | V84 | V85 | V86 | V87 | V88 | V89 | V90 | V91 | V92 | V93 | V94 | V95 | V96 | V97 | V98 | V99 | V100 | V101 | V102 | V103 | V104 | V105 | V106 | V107 | V108 | V109 | V110 | V111 | V112 | V113 | V114 | V115 | V116 | V117 | V118 | V119 | V120 | V121 | V122 | V123 | V124 | V125 | V126 | V127 | V128 | V129 | V130 | V131 | V132 | V133 | V134 | V135 | V136 | V137 | V138 | V139 | V140 | V141 | V142 | V143 | V144 | V145 | V146 | V147 | V148 | V149 | V150 | V151 | V152 | V153 | V154 | V155 | V156 | V157 | V158 | V159 | V160 | V161 | V162 | V163 | V164 | V165 | V166 | V167 | V168 | V169 | V170 | V171 | V172 | V173 | V174 | V175 | V176 | V177 | V178 | V179 | V180 | V181 | V182 | V183 | V184 | V185 | V186 | V187 | V188 | V189 | V190 | V191 | V192 | V193 | V194 | V195 | V196 | V197 | V198 | V199 | V200 | V201 | V202 | V203 | V204 | V205 | V206 | V207 | V208 | V209 | V210 | V211 | V212 | V213 | V214 | V215 | V216 | V217 | V218 | V219 | V220 | V221 | V222 | V223 | V224 | V225 | V226 | V227 | V228 | V229 | V230 | V231 | V232 | V233 | V234 | V235 | V236 | V237 | V238 | V239 | V240 | V241 | V242 | V243 | V244 | V245 | V246 | V247 | V248 | V249 | V250 | V251 | V252 | V253 | V254 | V255 | V256 | V257 | V258 | V259 | V260 | V261 | V262 | V263 | V264 | V265 | V266 | V267 | V268 | V269 | V270 | V271 | V272 | V273 | V274 | V275 | V276 | V277 | V278 | V279 | V280 | V281 | V282 | V283 | V284 | V285 | V286 | V287 | V288 | V289 | V290 | V291 | V292 | V293 | V294 | V295 | V296 | V297 | V298 | V299 | V300 | V301 | V302 | V303 | V304 | V305 | V306 | V307 | V308 | V309 | V310 | V311 | V312 | V313 | V314 | V315 | V316 | V317 | V318 | V319 | V320 | V321 | V322 | V323 | V324 | V325 | V326 | V327 | V328 | V329 | V330 | V331 | V332 | V333 | V334 | V335 | V336 | V337 | V338 | V339 | V340 | V341 | V342 | V343 | V344 | V345 | V346 | V347 | V348 | V349 | V350 | V351 | V352 | V353 | V354 | V355 | V356 | V357 | V358 | V359 | V360 | V361 | V362 | V363 | V364 | V365 | V366 | V367 | V368 | V369 | V370 | V371 | V372 | V373 | V374 | V375 | V376 | V377 | V378 | V379 | V380 | V381 | V382 | V383 | V384 | V385 | V386 | V387 | V388 | V389 | V390 | V391 | V392 | V393 | V394 | V395 | V396 | V397 | V398 | V399 | V400 | V401 | V402 | V403 | V404 | V405 | V406 | V407 | V408 | V409 | V410 | V411 | V412 | V413 | V414 | V415 | V416 | V417 | V418 | V419 | V420 | V421 | V422 | V423 | V424 | V425 | V426 | V427 | V428 | V429 | V430 | V431 | V432 | V433 | V434 | V435 | V436 | V437 | V438 | V439 | V440 | V441 | V442 | V443 | V444 | V445 | V446 | V447 | V448 | V449 | V450 | V451 | V452 | V453 | V454 | V455 | V456 | V457 | V458 | V459 | V460 | V461 | V462 | V463 | V464 | V465 | V466 | V467 | V468 | V469 | V470 | V471 | V472 | V473 | V474 | V475 | V476 | V477 | V478 | V479 | V480 | V481 | V482 | V483 | V484 | V485 | V486 | V487 | V488 | V489 | V490 | V491 | V492 | V493 | V494 | V495 | V496 | V497 | V498 | V499
+fn code(v Big) int {
+    match v {
+        V0: ret 0
+        V1: ret 1
+        V2: ret 2
+        V3: ret 3
+        V4: ret 4
+        V5: ret 5
+        V6: ret 6
+        V7: ret 7
+        V8: ret 8
+        V9: ret 9
+        V10: ret 10
+        V11: ret 11
+        V12: ret 12
+        V13: ret 13
+        V14: ret 14
+        V15: ret 15
+        V16: ret 16
+        V17: ret 17
+        V18: ret 18
+        V19: ret 19
+        V20: ret 20
+        V21: ret 21
+        V22: ret 22
+        V23: ret 23
+        V24: ret 24
+        V25: ret 25
+        V26: ret 26
+        V27: ret 27
+        V28: ret 28
+        V29: ret 29
+        V30: ret 30
+        V31: ret 31
+        V32: ret 32
+        V33: ret 33
+        V34: ret 34
+        V35: ret 35
+        V36: ret 36
+        V37: ret 37
+        V38: ret 38
+        V39: ret 39
+        V40: ret 40
+        V41: ret 41
+        V42: ret 42
+        V43: ret 43
+        V44: ret 44
+        V45: ret 45
+        V46: ret 46
+        V47: ret 47
+        V48: ret 48
+        V49: ret 49
+        V50: ret 50
+        V51: ret 51
+        V52: ret 52
+        V53: ret 53
+        V54: ret 54
+        V55: ret 55
+        V56: ret 56
+        V57: ret 57
+        V58: ret 58
+        V59: ret 59
+        V60: ret 60
+        V61: ret 61
+        V62: ret 62
+        V63: ret 63
+        V64: ret 64
+        V65: ret 65
+        V66: ret 66
+        V67: ret 67
+        V68: ret 68
+        V69: ret 69
+        V70: ret 70
+        V71: ret 71
+        V72: ret 72
+        V73: ret 73
+        V74: ret 74
+        V75: ret 75
+        V76: ret 76
+        V77: ret 77
+        V78: ret 78
+        V79: ret 79
+        V80: ret 80
+        V81: ret 81
+        V82: ret 82
+        V83: ret 83
+        V84: ret 84
+        V85: ret 85
+        V86: ret 86
+        V87: ret 87
+        V88: ret 88
+        V89: ret 89
+        V90: ret 90
+        V91: ret 91
+        V92: ret 92
+        V93: ret 93
+        V94: ret 94
+        V95: ret 95
+        V96: ret 96
+        V97: ret 97
+        V98: ret 98
+        V99: ret 99
+        V100: ret 100
+        V101: ret 101
+        V102: ret 102
+        V103: ret 103
+        V104: ret 104
+        V105: ret 105
+        V106: ret 106
+        V107: ret 107
+        V108: ret 108
+        V109: ret 109
+        V110: ret 110
+        V111: ret 111
+        V112: ret 112
+        V113: ret 113
+        V114: ret 114
+        V115: ret 115
+        V116: ret 116
+        V117: ret 117
+        V118: ret 118
+        V119: ret 119
+        V120: ret 120
+        V121: ret 121
+        V122: ret 122
+        V123: ret 123
+        V124: ret 124
+        V125: ret 125
+        V126: ret 126
+        V127: ret 127
+        V128: ret 128
+        V129: ret 129
+        V130: ret 130
+        V131: ret 131
+        V132: ret 132
+        V133: ret 133
+        V134: ret 134
+        V135: ret 135
+        V136: ret 136
+        V137: ret 137
+        V138: ret 138
+        V139: ret 139
+        V140: ret 140
+        V141: ret 141
+        V142: ret 142
+        V143: ret 143
+        V144: ret 144
+        V145: ret 145
+        V146: ret 146
+        V147: ret 147
+        V148: ret 148
+        V149: ret 149
+        V150: ret 150
+        V151: ret 151
+        V152: ret 152
+        V153: ret 153
+        V154: ret 154
+        V155: ret 155
+        V156: ret 156
+        V157: ret 157
+        V158: ret 158
+        V159: ret 159
+        V160: ret 160
+        V161: ret 161
+        V162: ret 162
+        V163: ret 163
+        V164: ret 164
+        V165: ret 165
+        V166: ret 166
+        V167: ret 167
+        V168: ret 168
+        V169: ret 169
+        V170: ret 170
+        V171: ret 171
+        V172: ret 172
+        V173: ret 173
+        V174: ret 174
+        V175: ret 175
+        V176: ret 176
+        V177: ret 177
+        V178: ret 178
+        V179: ret 179
+        V180: ret 180
+        V181: ret 181
+        V182: ret 182
+        V183: ret 183
+        V184: ret 184
+        V185: ret 185
+        V186: ret 186
+        V187: ret 187
+        V188: ret 188
+        V189: ret 189
+        V190: ret 190
+        V191: ret 191
+        V192: ret 192
+        V193: ret 193
+        V194: ret 194
+        V195: ret 195
+        V196: ret 196
+        V197: ret 197
+        V198: ret 198
+        V199: ret 199
+        V200: ret 200
+        V201: ret 201
+        V202: ret 202
+        V203: ret 203
+        V204: ret 204
+        V205: ret 205
+        V206: ret 206
+        V207: ret 207
+        V208: ret 208
+        V209: ret 209
+        V210: ret 210
+        V211: ret 211
+        V212: ret 212
+        V213: ret 213
+        V214: ret 214
+        V215: ret 215
+        V216: ret 216
+        V217: ret 217
+        V218: ret 218
+        V219: ret 219
+        V220: ret 220
+        V221: ret 221
+        V222: ret 222
+        V223: ret 223
+        V224: ret 224
+        V225: ret 225
+        V226: ret 226
+        V227: ret 227
+        V228: ret 228
+        V229: ret 229
+        V230: ret 230
+        V231: ret 231
+        V232: ret 232
+        V233: ret 233
+        V234: ret 234
+        V235: ret 235
+        V236: ret 236
+        V237: ret 237
+        V238: ret 238
+        V239: ret 239
+        V240: ret 240
+        V241: ret 241
+        V242: ret 242
+        V243: ret 243
+        V244: ret 244
+        V245: ret 245
+        V246: ret 246
+        V247: ret 247
+        V248: ret 248
+        V249: ret 249
+        V250: ret 250
+        V251: ret 251
+        V252: ret 252
+        V253: ret 253
+        V254: ret 254
+        V255: ret 255
+        V256: ret 256
+        V257: ret 257
+        V258: ret 258
+        V259: ret 259
+        V260: ret 260
+        V261: ret 261
+        V262: ret 262
+        V263: ret 263
+        V264: ret 264
+        V265: ret 265
+        V266: ret 266
+        V267: ret 267
+        V268: ret 268
+        V269: ret 269
+        V270: ret 270
+        V271: ret 271
+        V272: ret 272
+        V273: ret 273
+        V274: ret 274
+        V275: ret 275
+        V276: ret 276
+        V277: ret 277
+        V278: ret 278
+        V279: ret 279
+        V280: ret 280
+        V281: ret 281
+        V282: ret 282
+        V283: ret 283
+        V284: ret 284
+        V285: ret 285
+        V286: ret 286
+        V287: ret 287
+        V288: ret 288
+        V289: ret 289
+        V290: ret 290
+        V291: ret 291
+        V292: ret 292
+        V293: ret 293
+        V294: ret 294
+        V295: ret 295
+        V296: ret 296
+        V297: ret 297
+        V298: ret 298
+        V299: ret 299
+        V300: ret 300
+        V301: ret 301
+        V302: ret 302
+        V303: ret 303
+        V304: ret 304
+        V305: ret 305
+        V306: ret 306
+        V307: ret 307
+        V308: ret 308
+        V309: ret 309
+        V310: ret 310
+        V311: ret 311
+        V312: ret 312
+        V313: ret 313
+        V314: ret 314
+        V315: ret 315
+        V316: ret 316
+        V317: ret 317
+        V318: ret 318
+        V319: ret 319
+        V320: ret 320
+        V321: ret 321
+        V322: ret 322
+        V323: ret 323
+        V324: ret 324
+        V325: ret 325
+        V326: ret 326
+        V327: ret 327
+        V328: ret 328
+        V329: ret 329
+        V330: ret 330
+        V331: ret 331
+        V332: ret 332
+        V333: ret 333
+        V334: ret 334
+        V335: ret 335
+        V336: ret 336
+        V337: ret 337
+        V338: ret 338
+        V339: ret 339
+        V340: ret 340
+        V341: ret 341
+        V342: ret 342
+        V343: ret 343
+        V344: ret 344
+        V345: ret 345
+        V346: ret 346
+        V347: ret 347
+        V348: ret 348
+        V349: ret 349
+        V350: ret 350
+        V351: ret 351
+        V352: ret 352
+        V353: ret 353
+        V354: ret 354
+        V355: ret 355
+        V356: ret 356
+        V357: ret 357
+        V358: ret 358
+        V359: ret 359
+        V360: ret 360
+        V361: ret 361
+        V362: ret 362
+        V363: ret 363
+        V364: ret 364
+        V365: ret 365
+        V366: ret 366
+        V367: ret 367
+        V368: ret 368
+        V369: ret 369
+        V370: ret 370
+        V371: ret 371
+        V372: ret 372
+        V373: ret 373
+        V374: ret 374
+        V375: ret 375
+        V376: ret 376
+        V377: ret 377
+        V378: ret 378
+        V379: ret 379
+        V380: ret 380
+        V381: ret 381
+        V382: ret 382
+        V383: ret 383
+        V384: ret 384
+        V385: ret 385
+        V386: ret 386
+        V387: ret 387
+        V388: ret 388
+        V389: ret 389
+        V390: ret 390
+        V391: ret 391
+        V392: ret 392
+        V393: ret 393
+        V394: ret 394
+        V395: ret 395
+        V396: ret 396
+        V397: ret 397
+        V398: ret 398
+        V399: ret 399
+        V400: ret 400
+        V401: ret 401
+        V402: ret 402
+        V403: ret 403
+        V404: ret 404
+        V405: ret 405
+        V406: ret 406
+        V407: ret 407
+        V408: ret 408
+        V409: ret 409
+        V410: ret 410
+        V411: ret 411
+        V412: ret 412
+        V413: ret 413
+        V414: ret 414
+        V415: ret 415
+        V416: ret 416
+        V417: ret 417
+        V418: ret 418
+        V419: ret 419
+        V420: ret 420
+        V421: ret 421
+        V422: ret 422
+        V423: ret 423
+        V424: ret 424
+        V425: ret 425
+        V426: ret 426
+        V427: ret 427
+        V428: ret 428
+        V429: ret 429
+        V430: ret 430
+        V431: ret 431
+        V432: ret 432
+        V433: ret 433
+        V434: ret 434
+        V435: ret 435
+        V436: ret 436
+        V437: ret 437
+        V438: ret 438
+        V439: ret 439
+        V440: ret 440
+        V441: ret 441
+        V442: ret 442
+        V443: ret 443
+        V444: ret 444
+        V445: ret 445
+        V446: ret 446
+        V447: ret 447
+        V448: ret 448
+        V449: ret 449
+        V450: ret 450
+        V451: ret 451
+        V452: ret 452
+        V453: ret 453
+        V454: ret 454
+        V455: ret 455
+        V456: ret 456
+        V457: ret 457
+        V458: ret 458
+        V459: ret 459
+        V460: ret 460
+        V461: ret 461
+        V462: ret 462
+        V463: ret 463
+        V464: ret 464
+        V465: ret 465
+        V466: ret 466
+        V467: ret 467
+        V468: ret 468
+        V469: ret 469
+        V470: ret 470
+        V471: ret 471
+        V472: ret 472
+        V473: ret 473
+        V474: ret 474
+        V475: ret 475
+        V476: ret 476
+        V477: ret 477
+        V478: ret 478
+        V479: ret 479
+        V480: ret 480
+        V481: ret 481
+        V482: ret 482
+        V483: ret 483
+        V484: ret 484
+        V485: ret 485
+        V486: ret 486
+        V487: ret 487
+        V488: ret 488
+        V489: ret 489
+        V490: ret 490
+        V491: ret 491
+        V492: ret 492
+        V493: ret 493
+        V494: ret 494
+        V495: ret 495
+        V496: ret 496
+        V497: ret 497
+        V498: ret 498
+        V499: ret 499
+    }
+}
+fn table0() int {
+    ret len([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59])
+}
+fn table() int {
+    ret table0()
+}
+fn deep(x int) int {
+    mut y := 0
+    if x > 0 {
+        if x > 1 {
+            if x > 2 {
+                if x > 3 {
+                    if x > 4 {
+                        if x > 5 {
+                            if x > 6 {
+                                if x > 7 {
+                                    if x > 8 {
+                                        if x > 9 {
+                                            if x > 10 {
+                                                if x > 11 {
+                                                    if x > 12 {
+                                                        if x > 13 {
+                                                            if x > 14 {
+                                                                if x > 15 {
+                                                                    if x > 16 {
+                                                                        if x > 17 {
+                                                                            if x > 18 {
+                                                                                if x > 19 {
+                                                                                    y += 1
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ret y
+}
+fn g0(x int) int {
+    mut y := x
+    y += 0
+    ret y
+}
+fn g1(x int) int {
+    mut y := x
+    y += 1
+    ret y
+}
+fn g2(x int) int {
+    mut y := x
+    y += 2
+    ret y
+}
+fn g3(x int) int {
+    mut y := x
+    y += 3
+    ret y
+}
+fn g4(x int) int {
+    mut y := x
+    y += 4
+    ret y
+}
+fn g5(x int) int {
+    mut y := x
+    y += 5
+    ret y
+}
+fn g6(x int) int {
+    mut y := x
+    y += 6
+    ret y
+}
+fn g7(x int) int {
+    mut y := x
+    y += 7
+    ret y
+}
+fn g8(x int) int {
+    mut y := x
+    y += 8
+    ret y
+}
+fn g9(x int) int {
+    mut y := x
+    y += 9
+    ret y
+}
+fn g10(x int) int {
+    mut y := x
+    y += 10
+    ret y
+}
+fn g11(x int) int {
+    mut y := x
+    y += 11
+    ret y
+}
+fn g12(x int) int {
+    mut y := x
+    y += 12
+    ret y
+}
+fn g13(x int) int {
+    mut y := x
+    y += 13
+    ret y
+}
+fn g14(x int) int {
+    mut y := x
+    y += 14
+    ret y
+}
+fn g15(x int) int {
+    mut y := x
+    y += 15
+    ret y
+}
+fn g16(x int) int {
+    mut y := x
+    y += 16
+    ret y
+}
+fn g17(x int) int {
+    mut y := x
+    y += 17
+    ret y
+}
+fn g18(x int) int {
+    mut y := x
+    y += 18
+    ret y
+}
+fn g19(x int) int {
+    mut y := x
+    y += 19
+    ret y
+}
+fn g20(x int) int {
+    mut y := x
+    y += 20
+    ret y
+}
+fn g21(x int) int {
+    mut y := x
+    y += 21
+    ret y
+}
+fn g22(x int) int {
+    mut y := x
+    y += 22
+    ret y
+}
+fn g23(x int) int {
+    mut y := x
+    y += 23
+    ret y
+}
+fn g24(x int) int {
+    mut y := x
+    y += 24
+    ret y
+}
+fn g25(x int) int {
+    mut y := x
+    y += 25
+    ret y
+}
+fn g26(x int) int {
+    mut y := x
+    y += 26
+    ret y
+}
+fn g27(x int) int {
+    mut y := x
+    y += 27
+    ret y
+}
+fn g28(x int) int {
+    mut y := x
+    y += 28
+    ret y
+}
+fn g29(x int) int {
+    mut y := x
+    y += 29
+    ret y
+}
+fn g30(x int) int {
+    mut y := x
+    y += 30
+    ret y
+}
+fn g31(x int) int {
+    mut y := x
+    y += 31
+    ret y
+}
+fn g32(x int) int {
+    mut y := x
+    y += 32
+    ret y
+}
+fn g33(x int) int {
+    mut y := x
+    y += 33
+    ret y
+}
+fn g34(x int) int {
+    mut y := x
+    y += 34
+    ret y
+}
+fn g35(x int) int {
+    mut y := x
+    y += 35
+    ret y
+}
+fn g36(x int) int {
+    mut y := x
+    y += 36
+    ret y
+}
+fn g37(x int) int {
+    mut y := x
+    y += 37
+    ret y
+}
+fn g38(x int) int {
+    mut y := x
+    y += 38
+    ret y
+}
+fn g39(x int) int {
+    mut y := x
+    y += 39
+    ret y
+}
+fn g40(x int) int {
+    mut y := x
+    y += 40
+    ret y
+}
+fn g41(x int) int {
+    mut y := x
+    y += 41
+    ret y
+}
+fn g42(x int) int {
+    mut y := x
+    y += 42
+    ret y
+}
+fn g43(x int) int {
+    mut y := x
+    y += 43
+    ret y
+}
+fn g44(x int) int {
+    mut y := x
+    y += 44
+    ret y
+}
+fn g45(x int) int {
+    mut y := x
+    y += 45
+    ret y
+}
+fn g46(x int) int {
+    mut y := x
+    y += 46
+    ret y
+}
+fn g47(x int) int {
+    mut y := x
+    y += 47
+    ret y
+}
+fn g48(x int) int {
+    mut y := x
+    y += 48
+    ret y
+}
+fn g49(x int) int {
+    mut y := x
+    y += 49
+    ret y
+}
+fn g50(x int) int {
+    mut y := x
+    y += 50
+    ret y
+}
+fn g51(x int) int {
+    mut y := x
+    y += 51
+    ret y
+}
+fn g52(x int) int {
+    mut y := x
+    y += 52
+    ret y
+}
+fn g53(x int) int {
+    mut y := x
+    y += 53
+    ret y
+}
+fn g54(x int) int {
+    mut y := x
+    y += 54
+    ret y
+}
+fn g55(x int) int {
+    mut y := x
+    y += 55
+    ret y
+}
+fn g56(x int) int {
+    mut y := x
+    y += 56
+    ret y
+}
+fn g57(x int) int {
+    mut y := x
+    y += 57
+    ret y
+}
+fn g58(x int) int {
+    mut y := x
+    y += 58
+    ret y
+}
+fn g59(x int) int {
+    mut y := x
+    y += 59
+    ret y
+}
+fn g60(x int) int {
+    mut y := x
+    y += 60
+    ret y
+}
+fn g61(x int) int {
+    mut y := x
+    y += 61
+    ret y
+}
+fn g62(x int) int {
+    mut y := x
+    y += 62
+    ret y
+}
+fn g63(x int) int {
+    mut y := x
+    y += 63
+    ret y
+}
+fn g64(x int) int {
+    mut y := x
+    y += 64
+    ret y
+}
+fn g65(x int) int {
+    mut y := x
+    y += 65
+    ret y
+}
+fn g66(x int) int {
+    mut y := x
+    y += 66
+    ret y
+}
+fn g67(x int) int {
+    mut y := x
+    y += 67
+    ret y
+}
+fn g68(x int) int {
+    mut y := x
+    y += 68
+    ret y
+}
+fn g69(x int) int {
+    mut y := x
+    y += 69
+    ret y
+}
+fn g70(x int) int {
+    mut y := x
+    y += 70
+    ret y
+}
+fn g71(x int) int {
+    mut y := x
+    y += 71
+    ret y
+}
+fn g72(x int) int {
+    mut y := x
+    y += 72
+    ret y
+}
+fn g73(x int) int {
+    mut y := x
+    y += 73
+    ret y
+}
+fn g74(x int) int {
+    mut y := x
+    y += 74
+    ret y
+}
+fn g75(x int) int {
+    mut y := x
+    y += 75
+    ret y
+}
+fn g76(x int) int {
+    mut y := x
+    y += 76
+    ret y
+}
+fn g77(x int) int {
+    mut y := x
+    y += 77
+    ret y
+}
+fn g78(x int) int {
+    mut y := x
+    y += 78
+    ret y
+}
+fn g79(x int) int {
+    mut y := x
+    y += 79
+    ret y
+}
+fn g80(x int) int {
+    mut y := x
+    y += 80
+    ret y
+}
+fn g81(x int) int {
+    mut y := x
+    y += 81
+    ret y
+}
+fn g82(x int) int {
+    mut y := x
+    y += 82
+    ret y
+}
+fn g83(x int) int {
+    mut y := x
+    y += 83
+    ret y
+}
+fn g84(x int) int {
+    mut y := x
+    y += 84
+    ret y
+}
+fn g85(x int) int {
+    mut y := x
+    y += 85
+    ret y
+}
+fn g86(x int) int {
+    mut y := x
+    y += 86
+    ret y
+}
+fn g87(x int) int {
+    mut y := x
+    y += 87
+    ret y
+}
+fn g88(x int) int {
+    mut y := x
+    y += 88
+    ret y
+}
+fn g89(x int) int {
+    mut y := x
+    y += 89
+    ret y
+}
+fn g90(x int) int {
+    mut y := x
+    y += 90
+    ret y
+}
+fn g91(x int) int {
+    mut y := x
+    y += 91
+    ret y
+}
+fn g92(x int) int {
+    mut y := x
+    y += 92
+    ret y
+}
+fn g93(x int) int {
+    mut y := x
+    y += 93
+    ret y
+}
+fn g94(x int) int {
+    mut y := x
+    y += 94
+    ret y
+}
+fn g95(x int) int {
+    mut y := x
+    y += 95
+    ret y
+}
+fn g96(x int) int {
+    mut y := x
+    y += 96
+    ret y
+}
+fn g97(x int) int {
+    mut y := x
+    y += 97
+    ret y
+}
+fn g98(x int) int {
+    mut y := x
+    y += 98
+    ret y
+}
+fn g99(x int) int {
+    mut y := x
+    y += 99
+    ret y
+}
+fn g100(x int) int {
+    mut y := x
+    y += 100
+    ret y
+}
+fn g101(x int) int {
+    mut y := x
+    y += 101
+    ret y
+}
+fn g102(x int) int {
+    mut y := x
+    y += 102
+    ret y
+}
+fn g103(x int) int {
+    mut y := x
+    y += 103
+    ret y
+}
+fn g104(x int) int {
+    mut y := x
+    y += 104
+    ret y
+}
+fn g105(x int) int {
+    mut y := x
+    y += 105
+    ret y
+}
+fn g106(x int) int {
+    mut y := x
+    y += 106
+    ret y
+}
+fn g107(x int) int {
+    mut y := x
+    y += 107
+    ret y
+}
+fn g108(x int) int {
+    mut y := x
+    y += 108
+    ret y
+}
+fn g109(x int) int {
+    mut y := x
+    y += 109
+    ret y
+}
+fn g110(x int) int {
+    mut y := x
+    y += 110
+    ret y
+}
+fn g111(x int) int {
+    mut y := x
+    y += 111
+    ret y
+}
+fn g112(x int) int {
+    mut y := x
+    y += 112
+    ret y
+}
+fn g113(x int) int {
+    mut y := x
+    y += 113
+    ret y
+}
+fn g114(x int) int {
+    mut y := x
+    y += 114
+    ret y
+}
+fn g115(x int) int {
+    mut y := x
+    y += 115
+    ret y
+}
+fn g116(x int) int {
+    mut y := x
+    y += 116
+    ret y
+}
+fn g117(x int) int {
+    mut y := x
+    y += 117
+    ret y
+}
+fn g118(x int) int {
+    mut y := x
+    y += 118
+    ret y
+}
+fn g119(x int) int {
+    mut y := x
+    y += 119
+    ret y
+}
+fn g120(x int) int {
+    mut y := x
+    y += 120
+    ret y
+}
+fn g121(x int) int {
+    mut y := x
+    y += 121
+    ret y
+}
+fn g122(x int) int {
+    mut y := x
+    y += 122
+    ret y
+}
+fn g123(x int) int {
+    mut y := x
+    y += 123
+    ret y
+}
+fn g124(x int) int {
+    mut y := x
+    y += 124
+    ret y
+}
+fn main() {
+    mut total := 0
+    total += code(V7)
+    total += deep(12)
+    total += table()
+    total += g0(total % 7)
+    total += g1(total % 7)
+    total += g2(total % 7)
+    total += g3(total % 7)
+    total += g4(total % 7)
+    total += g5(total % 7)
+    total += g6(total % 7)
+    total += g7(total % 7)
+    total += g8(total % 7)
+    total += g9(total % 7)
+    total += g10(total % 7)
+    total += g11(total % 7)
+    total += g12(total % 7)
+    total += g13(total % 7)
+    total += g14(total % 7)
+    total += g15(total % 7)
+    total += g16(total % 7)
+    total += g17(total % 7)
+    total += g18(total % 7)
+    total += g19(total % 7)
+    total += g20(total % 7)
+    total += g21(total % 7)
+    total += g22(total % 7)
+    total += g23(total % 7)
+    total += g24(total % 7)
+    total += g25(total % 7)
+    total += g26(total % 7)
+    total += g27(total % 7)
+    total += g28(total % 7)
+    total += g29(total % 7)
+    total += g30(total % 7)
+    total += g31(total % 7)
+    total += g32(total % 7)
+    total += g33(total % 7)
+    total += g34(total % 7)
+    total += g35(total % 7)
+    total += g36(total % 7)
+    total += g37(total % 7)
+    total += g38(total % 7)
+    total += g39(total % 7)
+    total += g40(total % 7)
+    total += g41(total % 7)
+    total += g42(total % 7)
+    total += g43(total % 7)
+    total += g44(total % 7)
+    total += g45(total % 7)
+    total += g46(total % 7)
+    total += g47(total % 7)
+    total += g48(total % 7)
+    total += g49(total % 7)
+    total += g50(total % 7)
+    total += g51(total % 7)
+    total += g52(total % 7)
+    total += g53(total % 7)
+    total += g54(total % 7)
+    total += g55(total % 7)
+    total += g56(total % 7)
+    total += g57(total % 7)
+    total += g58(total % 7)
+    total += g59(total % 7)
+    total += g60(total % 7)
+    total += g61(total % 7)
+    total += g62(total % 7)
+    total += g63(total % 7)
+    total += g64(total % 7)
+    total += g65(total % 7)
+    total += g66(total % 7)
+    total += g67(total % 7)
+    total += g68(total % 7)
+    total += g69(total % 7)
+    total += g70(total % 7)
+    total += g71(total % 7)
+    total += g72(total % 7)
+    total += g73(total % 7)
+    total += g74(total % 7)
+    total += g75(total % 7)
+    total += g76(total % 7)
+    total += g77(total % 7)
+    total += g78(total % 7)
+    total += g79(total % 7)
+    total += g80(total % 7)
+    total += g81(total % 7)
+    total += g82(total % 7)
+    total += g83(total % 7)
+    total += g84(total % 7)
+    total += g85(total % 7)
+    total += g86(total % 7)
+    total += g87(total % 7)
+    total += g88(total % 7)
+    total += g89(total % 7)
+    total += g90(total % 7)
+    total += g91(total % 7)
+    total += g92(total % 7)
+    total += g93(total % 7)
+    total += g94(total % 7)
+    total += g95(total % 7)
+    total += g96(total % 7)
+    total += g97(total % 7)
+    total += g98(total % 7)
+    total += g99(total % 7)
+    total += g100(total % 7)
+    total += g101(total % 7)
+    total += g102(total % 7)
+    total += g103(total % 7)
+    total += g104(total % 7)
+    total += g105(total % 7)
+    total += g106(total % 7)
+    total += g107(total % 7)
+    total += g108(total % 7)
+    total += g109(total % 7)
+    total += g110(total % 7)
+    total += g111(total % 7)
+    total += g112(total % 7)
+    total += g113(total % 7)
+    total += g114(total % 7)
+    total += g115(total % 7)
+    total += g116(total % 7)
+    total += g117(total % 7)
+    total += g118(total % 7)
+    total += g119(total % 7)
+    total += g120(total % 7)
+    total += g121(total % 7)
+    total += g122(total % 7)
+    total += g123(total % 7)
+    total += g124(total % 7)
+    print(total)
+}

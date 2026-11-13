@@ -1,0 +1,8 @@
+fn id[T](x T) T {
+    ret x
+}
+
+fn main() {
+    print(id(3))
+    print(id("pear"))
+}

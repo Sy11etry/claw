@@ -1,0 +1,23 @@
+// expect: eval 15
+type Expr = Num{v int} | Add{parts []Expr} | Mul{parts []Expr}
+
+fn eval(e Expr) int {
+    match e {
+        Num{v}: ret v
+        Add{parts}: {
+            mut s := 0
+            for p in parts { s += eval(p) }
+            ret s
+        }
+        Mul{parts}: {
+            mut s := 1
+            for p in parts { s *= eval(p) }
+            ret s
+        }
+    }
+}
+
+fn main() {
+    e := Add{[Num{2}, Mul{[Num{3}, Num{4}]}, Num{1}]}
+    print("eval {eval(e)}")
+}

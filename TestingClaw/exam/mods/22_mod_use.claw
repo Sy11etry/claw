@@ -1,0 +1,8 @@
+// expect: 30
+// expect: 99
+use lib.geo
+
+fn main() {
+    print(geo.make(3))
+    print(geo.reveal())
+}

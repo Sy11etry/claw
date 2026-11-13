@@ -1,0 +1,16 @@
+// expect-compile-error
+type P { x i32, y i32 }
+
+claw fn cb(p P) i32 {
+    ret p.x
+}
+
+claw fn run() int {
+    p := cast[*u8](cb)
+    if p == none { ret 1 }
+    ret 0
+}
+
+fn main() {
+    print("run {run()}")
+}

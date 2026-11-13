@@ -1,0 +1,28 @@
+// c: b13_expat.c
+// clw: -l expat
+// cflags: -lexpat
+// x64: yes
+// expect: elements 4
+use c "expat.h"
+
+claw fn on_start(ud *u8, _ *u8, _ **u8) {
+    counter := cast[*int](ud)
+    counter[0] += 1
+}
+
+claw fn count_elements() int {
+    p := XML_ParserCreate(none)
+    if p == none { ret -1 }
+    acc := alloc[int](1)
+    defer free(acc)
+    acc[0] = 0
+    XML_SetUserData(p, cast[*u8](acc))
+    XML_SetStartElementHandler(p, cast[*u8](on_start))
+    _ = XML_Parse(p, "<a><b/><c><d/></c></a>", 22, 1)
+    XML_ParserFree(p)
+    ret acc[0]
+}
+
+fn main() {
+    print("elements {count_elements()}")
+}

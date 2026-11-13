@@ -1,0 +1,10 @@
+// exit: 1
+fn f(a int) int {
+    ret 1
+}
+
+fn main() {
+    mut y int = 2
+    q := [1, 2]
+    print(f(1))
+}

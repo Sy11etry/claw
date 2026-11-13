@@ -1,0 +1,12 @@
+// Recursion with no end: what was printed comes out, then the reason, and the program ends.
+// expect: before
+// stderr: trap: stack overflow
+// crash: yes
+fn forever(n int) int {
+    ret forever(n + 1) + 1
+}
+
+fn main() {
+    print("before")
+    print(forever(0))
+}

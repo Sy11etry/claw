@@ -1,0 +1,31 @@
+// c: b03_math.c
+// cflags: -lm
+// x64: yes
+// expect: sqrt 12
+// expect: pow 1024
+// expect: floor 2
+// expect: ceil 3
+use c "math.h"
+
+claw fn root(x f64) int {
+    ret int(sqrt(x))
+}
+
+claw fn power(x f64, y f64) int {
+    ret int(pow(x, y))
+}
+
+claw fn floor_of(x f64) int {
+    ret int(floor(x))
+}
+
+claw fn ceil_of(x f64) int {
+    ret int(ceil(x))
+}
+
+fn main() {
+    print("sqrt {root(144.0)}")
+    print("pow {power(2.0, 10.0)}")
+    print("floor {floor_of(2.7)}")
+    print("ceil {ceil_of(2.1)}")
+}

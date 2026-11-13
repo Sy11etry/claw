@@ -1,0 +1,9 @@
+fn main() {
+    mut n := 0
+    for {
+        n += 1
+        if n == 0 {
+            print(n)
+        }
+    }
+}

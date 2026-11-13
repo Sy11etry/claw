@@ -1,0 +1,8 @@
+// error: E0149
+type Named { name str, n int }
+
+extern fn take_named(v Named) int
+
+claw fn main() {
+    print(take_named(Named{"a", 1}))
+}

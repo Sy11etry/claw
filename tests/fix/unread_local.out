@@ -1,0 +1,10 @@
+// exit: 1
+fn f(a int) int {
+    ret 1
+}
+
+fn main() {
+    _ = 2
+    _ = [1, 2]
+    print(f(1))
+}

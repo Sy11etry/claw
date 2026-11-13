@@ -1,0 +1,17 @@
+// error: E0144
+// error: E0144
+// error: E0144
+type Box[T] { v T }
+type Pick[T] = Got{v T} | Empty
+type Plain { v int }
+
+fn main() {
+    b := Box[int, int]{1}
+    p Pick[int] = Got[int, str]{2}
+    q := Plain[int]{3}
+    print(b.v + q.v)
+    match p {
+        Got{v}: print(v)
+        Empty: print(0)
+    }
+}

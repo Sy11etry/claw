@@ -55,7 +55,7 @@ pub type Inst = Const{d int, v int} |
     MemCopyDyn{dst int, src int, n int} |
     IndexAddr{d int, base int, idx int, size u64} |
     Bounds{idx int, len u64, loc Loc} |
-    BoundsDyn{idx int, len int, loc Loc} |
+    BoundsDyn{idx int, len int, loc Loc, slice bool} |
     // `malloc` of `n` items, trapping on a bad size or on failure.
     Alloc{d int, n int, elem u64, loc Loc} |
     Free{p int} |
@@ -194,7 +194,7 @@ pub fn each(i Inst) []RegUse +mem {
         }
         IndexAddr{d, base, idx, _}: two_def(&out, base, idx, d)
         Bounds{idx, _, _}: reg(&out, idx, false)
-        BoundsDyn{idx, n, _}: {
+        BoundsDyn{idx, n, _, _}: {
             reg(&out, idx, false)
             reg(&out, n, false)
         }
@@ -458,7 +458,7 @@ fn add_inst(o &[]u8, i Inst) {
         MemCopyDyn{dst, src, n}: add(&o, "MemCopyDyn {{ dst: {dst}, src: {src}, n: {n} }}")
         IndexAddr{d, base, idx, size}: add(&o, "IndexAddr {{ d: {d}, base: {base}, idx: {idx}, size: {size} }}")
         Bounds{idx, n, loc}: add(&o, "Bounds {{ idx: {idx}, len: {n}, loc: {loc_text(loc)} }}")
-        BoundsDyn{idx, n, loc}: add(&o, "BoundsDyn {{ idx: {idx}, len: {n}, loc: {loc_text(loc)} }}")
+        BoundsDyn{idx, n, loc, slice}: add(&o, "BoundsDyn {{ idx: {idx}, len: {n}, loc: {loc_text(loc)}, slice: {slice} }}")
         Alloc{d, n, elem, loc}: add(&o, "Alloc {{ d: {d}, n: {n}, elem: {elem}, loc: {loc_text(loc)} }}")
         Free{p}: add(&o, "Free {{ p: {p} }}")
         StrAddr{d, text}: {

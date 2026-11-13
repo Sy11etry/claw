@@ -1,0 +1,11 @@
+// expect-compile-error
+use c "stdlib.h"
+
+claw fn quotient() int {
+    r := div(7, 2)
+    ret int(r.quot)
+}
+
+fn main() {
+    print("q {quotient()}")
+}

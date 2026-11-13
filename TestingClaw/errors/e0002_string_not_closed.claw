@@ -1,0 +1,5 @@
+// code: E0002
+fn main() {
+    s := "abc
+    print(s)
+}

@@ -1,0 +1,6 @@
+// error: E0184
+use c "broken_endif.h"
+
+claw fn main() {
+    print(broken_twice(2))
+}

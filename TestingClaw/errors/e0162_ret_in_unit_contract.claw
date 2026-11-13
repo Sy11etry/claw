@@ -1,0 +1,9 @@
+// code: E0162
+fn f(a int)
+    sure ret == 1
+{
+    print(a)
+}
+fn main() {
+    f(1)
+}

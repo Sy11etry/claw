@@ -1,0 +1,7 @@
+// code: E0132
+fn f() int +wat {
+    ret 1
+}
+fn main() {
+    print(f())
+}

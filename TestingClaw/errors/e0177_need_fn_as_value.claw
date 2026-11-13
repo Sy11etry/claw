@@ -1,0 +1,10 @@
+// code: E0177
+fn needy(x int) int
+    need x > 0
+{
+    ret x
+}
+fn main() {
+    f := needy
+    print(1)
+}

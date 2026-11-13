@@ -1,5 +1,6 @@
 // error: E0149
-type P { x int }
+// A struct C returns by value must be plain numbers and pointers; `[]int` is Claw's own.
+type P { x int, items []int }
 
 extern fn f() P
 

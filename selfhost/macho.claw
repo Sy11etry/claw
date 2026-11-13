@@ -424,7 +424,8 @@ pub fn write_macho(obj codegen.Object, ident str) []u8 +mem {
     w_u32(&w, 0x8000_0028) // LC_MAIN
     w_u32(&w, 24)
     w_u64(&w, text_off + u64(obj.entry) * 4)
-    w_u64(&w, 0)
+    // The main thread's stack (`ld -stack_size`): 64 MB instead of 8, so deep recursion works in every build mode.
+    w_u64(&w, 67108864)
 
     dylib_extra []u32 = [2, 0x0001_0000, 0x0001_0000]
     path_cmd(&w, 0x0c, "/usr/lib/libSystem.B.dylib", dylib_extra)

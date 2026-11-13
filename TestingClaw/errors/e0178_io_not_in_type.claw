@@ -1,0 +1,9 @@
+// code: E0178
+fn work(x int) int +io {
+    print(x)
+    ret x
+}
+fn main() {
+    f fn(int) int = work
+    print(1)
+}

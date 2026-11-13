@@ -64,6 +64,8 @@ struct Var {
     written: bool,
     span: Span,
     decl: Span,
+    /// For a `x := e` local: the text from the start of the statement to `e`, which `_ = ` can replace.
+    discard: Option<Span>,
 }
 
 const BUILTINS: &[&str] = &[
@@ -92,6 +94,8 @@ struct Mod<'a> {
     imports: &'a HashMap<String, usize>,
     /// C structs this module's headers declare but Claw cannot lay out: name, then why and the header.
     packed: &'a HashMap<String, (String, String)>,
+    /// What this module's C headers say about names a program may call (see `cheader::CNote`).
+    cnotes: &'a HashMap<String, (crate::cheader::CNote, String)>,
     used: HashSet<String>,
     /// Each entry remembers whether it is `pub`.
     names: HashMap<String, (NameDef, bool)>,
@@ -105,6 +109,9 @@ struct Mod<'a> {
 struct Global<'a> {
     computed: Vec<ComputedConst>,
     callbacks: HashSet<String>,
+    /// `extern fn`s that C cannot be called with (a struct over 16 bytes, too many registers): why. Said where
+    /// one is called, so a header with such a function still works for the rest.
+    c_problems: HashMap<String, String>,
     types: Types,
     mods: Vec<Mod<'a>>,
     cur: usize,
@@ -279,7 +286,7 @@ impl<'a> Global<'a> {
                 return ERR;
             }
             if targs.len() != d.tparams.len() {
-                diags.push(Diag::new("E0144", span, format!("`{name}` takes {} type arguments, found {}", d.tparams.len(), targs.len())));
+                diags.push(Diag::new("E0144", span, format!("`{name}` takes {}, found {}", count(d.tparams.len(), "type argument"), targs.len())));
                 return ERR;
             }
             let mut args = Vec::with_capacity(targs.len());
@@ -297,7 +304,7 @@ impl<'a> Global<'a> {
             if let Some(&(d, true)) = self.mods[self.core].gtypes.get(name) {
                 let core = self.core;
                 if targs.len() != d.tparams.len() {
-                    diags.push(Diag::new("E0144", span, format!("`{name}` takes {} type arguments, found {}", d.tparams.len(), targs.len())));
+                    diags.push(Diag::new("E0144", span, format!("`{name}` takes {}, found {}", count(d.tparams.len(), "type argument"), targs.len())));
                     return ERR;
                 }
                 let args: Vec<Ty> = targs.iter().map(|a| self.resolve(a, diags)).collect();
@@ -422,7 +429,8 @@ impl<'a> Global<'a> {
     fn ensure_layout(&mut self, t: Ty, diags: &mut Vec<Diag>) {
         let cycle = |g: &Global, t: Ty, diags: &mut Vec<Diag>| {
             let span = g.spans.get(&t).copied().unwrap_or_default();
-            diags.push(Diag::new("E0127", span, format!("type `{}` contains itself, so it would be infinitely large; use a pointer", g.types.name(t))));
+            let n = g.types.name(t);
+            diags.push(Diag::new("E0127", span, format!("type `{n}` contains itself, so it would be infinitely large; hold the others in an array: `kids []{n}`")));
         };
         match self.types.kind(t) {
             Kind::Struct(id) => {
@@ -868,8 +876,11 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
             diags.push(Diag::new("E0102", f.name_span, format!("`{}` is a built-in name", f.name)));
             continue;
         }
-        let taken = g.mods[g.cur].funcs.contains_key(&f.name) || g.mods[g.cur].consts.contains_key(&f.name);
-        if taken {
+        if g.mods[g.cur].consts.contains_key(&f.name) {
+            diags.push(Diag::new("E0102", f.name_span, format!("`{}` is already a constant; a function needs another name", f.name)));
+            continue;
+        }
+        if g.mods[g.cur].funcs.contains_key(&f.name) {
             diags.push(Diag::new("E0110", f.name_span, format!("function `{}` is defined twice", f.name)));
             continue;
         }
@@ -919,13 +930,24 @@ fn collect_funcs<'a>(g: &mut Global<'a>, p: &'a Program, diags: &mut Vec<Diag>) 
         }
         let params: Vec<Ty> = x.params.iter().map(|a| g.resolve(&a.ty, diags)).collect();
         let ret = x.ret.as_ref().map(|t| g.resolve(t, diags)).unwrap_or(VOID);
+        // Structs of numbers and pointers go by value too (see `cabi`); anything Claw owns (str, []T) never does.
+        let mut ok = true;
         for (a, t) in x.params.iter().zip(&params) {
-            if !is_c_type(&g.types, *t) {
-                diags.push(Diag::new("E0149", a.span, "`extern fn` takes only numbers, bool and pointers; pass a pointer to the struct"));
+            if !is_c_type(&g.types, *t) && !crate::cabi::is_c_struct(&g.types, *t) {
+                diags.push(Diag::new("E0149", a.span, "`extern fn` takes numbers, bool, pointers and structs of those; pass a pointer instead"));
+                ok = false;
             }
         }
-        if !is_c_type(&g.types, ret) {
-            diags.push(Diag::new("E0149", x.span, "`extern fn` returns only numbers, bool and pointers"));
+        if !is_c_type(&g.types, ret) && !crate::cabi::is_c_struct(&g.types, ret) {
+            diags.push(Diag::new("E0149", x.span, "`extern fn` returns numbers, bool, pointers and structs of those"));
+            ok = false;
+        }
+        if ok && !x.variadic {
+            if let Some(why) = crate::cabi::problem(&g.types, &params, ret) {
+                g.c_problems.insert(format!("{prefix}{}", x.name), why);
+            }
+        } else if ok && params.iter().chain(std::iter::once(&ret)).any(|t| crate::cabi::is_c_struct(&g.types, *t)) {
+            g.c_problems.insert(format!("{prefix}{}", x.name), "a function with `...` takes and returns only numbers, bool and pointers".to_string());
         }
         g.mods[g.cur].funcs.insert(x.name.clone(), (None, x.public));
         let symbol = x.symbol.clone().unwrap_or_else(|| x.name.clone());
@@ -991,6 +1013,7 @@ fn check_body<'a>(g: &mut Global<'a>, diags: &mut Vec<Diag>, f: &Func, module: u
 pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag>) -> Checked {
     let mut g = Global {
         callbacks: HashSet::new(),
+        c_problems: HashMap::new(),
         types: Types::new(),
         mods: units
             .iter()
@@ -998,6 +1021,7 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
                 prefix: u.prefix.clone(),
                 imports: &u.imports,
                 packed: &u.packed,
+                cnotes: &u.cnotes,
                 used: HashSet::new(),
                 names: HashMap::new(),
                 consts: HashMap::new(),
@@ -1096,8 +1120,17 @@ pub fn check(units: &[Unit], core: usize, tests_only: bool, diags: &mut Vec<Diag
     while let Some((f, m, targs, full)) = g.work.pop() {
         let mut inst = f.clone();
         inst.name = full.clone();
-        g.tenv = f.tparams.iter().map(|p| p.0.clone()).zip(targs).collect();
+        g.tenv = f.tparams.iter().map(|p| p.0.clone()).zip(targs.iter().copied()).collect();
+        let before = diags.len();
         check_body(&mut g, diags, &inst, m, &full, false);
+        // A template is checked once per set of types: say which set broke it.
+        if diags.len() > before {
+            let note = f.tparams.iter().zip(&targs).map(|(p, t)| format!("{} = {}", p.0, g.types.name(*t))).collect::<Vec<_>>().join(", ");
+            // E0145 already says the types keep growing; the last of them would only be noise.
+            for d in diags[before..].iter_mut().filter(|d| d.code != "E0145") {
+                d.msg = format!("{} (in `{}` with {note})", d.msg, f.name);
+            }
+        }
         g.tenv.clear();
         instances.push(inst);
     }
@@ -1167,6 +1200,29 @@ fn path_of(e: &Expr) -> Option<(String, Vec<Comp>)> {
         }
         _ => None,
     }
+}
+
+/// `1 value`, `2 values`.
+fn count(n: usize, word: &str) -> String {
+    if n == 1 { format!("1 {word}") } else { format!("{n} {word}s") }
+}
+
+/// The source text of a simple path like `p.b`, `xs[0]`, `a[i].name` or `s[1..]`, for messages and patches.
+fn expr_text(e: &Expr) -> Option<String> {
+    Some(match &e.kind {
+        ExprKind::Var(n) => n.clone(),
+        ExprKind::Int(v) => v.to_string(),
+        ExprKind::Field { e: b, name, .. } => format!("{}.{name}", expr_text(b)?),
+        ExprKind::Index { e: b, i } => format!("{}[{}]", expr_text(b)?, expr_text(i)?),
+        ExprKind::Slice { e: b, lo, hi } => {
+            let lo = match lo { Some(x) => expr_text(x)?, None => String::new() };
+            let hi = match hi { Some(x) => expr_text(x)?, None => String::new() };
+            format!("{}[{lo}..{hi}]", expr_text(b)?)
+        }
+        ExprKind::Binary { op: BinOp::Add, l, r } => format!("{} + {}", expr_text(l)?, expr_text(r)?),
+        ExprKind::Binary { op: BinOp::Sub, l, r } => format!("{} - {}", expr_text(l)?, expr_text(r)?),
+        _ => return None,
+    })
 }
 
 /// Could these two paths touch the same memory?
@@ -1315,13 +1371,13 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if taken {
             self.diags.push(Diag::new("E0102", span, format!("`{name}` is already defined; names cannot be reused or hidden")));
             if self.lookup(name).is_none() {
-                let v = Var { ty, view: false, by_ref: false, mutable, read: true, written: true, span, decl };
+                let v = Var { ty, view: false, by_ref: false, mutable, read: true, written: true, span, decl, discard: None };
                 self.scopes.last_mut().unwrap().insert(name.to_string(), v);
             }
             return;
         }
         self.moved.remove(name);
-        let v = Var { ty, view: false, by_ref: false, mutable, read: false, written: false, span, decl };
+        let v = Var { ty, view: false, by_ref: false, mutable, read: false, written: false, span, decl, discard: None };
         self.scopes.last_mut().unwrap().insert(name.to_string(), v);
     }
 
@@ -1334,7 +1390,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
         for (name, v) in scope {
             self.moved.remove(&name);
             if !v.read && !(v.by_ref && v.written) {
-                let d = Diag::new("E0105", v.span, format!("`{name}` is never read")).suggest(v.span, "_", format!("rename `{name}` to `_`"));
+                let d = match v.discard {
+                    // A local cannot be named `_`; what throws a value away is `_ = e`.
+                    Some(at) => Diag::new("E0105", v.span, format!("`{name}` is never read")).fix(at, "_ = ", format!("write `_ = ` instead of `{name} :=`")),
+                    None => Diag::new("E0105", v.span, format!("`{name}` is never read")).suggest(v.span, "_", format!("rename `{name}` to `_`")),
+                };
                 self.diags.push(d);
             } else if v.mutable && !v.written && !v.by_ref {
                 let d = Diag::new("E0116", v.span, format!("`{name}` is `mut` but never changes")).fix(v.decl, "", "remove `mut`");
@@ -1419,7 +1479,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
     fn value_type(&mut self, span: Span, ty: Ty) -> Ty {
         match self.kind(ty) {
             Kind::Void => self.err("E0104", span, "this has no value"),
-            Kind::StrLit => self.err("E0900", span, "this string form only works directly inside `print`"),
+            // Left from 0.2, when `"{x}"` only worked inside `print`; strings are values everywhere now.
+            Kind::StrLit => self.err("E0104", span, "this has no value"),
             Kind::Ref(_) => self.err("E0157", span, "`&x` only works as an argument to a `&` parameter"),
             _ => ty,
         }
@@ -1469,7 +1530,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             ExprKind::Deref(inner) => self.deref_type(e, inner),
             _ => {
                 self.expr(e, None);
-                self.err("E0131", e.span, "this cannot be assigned to")
+                self.err("E0131", e.span, "only a variable, a field or an element can be assigned to")
             }
         };
         e.ty.set(t);
@@ -1580,6 +1641,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     Span { start: s.span.start, end: s.span.start, line: s.span.line, col: s.span.col, file: s.span.file }
                 };
                 self.declare(name, final_ty, *mutable, *name_span, decl);
+                if let Some(v) = self.lookup(name).filter(|v| v.span.start == name_span.start) {
+                    v.discard = Some(Span { start: s.span.start, end: init.span.start, line: s.span.line, col: s.span.col, file: s.span.file });
+                }
                 if let Some(root) = held {
                     if let Some(v) = self.lookup(name) {
                         v.view = true;
@@ -1608,7 +1672,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     Root::Through => {}
                     Root::Other => {
                         if ty != ERR {
-                            self.diags.push(Diag::new("E0131", target.span, "this cannot be assigned to"));
+                            self.diags.push(Diag::new("E0131", target.span, "only a variable, a field or an element can be assigned to"));
                         }
                     }
                 }
@@ -1663,7 +1727,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 match &e.kind {
                     ExprKind::Call { .. } | ExprKind::CallValue { .. } | ExprKind::Try(_) | ExprKind::Else { .. } => {
                         if got != VOID && got != ERR {
-                            let d = Diag::new("E0111", e.span, "result is not used").suggest(e.span.before(), "_ = ", "assign it to `_` if it really does not matter");
+                            let d = if matches!(self.kind(got), Kind::Result(..)) {
+                                // `_ = f()` would only hide the error (E0125): it has to be handled.
+                                Diag::new("E0111", e.span, "result is not used, and it may be an error: handle it with `?` or `else`")
+                            } else {
+                                Diag::new("E0111", e.span, "result is not used").suggest(e.span.before(), "_ = ", "assign it to `_` if it really does not matter")
+                            };
                             self.diags.push(d);
                         }
                     }
@@ -1904,7 +1973,9 @@ impl<'a, 'b> Ctx<'a, 'b> {
             ExprKind::Var(n) => {
                 let Some((view, line)) = self.lookup(n).map(|v| (v.view, v.span.line)) else { return };
                 if view {
-                    let d = Diag::new("E0152", e.span, format!("`{n}` (line {line}) only looks at another value, so it cannot be moved or returned; copy it here or where it is declared")).fix(e.span, format!("copy({n})"), format!("write `copy({n})`"));
+                    let param = self.func.params.iter().any(|p| p.name == *n && !p.own);
+                    let how = if param { format!("; or take the parameter as `own {n}`") } else { String::new() };
+                    let d = Diag::new("E0152", e.span, format!("`{n}` (line {line}) only reads a value it does not own, so it cannot be moved or returned; write `copy({n})`{how}")).fix(e.span, format!("copy({n})"), format!("write `copy({n})`"));
                     self.diags.push(d);
                     return;
                 }
@@ -1922,10 +1993,20 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 if self.func.claw && matches!(root_of(e, &self.g.types), Root::Through) {
                     return; // Raw memory: moving it out is the programmer's business.
                 }
-                self.diags.push(Diag::new("E0152", e.span, "only a whole variable can be moved; write `copy(...)`, or use `remove` or `swap`"));
+                let index = matches!(e.kind, ExprKind::Index { .. });
+                let tail = if index { ", or take it out with `remove` or `swap`" } else { "" };
+                let d = match expr_text(e) {
+                    Some(t) => Diag::new("E0152", e.span, format!("`{t}` is part of another value: only a whole variable can be moved or returned; write `copy({t})`{tail}")).fix(e.span, format!("copy({t})"), format!("write `copy({t})`")),
+                    None => Diag::new("E0152", e.span, format!("only a whole variable can be moved or returned; write `copy(...)`{tail}")),
+                };
+                self.diags.push(d);
             }
             ExprKind::Slice { .. } => {
-                self.diags.push(Diag::new("E0152", e.span, "a slice only borrows; write `copy(...)` to keep it"));
+                let d = match expr_text(e) {
+                    Some(t) => Diag::new("E0152", e.span, format!("the slice `{t}` only borrows; write `copy({t})` to keep it")).fix(e.span, format!("copy({t})"), format!("write `copy({t})`")),
+                    None => Diag::new("E0152", e.span, "a slice only borrows; write `copy(...)` to keep it"),
+                };
+                self.diags.push(d);
             }
             _ => {}
         }
@@ -1966,10 +2047,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 Pat::Wild => wild = true,
                 Pat::Bool(b) => {
                     if kind != Kind::Bool && kind != Kind::Err {
-                        self.diags.push(Diag::new("E0118", arm.span, "this pattern does not match the type being matched"));
+                        let n = self.tname(t);
+                        self.diags.push(Diag::new("E0118", arm.span, format!("`{b}` is a `bool` pattern, but the value matched is `{n}`")));
                     }
                     if seen_bools.contains(b) {
-                        self.diags.push(Diag::new("E0121", arm.span, "this case is already handled"));
+                        self.diags.push(Diag::new("E0121", arm.span, format!("`{b}` is already handled above")));
                     }
                     seen_bools.push(*b);
                 }
@@ -1983,10 +2065,13 @@ impl<'a, 'b> Ctx<'a, 'b> {
                             }
                         }
                         Kind::Err => {}
-                        _ => self.diags.push(Diag::new("E0118", arm.span, "this pattern does not match the type being matched")),
+                        _ => {
+                            let n = self.tname(t);
+                            self.diags.push(Diag::new("E0118", arm.span, format!("`{v}` is a number pattern, but the value matched is `{n}`")));
+                        }
                     }
                     if seen_ints.contains(v) {
-                        self.diags.push(Diag::new("E0121", arm.span, "this case is already handled"));
+                        self.diags.push(Diag::new("E0121", arm.span, format!("`{v}` is already handled above")));
                     }
                     seen_ints.push(*v);
                 }
@@ -2037,7 +2122,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
     fn variant_pat(&mut self, span: Span, kind: Kind, t: Ty, name: &str, binds: &[(String, Span)], seen: &mut Vec<usize>) {
         let Kind::Enum(id) = kind else {
             if kind != Kind::Err {
-                self.diags.push(Diag::new("E0118", span, "this pattern does not match the type being matched"));
+                let n = self.tname(t);
+                self.diags.push(Diag::new("E0118", span, format!("`{name}` is a variant pattern, but the value matched is `{n}`")));
             }
             return;
         };
@@ -2048,12 +2134,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
             return;
         };
         if seen.contains(&idx) {
-            self.diags.push(Diag::new("E0121", span, "this case is already handled"));
+            self.diags.push(Diag::new("E0121", span, format!("`{name}` is already handled above")));
         }
         seen.push(idx);
         let fields = &def.variants[idx].fields;
         if !binds.is_empty() && binds.len() != fields.len() {
-            self.diags.push(Diag::new("E0119", span, format!("`{name}` has {} fields, found {} names", fields.len(), binds.len())));
+            self.diags.push(Diag::new("E0119", span, format!("`{name}` has {}, found {} names", count(fields.len(), "field"), binds.len())));
             for (b, sp) in binds {
                 if b != "_" {
                     self.declare(b, ERR, false, *sp, *sp);
@@ -2683,7 +2769,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
             for a in args {
                 self.expr(a, None);
             }
-            return self.err("E0106", span, format!("`{name}` takes {want} values, found {}", args.len()));
+            return self.err("E0106", span, format!("`{name}` takes {}, found {}", count(want as usize, "value"), args.len()));
         }
         match name {
             "vload" => {
@@ -2871,7 +2957,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
         };
         let f = self.g.types.fns[id].clone();
         if args.len() != f.params.len() {
-            self.diags.push(Diag::new("E0106", span, format!("this function takes {} values, found {}", f.params.len(), args.len())));
+            self.diags.push(Diag::new("E0106", span, format!("this function takes {}, found {}", count(f.params.len(), "value"), args.len())));
         }
         self.finish_args(args, &f.params, &vec![None; args.len()], &f.own);
         for (a, own) in args.iter().zip(&f.own) {
@@ -2926,7 +3012,8 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     for a in args {
                         self.expr(a, None);
                     }
-                    return self.err("E0150", span, format!("Claw has no methods; write `{name}({alias}, ...)`"));
+                    let rest = if args.is_empty() { String::new() } else { ", ...".to_string() };
+                    return self.err("E0150", span, format!("Claw has no methods; write `{name}({alias}{rest})`"));
                 }
                 self.g.import(alias, span, self.diags)
             }
@@ -2957,6 +3044,15 @@ impl<'a, 'b> Ctx<'a, 'b> {
                     hint = aliases.into_iter().find(|(_, m)| self.g.mods[**m].funcs.get(name).is_some_and(|f| f.1)).map(|(a, _)| a.clone());
                 }
                 let mut d = Diag::new("E0101", span, format!("unknown function `{name}`"));
+                use crate::cheader::CNote;
+                let home = target.unwrap_or(cur);
+                if let Some((note, header)) = self.g.mods[home].cnotes.get(name) {
+                    d = match note {
+                        CNote::Renamed(id) => Diag::new("E0101", span, format!("`{name}` from {header} is called `{id}` in Claw: function names start with a small letter")).fix(span, id.clone(), format!("write `{id}`")),
+                        CNote::Skipped(why) => Diag::new("E0101", span, format!("`{name}` is in {header} but not translated: {why}")),
+                        CNote::Macro => Diag::new("E0101", span, format!("`{name}` is a macro with parameters in {header}, and Claw does not translate those; declare the C function it stands for with `extern fn`")),
+                    };
+                }
                 if let Some(alias) = hint {
                     d = Diag::new("E0101", span, format!("unknown function `{name}`; it is in module `{alias}`")).fix(Span { end: span.start, ..span }, format!("{alias}."), format!("write `{alias}.{name}`"));
                     self.g.mods[cur].used.insert(alias);
@@ -2980,10 +3076,10 @@ impl<'a, 'b> Ctx<'a, 'b> {
         let (full, got) = if let Some(f) = generic {
             let Some(explicit) = self.resolve_targs(targs) else { return ERR };
             if explicit.len() > f.tparams.len() {
-                return self.err("E0144", span, format!("`{name}` takes {} type arguments, found {}", f.tparams.len(), explicit.len()));
+                return self.err("E0144", span, format!("`{name}` takes {}, found {}", count(f.tparams.len(), "type argument"), explicit.len()));
             }
             if f.params.len() != args.len() {
-                self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", f.params.len(), args.len())));
+                self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {}, found {}", count(f.params.len(), "value"), args.len())));
             }
             let pats: Vec<&TypeExpr> = f.params.iter().map(|p| &p.ty).collect();
             let (bind, got) = self.infer(&f.tparams, &pats, args, &explicit, first);
@@ -2992,6 +3088,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 match bind.get(p) {
                     Some(&ERR) => return ERR,
                     Some(t) => ordered.push(*t),
+                    None if got.iter().any(|t| *t == Some(ERR)) => return ERR, // an argument already has its own error
                     None => return self.err("E0144", span, format!("cannot work out `{p}`; write `{name}[...](...)`")),
                 }
             }
@@ -3011,9 +3108,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if sig.ext.is_some() && !self.func.claw {
             self.diags.push(Diag::new("E0141", span, format!("`extern fn {name}` can only be called from `claw fn`")));
         }
+        if let Some(why) = self.g.c_problems.get(&full) {
+            self.diags.push(Diag::new("E0149", span, format!("`{name}` cannot be called: {why}")));
+        }
         let arity_ok = args.len() == sig.params.len() || (sig.variadic && args.len() > sig.params.len());
         if !arity_ok && generic.is_none() {
-            self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {} values, found {}", sig.params.len(), args.len())));
+            self.diags.push(Diag::new("E0106", span, format!("`{name}` takes {}, found {}", count(sig.params.len(), "value"), args.len())));
         }
         self.finish_args(args, &sig.params, &got, &sig.own);
         for (a, own) in args.iter().zip(&sig.own) {
@@ -3086,8 +3186,12 @@ impl<'a, 'b> Ctx<'a, 'b> {
             }
             let TypeBody::Struct(fields) = &d.body else { return ERR };
             let Some(explicit) = self.resolve_targs(targs) else { return ERR };
+            if !explicit.is_empty() && explicit.len() != d.tparams.len() {
+                check_all(self);
+                return self.err("E0144", span, format!("`{name}` takes {}, found {}", count(d.tparams.len(), "type argument"), explicit.len()));
+            }
             if args.len() != fields.len() {
-                self.diags.push(Diag::new("E0106", span, format!("`{name}` has {} fields, found {}", fields.len(), args.len())));
+                self.diags.push(Diag::new("E0106", span, format!("`{name}` has {}, found {}", count(fields.len(), "field"), args.len())));
             }
             let pats: Vec<&TypeExpr> = fields.iter().map(|f| &f.ty).collect();
             let (bind, got) = self.infer(&d.tparams, &pats, args, &explicit, None);
@@ -3096,6 +3200,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 match bind.get(p) {
                     Some(&ERR) => return ERR,
                     Some(t) => ordered.push(*t),
+                    None if got.iter().any(|t| *t == Some(ERR)) => return ERR, // an argument already has its own error
                     None => return self.err("E0144", span, format!("cannot work out `{p}`; write `{name}[...]{{...}}`")),
                 }
             }
@@ -3119,11 +3224,15 @@ impl<'a, 'b> Ctx<'a, 'b> {
             let TypeBody::Variants(vars) = &d.body else { return ERR };
             let fields = &vars[idx].fields;
             let Some(mut explicit) = self.resolve_targs(targs) else { return ERR };
+            if !explicit.is_empty() && explicit.len() != d.tparams.len() {
+                check_all(self);
+                return self.err("E0144", span, format!("`{name}` takes {}, found {}", count(d.tparams.len(), "type argument"), explicit.len()));
+            }
             if explicit.is_empty() {
                 explicit = self.targs_from_hint(d, m, hint).unwrap_or_default();
             }
             if args.len() != fields.len() {
-                self.diags.push(Diag::new("E0106", span, format!("`{name}` has {} fields, found {}", fields.len(), args.len())));
+                self.diags.push(Diag::new("E0106", span, format!("`{name}` has {}, found {}", count(fields.len(), "field"), args.len())));
             }
             let pats: Vec<&TypeExpr> = fields.iter().map(|f| &f.ty).collect();
             let (bind, got) = self.infer(&d.tparams, &pats, args, &explicit, None);
@@ -3132,6 +3241,7 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 match bind.get(p) {
                     Some(&ERR) => return ERR,
                     Some(t) => ordered.push(*t),
+                    None if got.iter().any(|t| *t == Some(ERR)) => return ERR, // an argument already has its own error
                     None => return self.err("E0144", span, format!("cannot work out `{p}`; write `{name}[...]{{...}}`")),
                 }
             }
@@ -3169,8 +3279,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
         if !public && m != cur {
             self.diags.push(Diag::new("E0147", span, private_msg(name)));
         }
+        if !targs.is_empty() {
+            self.diags.push(Diag::new("E0144", span, format!("`{name}` takes no type arguments")));
+        }
         if args.len() != fields.len() {
-            self.diags.push(Diag::new("E0106", span, format!("`{name}` has {} fields, found {}", fields.len(), args.len())));
+            self.diags.push(Diag::new("E0106", span, format!("`{name}` has {}, found {}", count(fields.len(), "field"), args.len())));
         }
         for (a, f) in args.iter().zip(&fields) {
             self.check(a, f.ty);

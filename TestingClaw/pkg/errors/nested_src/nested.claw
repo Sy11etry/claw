@@ -1,0 +1,5 @@
+use geo
+
+pub fn f() int {
+    ret geo.square(2)
+}

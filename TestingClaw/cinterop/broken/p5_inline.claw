@@ -1,0 +1,9 @@
+use c "inline.h"
+
+claw fn f() int {
+    ret int(sq(3))
+}
+
+fn main() {
+    print("f {f()}")
+}

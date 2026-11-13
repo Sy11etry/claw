@@ -1,0 +1,5 @@
+// expect: -1
+fn main() {
+    n := to_int("99999999999999999999") else -1
+    print(n)
+}

@@ -1,0 +1,68 @@
+// c: b07_zlib.c
+// cflags: -lz
+// x64: yes
+// expect: roundtrip ok
+// expect: smaller 1
+// expect: crc 1083670228
+// expect: adler 1344471755
+use c "zlib.h"
+link "z"
+
+claw fn roundtrip(n int) int {
+    src := alloc[u8](n)
+    defer free(src)
+    for i in 0..n {
+        src[i] = u8(i % 7)
+    }
+    bound := compressBound(u64(n))
+    dst := alloc[u8](int(bound))
+    defer free(dst)
+    mut dlen := bound
+    rc := compress(dst, &dlen, src, u64(n))
+    back := alloc[u8](n)
+    defer free(back)
+    mut blen := u64(n)
+    rc2 := uncompress(back, &blen, dst, dlen)
+    if rc != z_ok or rc2 != z_ok { ret -1 }
+    if blen != u64(n) { ret -2 }
+    for i in 0..n {
+        if back[i] != src[i] { ret -3 }
+    }
+    ret 1
+}
+
+claw fn compressed_smaller(n int) int {
+    src := alloc[u8](n)
+    defer free(src)
+    for i in 0..n {
+        src[i] = u8(i % 7)
+    }
+    bound := compressBound(u64(n))
+    dst := alloc[u8](int(bound))
+    defer free(dst)
+    mut dlen := bound
+    _ = compress(dst, &dlen, src, u64(n))
+    if dlen < u64(n) { ret 1 }
+    ret 0
+}
+
+claw fn checksum(n int, which int) int {
+    buf := alloc[u8](n)
+    defer free(buf)
+    for i in 0..n {
+        buf[i] = u8(i % 7)
+    }
+    if which == 0 { ret int(crc32(0, buf, u32(n))) }
+    ret int(adler32(1, buf, u32(n)))
+}
+
+fn main() {
+    if roundtrip(1048576) == 1 {
+        print("roundtrip ok")
+    } else {
+        print("roundtrip bad")
+    }
+    print("smaller {compressed_smaller(1048576)}")
+    print("crc {checksum(1048576, 0)}")
+    print("adler {checksum(1048576, 1)}")
+}

@@ -1,0 +1,17 @@
+// expect: a 3
+// expect: b 2
+// expect: c 1
+fn main() {
+    words := split("a b a c b a", " ")
+    mut m := new_map[str, int](hash_str)
+    for w in words {
+        n := get(m, w) else 0
+        put(&m, copy(w), n + 1)
+    }
+    na := get(m, "a") else 0
+    nb := get(m, "b") else 0
+    nc := get(m, "c") else 0
+    print("a {na}")
+    print("b {nb}")
+    print("c {nc}")
+}

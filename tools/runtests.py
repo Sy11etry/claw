@@ -26,6 +26,7 @@ tests/par/*.claw  tasks: checked run and real threads must print the same; err_*
 tests/debug/*.claw  lldb stops at the right line.
 examples/*.claw  the showcase programs: built, run checked, and run as x86-64.
 tests/simd/*.claw  SIMD vectors: checked run, three build modes and the interpreter agree; err_*.claw must be rejected.
+tests/stack/*.claw  deep recursion works everywhere; a full stack or a wild pointer is reported, not a silent crash.
 Linux target: the ELF is checked, and with qemu and an Alpine image the programs run there too.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
@@ -443,11 +444,42 @@ def simd_test(path, tmp):
     return None
 
 
+def stack_test(path, tmp):
+    """The stack: deep recursion works in every mode, and running out of stack (or a wild pointer in `claw fn`)
+    says so on stderr after what was printed, instead of a silent crash. `// crash: yes` means the program must
+    end by the signal (SIGSEGV or SIGBUS), `// build-only` leaves out `claw run`, where the checker reports first."""
+    text = path.read_text()
+    want = headers(text, "expect")
+    crash = bool(headers(text, "crash"))
+    runs = [] if headers(text, "build-only") else [([CLAW, "run", path], "claw run")]
+    for mode in ([], ["--no-opt"], ["--fast"], ["--target", "x86_64"], ["--target", "x86_64", "--no-opt"]):
+        exe = tmp / ("stack_" + path.stem + "".join(mode).replace("-", ""))
+        b = child([CLAW, "build", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode != 0:
+            return f"compile {mode} failed:\n{b.stderr}"
+        runs.append(([exe], f"build {' '.join(mode)}".strip()))
+    for cmd, what in runs:
+        r = child(cmd, capture_output=True, text=True, env={"PATH": ""}, timeout=60)
+        ended = r.returncode in (-10, -11, 138, 139) if crash else r.returncode == 0
+        if not ended or r.stdout.splitlines() != want:
+            return f"{what}: exit {r.returncode}, got {r.stdout.splitlines()}, wanted {want}\n{r.stderr}"
+        for s in headers(text, "stderr"):
+            if s not in r.stderr:
+                return f"{what}: stderr lacks {s!r}: {r.stderr!r}"
+    return None
+
+
 def cinterop_test(path, tmp):
     """C libraries and headers: `use c`, `link`, callbacks. A program that needs the test library gets it built
     here with clang (a test fixture, never part of building Claw), once for each architecture."""
     text = path.read_text()
     want = headers(text, "expect")
+    # `// build-error: E####`: the program checks, but building it must fail (a C symbol no library has).
+    for code in headers(text, "build-error"):
+        b = child([CLAW, "build", path, "-o", tmp / ("ci_err_" + path.stem)], capture_output=True, text=True, env={"PATH": ""})
+        if b.returncode == 0 or code not in b.stderr:
+            return f"build should fail with {code}: exit {b.returncode}\n{b.stderr}"
+        return None
     needs_lib = 'link "mylib"' in text
     modes = [[], ["--fast"], ["--no-opt"], ["--target", "x86_64"], ["--target", "x86_64", "--no-opt"]]
     for mode in modes:
@@ -582,6 +614,35 @@ def pkg_lock_test(tmp):
     r = in_app("run", "main.claw")
     if r.returncode != 0 or r.stdout.splitlines() != want:
         return f"run after restoring: {r.stdout.splitlines()} {r.stderr}"
+    return None
+
+
+def pkg_nested_test(tmp):
+    """A package with a claw.pkg of its own: `claw get` fetches what it needs too and pins it in the same lock;
+    a folder with no .claw files is refused."""
+    root = tmp / "pkgnested"
+    shutil.copytree(ROOT / "tests/pkg", root)
+    app = root / "nested_app"
+    want = headers((app / "main.claw").read_text(), "expect")
+    env = {"PATH": "/usr/bin:/bin"}
+    r = child([CLAW, "get"], cwd=app, capture_output=True, text=True, env=env)
+    if r.returncode != 0 or "inner: fetched" not in r.stdout:
+        return f"claw get must fetch the package's own dependency: {r.stdout}{r.stderr}"
+    names = [l.split()[0] for l in (app / "claw.lock").read_text().splitlines()]
+    if sorted(names) != ["inner", "outer"]:
+        return f"claw.lock should pin both packages: {names}"
+    r = child([CLAW, "run", "main.claw"], cwd=app, capture_output=True, text=True, env=env)
+    if r.returncode != 0 or r.stdout.splitlines() != want:
+        return f"run with a nested package: {r.stdout.splitlines()} {r.stderr}"
+    with open(app / ".claw/pkg/inner/inner.claw", "a") as f:
+        f.write("// edited\n")
+    r = child([CLAW, "run", "main.claw"], cwd=app, capture_output=True, text=True, env=env)
+    if r.returncode == 0 or "E0183" not in r.stderr:
+        return f"an edited nested package must be refused: {r.stdout}{r.stderr}"
+    (app / "claw.pkg").write_text("hole ../empty\n")
+    r = child([CLAW, "get", "--update"], cwd=app, capture_output=True, text=True, env=env)
+    if r.returncode == 0 or "no .claw files" not in r.stderr:
+        return f"an empty package must be refused: {r.stdout}{r.stderr}"
     return None
 
 
@@ -759,6 +820,12 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL cinterop/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/stack").glob("*.claw")):
+            total += 1
+            msg = stack_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL stack/{path.name}: {msg}")
         for path in sorted((ROOT / "tests/script").glob("*.claw")):
             total += 1
             msg = script_test(path, tmp)
@@ -775,6 +842,11 @@ def main():
         if msg:
             failures += 1
             print(f"FAIL pkg lock: {msg}")
+        total += 1
+        msg = pkg_nested_test(tmp)
+        if msg:
+            failures += 1
+            print(f"FAIL pkg nested: {msg}")
         for path in sorted((ROOT / "examples").glob("*.claw")):
             total += 1
             msg = run_test(path, tmp) or check_test(path)

@@ -1,0 +1,5 @@
+// code: E0126
+fn main() {
+    x [0]int
+    print(len(x))
+}

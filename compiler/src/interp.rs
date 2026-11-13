@@ -23,6 +23,7 @@ const FN_TAG: u64 = 1 << 63;
 
 extern "C" {
     fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, ...) -> i32;
+    fn strtod(s: *const u8, end: *mut *mut u8) -> f64;
     fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     fn close(fd: i32) -> i32;
     fn read(fd: i32, p: *mut u8, n: usize) -> isize;
@@ -63,6 +64,7 @@ pub enum Kind {
     DivZero,
     Shift,
     Bounds,
+    Slice,
     Convert,
     AllocSize,
     OutOfMemory,
@@ -82,6 +84,7 @@ impl Kind {
             Kind::DivZero => "division by zero",
             Kind::Shift => "shift out of range",
             Kind::Bounds => "index out of bounds",
+            Kind::Slice => "slice bounds out of range",
             Kind::Convert => "value does not fit the target type",
             Kind::AllocSize => "invalid allocation size",
             Kind::OutOfMemory => "out of memory",
@@ -451,13 +454,31 @@ fn float_to_int(x: f64, to: Num) -> Result<u64, Kind> {
     Ok(if to.signed { x as i64 as u64 } else { x as u64 })
 }
 
-/// As the compiled program prints floats.
+/// As the compiled program prints floats (`__claw_buf_float`): the shortest `%g` text that reads back as the same
+/// number, with the exponent form only for |x| >= 1e16 or 0 < |x| < 1e-4 (and NaN, infinities).
 pub fn format_float(x: f64, bits: u8) -> Vec<u8> {
-    let mut out = [0u8; 64];
-    let fmt: &[u8] = if bits == 64 { b"%.15g\0" } else { b"%.7g\0" };
-    // SAFETY: the buffer is 64 bytes, snprintf is told so, and the format takes one double.
-    let n = unsafe { snprintf(out.as_mut_ptr(), 64, fmt.as_ptr(), x) };
-    out[..(n.clamp(0, 63)) as usize].to_vec()
+    let most: i32 = if bits == 64 { 17 } else { 9 };
+    let a = x.abs();
+    let sci_ok = x.is_nan() || a >= 1e16 || (a != 0.0 && a < 1e-4);
+    let mut p = 1;
+    loop {
+        let mut out = [0u8; 64];
+        // SAFETY: the buffer is 64 bytes, snprintf is told so, and the format takes an int and a double.
+        let n = unsafe { snprintf(out.as_mut_ptr(), 64, b"%.*g\0".as_ptr(), p, x) };
+        let text = out[..(n.clamp(0, 63)) as usize].to_vec();
+        if p >= most {
+            return text;
+        }
+        // SAFETY: `out` is NUL-terminated by snprintf.
+        let mut back = unsafe { strtod(out.as_ptr(), std::ptr::null_mut()) };
+        if bits == 32 {
+            back = back as f32 as f64;
+        }
+        if back == x && (sci_ok || !text.contains(&b'e')) {
+            return text;
+        }
+        p += 1;
+    }
 }
 
 /// For each block, the block where the paths leaving it meet again. Only paths that can
@@ -1250,10 +1271,14 @@ impl<'m> Machine<'m> {
                                 return self.trap(Kind::Bounds, *loc, seeds, format!("index = {}, len = {len}", i as i64));
                             }
                         }
-                        Inst::BoundsDyn { idx, len, loc } => {
+                        Inst::BoundsDyn { idx, len, loc, slice } => {
                             let (i, n) = (r!(*idx), r!(*len));
                             if i >= n {
                                 let seeds = self.seeds(base, &[*idx, *len]);
+                                if *slice {
+                                    // The checks are `end < len + 1` and `start < end + 1`.
+                                    return self.trap(Kind::Slice, *loc, seeds, format!("{} is past {}", i as i64, n as i64 - 1));
+                                }
                                 return self.trap(Kind::Bounds, *loc, seeds, format!("index = {}, len = {}", i as i64, n as i64));
                             }
                         }
@@ -1299,6 +1324,10 @@ impl<'m> Machine<'m> {
                             }
                         }
                         Inst::CallC { d, sym, args, variadic: _, ret } => {
+                            // A C struct by value: none of the C functions the interpreter carries has one.
+                            if matches!(ret, CRet::Parts { .. } | CRet::Indirect { .. }) {
+                                return Stop::Unsupported(sym.clone());
+                            }
                             let vals: Vec<u64> = args.iter().map(|a| r!(a.v)).collect();
                             let raw = match self.call_c(sym, &vals) {
                                 Ok(CResult::Value(v)) => v,
@@ -1311,7 +1340,7 @@ impl<'m> Machine<'m> {
                             };
                             if let Some(d) = d {
                                 r!(*d) = match ret {
-                                    CRet::None => 0,
+                                    CRet::None | CRet::Parts { .. } | CRet::Indirect { .. } => 0,
                                     CRet::Float(_) => raw,
                                     CRet::Int(m) => match m {
                                         Mem::I8 => sext(raw, 8),

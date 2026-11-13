@@ -1,0 +1,6 @@
+// expect-compile-error
+use lib.geo
+
+fn main() {
+    print(1)
+}

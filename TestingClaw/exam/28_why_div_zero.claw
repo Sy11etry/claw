@@ -1,0 +1,19 @@
+// expect: start
+// exit: 101
+fn average(xs []int) int {
+    n := len(xs)
+    total := sum(xs)
+    ret total / n
+}
+
+fn sum(xs []int) int {
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn main() {
+    print("start")
+    empty []int = []
+    print("avg {average(empty)}")
+}

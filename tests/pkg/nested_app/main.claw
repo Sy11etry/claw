@@ -1,0 +1,6 @@
+// expect: 13
+use outer
+
+fn main() {
+    print(outer.area(3, 4))
+}

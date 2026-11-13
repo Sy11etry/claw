@@ -2,6 +2,7 @@
 
 mod arm64;
 mod ast;
+mod cabi;
 mod cir;
 mod codegen;
 mod codegen_x64;
@@ -28,6 +29,7 @@ mod ranges;
 mod regalloc;
 mod sema;
 mod sha256;
+mod symcheck;
 mod ssa;
 mod types;
 mod why;
@@ -101,6 +103,8 @@ struct Options {
 
 /// Libraries named by `link "..."` in the program; `front` fills it, `emit` reads it.
 static SOURCE_LINKS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// `static inline` C functions the headers offered as `extern fn`: (C name, header).
+static C_INLINE: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 /// Turns `z` or `sqlite3` into the path the loader should open.
 fn resolve_libs(o: &Options) -> Vec<String> {
@@ -213,6 +217,7 @@ fn options_ex(args: &[String], ctx: bool, run: bool) -> Options {
         die("no input file");
     }
     lower::LINUX.store(o.linux.is_some(), std::sync::atomic::Ordering::Relaxed);
+    lower::X86.store(o.x86_64, std::sync::atomic::Ordering::Relaxed);
     modules::set_include_dirs(o.incdirs.iter().map(std::path::PathBuf::from).collect());
     o
 }
@@ -254,6 +259,7 @@ fn front(o: &Options, memory_checker: bool, tests_only: bool) -> Front {
         Err((diags, files)) => report(o, diags, &files),
     };
     *SOURCE_LINKS.lock().unwrap() = loaded.links.clone();
+    *C_INLINE.lock().unwrap() = loaded.c_inline.clone();
     let mut diags = Vec::new();
     let checked = sema::check(&loaded.units, loaded.core, tests_only, &mut diags);
     let effects = effects::check(&loaded.units, &checked, &mut diags);
@@ -319,6 +325,13 @@ fn format_file(o: &Options) -> ! {
 
 fn compile(o: &Options, out: &Path, mode: Mode) {
     let (module, files, paths) = compile_to_cir(o, mode);
+    if o.linux.is_none() {
+        check_c_symbols(o, &module, &paths);
+    }
+    if o.fast && mode == Mode::Build {
+        // Said once, so nobody mistakes a wrong number from `--fast` for a correct one.
+        eprintln!("note: --fast removes every check: overflow, out-of-bounds and division by zero give wrong results instead of stopping");
+    }
     if o.emit_cir {
         print!("{}", cir::dump(&module));
     }
@@ -329,10 +342,7 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
     if let Some(libc) = o.linux {
         match codegen::generate_linux(module, files, o.alloc_stats) {
             Ok(obj) => write_executable(out, &elf::write_elf(&obj, libc, if o.debug { Some(paths) } else { None }, &resolve_libs(o))),
-            Err(e) => {
-                eprintln!("{}:1:1 {e}", o.file);
-                exit(1);
-            }
+            Err(e) => backend_error(o, module, files, &e),
         }
         return;
     }
@@ -346,10 +356,7 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
                 debug_info = Box::new(move |addr, size| dwarf::sections_of(&obj.symbols, &obj.lines, obj.code.len(), 1, addr, size, &files));
                 bytes
             }
-            Err(e) => {
-                eprintln!("{}:1:1 {e}", o.file);
-                exit(1);
-            }
+            Err(e) => backend_error(o, module, files, &e),
         }
     } else {
         match codegen::generate(module, files, o.alloc_stats) {
@@ -359,10 +366,7 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
                 debug_info = Box::new(move |addr, size| dwarf::sections(&obj, addr, size, &files));
                 bytes
             }
-            Err(e) => {
-                eprintln!("{}:1:1 {e}", o.file);
-                exit(1);
-            }
+            Err(e) => backend_error(o, module, files, &e),
         }
     };
     write_executable(out, &bytes);
@@ -372,6 +376,58 @@ fn emit(o: &Options, module: &cir::Module, files: &[String], paths: &[String], o
             exit(2);
         }
     }
+}
+
+/// Every C function the program calls must be in a library it loads; otherwise the program would only fail when
+/// it starts. Reported on the function that makes the call.
+fn check_c_symbols(o: &Options, module: &cir::Module, paths: &[String]) {
+    let mut calls: Vec<(String, cir::Loc, String)> = Vec::new();
+    for f in module.funcs.iter().filter(|f| !f.dead) {
+        for b in &f.blocks {
+            for i in &b.insts {
+                if let cir::Inst::CallC { sym, .. } = i {
+                    if !calls.iter().any(|c| c.0 == *sym) {
+                        calls.push((sym.clone(), f.at, f.name.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if calls.is_empty() {
+        return;
+    }
+    let syms: Vec<String> = calls.iter().map(|c| c.0.clone()).collect();
+    let libs = resolve_libs(o);
+    let missing = symcheck::missing(&syms, &libs);
+    if missing.is_empty() {
+        return;
+    }
+    let inline = C_INLINE.lock().unwrap().clone();
+    let loaded: Vec<String> = std::iter::once("libSystem".to_string()).chain(libs.iter().map(|l| Path::new(l).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).collect();
+    for sym in &missing {
+        let (_, at, caller) = calls.iter().find(|c| c.0 == *sym).unwrap();
+        let place = if at.line > 0 { format!("{}:{}:{}", paths.get(at.file as usize).map(|s| s.as_str()).unwrap_or(&o.file), at.line, at.col) } else { format!("{}:1:1", o.file) };
+        let caller = effects::short_name(caller);
+        let msg = match inline.iter().find(|(n, _)| n == sym) {
+            Some((_, header)) => format!("`{sym}` is `static inline` in {header}: C copies it into each caller, so no library has it; write it in Claw (called in `{caller}`)"),
+            None => format!("`{sym}` is in none of the libraries this program loads ({}); add the one that has it with `link \"name\"` or `-l name` (called in `{caller}`)", loaded.join(", ")),
+        };
+        eprintln!("{place} E0185 {msg}");
+    }
+    exit(1);
+}
+
+/// An error from code generation: placed on the function it is about, with a way out.
+fn backend_error(o: &Options, module: &cir::Module, files: &[String], e: &str) -> ! {
+    let name = e.split('`').nth(1).unwrap_or("");
+    let at = module.funcs.iter().find(|f| f.name == name || f.name.ends_with(&format!(".{name}"))).map(|f| f.at).filter(|a| a.line > 0);
+    let place = match at {
+        Some(a) => format!("{}:{}:{}", files.get(a.file as usize).map(|s| s.as_str()).unwrap_or(&o.file), a.line, a.col),
+        None => format!("{}:1:1", o.file),
+    };
+    let advice = if e.starts_with("E0901") { "; split it into smaller functions, or keep large data in a `[]T` filled at run time rather than in one literal" } else { "" };
+    eprintln!("{place} {e}{advice}");
+    exit(1);
 }
 
 /// Writes through a temp file and renames: replacing a binary that already
@@ -406,7 +462,20 @@ fn run(o: &Options) -> ! {
     }
     let exe = dir.join(default_out(&o.file));
     compile(o, &exe, Mode::Run);
-    let status = Command::new(&exe).args(&o.prog_args).status();
+    // The program sees its own source file as its name (`os.args()[0]`), not the temporary build.
+    use std::os::unix::process::CommandExt;
+    let status = match Command::new(&exe).arg0(&o.file).args(&o.prog_args).spawn() {
+        Ok(mut child) => {
+            let guard = start_guard(child.id(), &dir);
+            let st = child.wait();
+            if let Some(mut g) = guard {
+                let _ = g.kill();
+                let _ = g.wait();
+            }
+            st
+        }
+        Err(e) => Err(e),
+    };
     let _ = std::fs::remove_dir_all(&dir);
     match status {
         Ok(s) => {
@@ -420,6 +489,40 @@ fn run(o: &Options) -> ! {
         Err(e) => {
             eprintln!("claw: cannot run the program: {e}");
             exit(2);
+        }
+    }
+}
+
+unsafe extern "C" {
+    fn getppid() -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// `claw run` waits for its program. If `claw` itself is killed (SIGKILL cannot be caught), a small guard
+/// process notices that its parent is gone, stops the program and removes the build: nothing is left running.
+fn start_guard(program: u32, dir: &Path) -> Option<std::process::Child> {
+    let me = std::env::current_exe().ok()?;
+    Command::new(me)
+        .arg("__guard")
+        .arg(std::process::id().to_string())
+        .arg(program.to_string())
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()
+}
+
+fn guard(args: &[String]) -> ! {
+    let (Some(parent), Some(program), Some(dir)) = (args.first().and_then(|a| a.parse::<i32>().ok()), args.get(1).and_then(|a| a.parse::<i32>().ok()), args.get(2)) else { exit(2) };
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Safety: plain system calls on numbers.
+        if unsafe { getppid() } != parent {
+            unsafe { kill(program, 9) };
+            let _ = std::fs::remove_dir_all(dir);
+            exit(0);
         }
     }
 }
@@ -444,7 +547,7 @@ fn run_one_test(exe: &Path, dir: &Path) -> Result<(), String> {
             Ok(None) if start.elapsed() > TEST_LIMIT => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("still running after {} seconds", TEST_LIMIT.as_secs()));
+                return Err(format!("still running after {} seconds: a test must end; does a loop in it never stop?", TEST_LIMIT.as_secs()));
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_micros(200)),
             Err(e) => return Err(format!("cannot wait for it: {e}")),
@@ -504,7 +607,8 @@ fn test_all(o: &Options) -> ! {
             for line in why.lines() {
                 println!("  {line}");
             }
-            if !o.blocks {
+            // A test that never ended has nothing to explain: the replay would only run out of steps too.
+            if !o.blocks && !why.starts_with("still running") {
                 for line in explain_block(&f, &interpreted, &src, interpreted.tests[i].1) {
                     println!("  {line}");
                 }
@@ -626,6 +730,7 @@ fn diagnose(o: &Options) -> (Vec<Diag>, Vec<String>) {
 fn fix_file(o: &Options) -> ! {
     use std::collections::BTreeMap;
     let mut applied = 0;
+    let mut done: Vec<(String, u32, u32, String)> = Vec::new();
     for _ in 0..50 {
         let (mut diags, files) = diagnose(o);
         diag::sort(&mut diags);
@@ -633,7 +738,12 @@ fn fix_file(o: &Options) -> ! {
         for fix in diags.iter().filter_map(|d| d.fix.clone()).filter(|f| f.safe) {
             by_file.entry(fix.span.file).or_default().push(fix);
         }
-        by_file.retain(|file, _| !files[*file as usize].contains("/std/"));
+        // The standard library and the pinned copies of packages are not the user's to edit: `claw.lock`
+        // would refuse a changed copy, and `claw get --update` would undo it.
+        by_file.retain(|file, _| {
+            let f = &files[*file as usize];
+            !f.contains("/std/") && !f.contains("/.claw/pkg/")
+        });
         if by_file.is_empty() {
             break;
         }
@@ -656,6 +766,7 @@ fn fix_file(o: &Options) -> ! {
                 text.replace_range(a..b, &f.text);
                 floor = a;
                 applied += 1;
+                done.push((path.clone(), f.span.line, f.span.col, f.label.clone()));
             }
             if let Err(e) = std::fs::write(path, text) {
                 eprintln!("claw: cannot write {path}: {e}");
@@ -664,6 +775,10 @@ fn fix_file(o: &Options) -> ! {
         }
     }
     let (diags, files) = diagnose(o);
+    done.sort();
+    for (path, line, col, label) in &done {
+        println!("{path}:{line}:{col} {label}");
+    }
     println!("fixed {applied}");
     if diags.is_empty() {
         exit(0);
@@ -768,6 +883,7 @@ fn real_main() {
         Some("__sema") => dump::sema_dump(&args[1..]),
         Some("__cir") => dump::cir_dump(&args[1..]),
         Some("__interp") => interpret(&parse_options(&args[1..])),
+        Some("__guard") => guard(&args[1..]),
         Some("fmt") => format_file(&parse_options(&args[1..])),
         Some("check") => {
             let o = parse_options(&args[1..]);

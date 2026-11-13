@@ -1,0 +1,8 @@
+// code: E0149
+extern fn tell(s str) i32
+claw fn t() int {
+    ret int(tell("x"))
+}
+fn main() {
+    print(t())
+}

@@ -1,0 +1,4 @@
+// code: E0108
+fn main() {
+    break
+}

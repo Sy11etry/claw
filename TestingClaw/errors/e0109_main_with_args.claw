@@ -1,0 +1,4 @@
+// code: E0109
+fn main(a int) {
+    print(a)
+}

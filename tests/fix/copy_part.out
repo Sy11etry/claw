@@ -1,0 +1,14 @@
+type P { a int, b str }
+
+fn name(p P) str {
+    ret copy(p.b)
+}
+
+fn first(xs []str) str {
+    ret copy(xs[0])
+}
+
+fn main() {
+    print(name(P{1, "x"}))
+    print(first(["y"]))
+}

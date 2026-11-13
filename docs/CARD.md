@@ -1,4 +1,4 @@
-# Claw 0.11 card
+# Claw 0.12 card
 
 One statement per line, no `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -7,7 +7,7 @@ type Point { x int, y int }             // Point{1, 2}: fields are positional
 type Shape = Circle{r f64} | Dot
 type ParseErr = Empty | Bad{at int}
 
-const limit = 100                        // `const` may call functions: it runs while compiling
+const limit = 100                        // it may call functions, run while compiling
 
 fn area(s Shape) f64 {
     match s {                            // must cover every case, or `_:`
@@ -55,7 +55,7 @@ Types and variants start with a capital, the rest with a small letter.
 Errors, not warnings: an unused variable, parameter (name it `_`) or result (`_ = f()`), a reused name,
 `mut` never changed, unreachable code, a missing `ret`, an ignored `T ! E`.
 
-Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index or conversion. Unsigned types wrap.
+Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index or conversion. Unsigned types and integer conversions to them wrap.
 
 ## Memory is automatic
 
@@ -74,12 +74,12 @@ fn demo() {
     a := names()
     b := a                               // `a` moved
     c := copy(b)
-    print("{len(c)} {b[1..]}")           // slices: `[1..]`, `[..2]`
+    print("{len(c)} {b[1..]}")           // slices: `[..2]` too
 }                                        // the rest is freed here
 ```
 
-Only a whole local variable moves. `x := a[i]` (or a field, a slice) is a read-only view: `a` cannot change while
-`x` lives. To own one: `copy(a[i])`, `remove(&a, i)`, `swap(&a, &b)`.
+Only a whole local variable or `own` parameter moves. A parameter, `a[i]`, a field or a slice only reads, so return
+a copy: `ret copy(p)`. While `x := a[i]` lives, `a` cannot change. To own one: `copy(a[i])`, `remove(&a, i)`.
 A collection cannot change while `for` walks it; one call cannot pass a thing with `&` and without.
 `s[i]` is a `u8`; a `str` is immutable. A type may define `drop(x &T)`.
 
@@ -134,7 +134,7 @@ claw fn sum() int {
 `sizeof[T]()` is in bytes. `cast` converts between pointers, `int`, `u64`. A string literal as `*u8` is NUL-terminated;
 `s.ptr` is the bytes of a `str`. Raw pointers are unchecked.
 C: `use c "zlib.h"` brings `extern fn`, `type`, `const` from a header (`Z_OK` is `z_ok`, C `int` is `i32`);
-`link "z"` or `-l z` loads the library; `cast[*u8](f)` passes a `claw fn` to C as a callback.
+`link "z"` or `-l z` loads the library; `cast[*u8](f)` passes `f` to C as a callback.
 
 ## Contracts, effects, tests
 

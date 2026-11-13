@@ -1,0 +1,7 @@
+// code: E0131
+fn f() int {
+    ret 1
+}
+fn main() {
+    f() = 3
+}

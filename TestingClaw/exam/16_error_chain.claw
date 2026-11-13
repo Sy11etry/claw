@@ -1,0 +1,26 @@
+// expect: doubled 246
+// expect: fallback 0
+type BadNum = Empty | Bad{at int}
+
+fn parse(s str) int ! BadNum {
+    if len(s) == 0 { fail Empty }
+    mut n := 0
+    for i in 0..len(s) {
+        c := s[i]
+        if c < '0' or c > '9' { fail Bad{i} }
+        n = n * 10 + int(c - '0')
+    }
+    ret n
+}
+
+fn read_double(s str) int ! BadNum {
+    n := parse(s)?
+    ret n * 2
+}
+
+fn main() {
+    a := read_double("123") else 0
+    print("doubled {a}")
+    b := read_double("x") else 0
+    print("fallback {b}")
+}

@@ -1,0 +1,14 @@
+// expect: 1 one
+// expect: one 1
+type Pair[A, B] { a A, b B }
+
+fn swap_pair[A, B](p Pair[A, B]) Pair[B, A] {
+    ret Pair[B, A]{copy(p.b), copy(p.a)}
+}
+
+fn main() {
+    p := Pair[int, str]{1, "one"}
+    print("{p.a} {p.b}")
+    q := swap_pair(p)
+    print("{q.a} {q.b}")
+}

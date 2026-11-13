@@ -7,6 +7,12 @@
 // result, so there is still nothing to race on, and the answer does not depend on the core count.
 
 extern "pthread_create" fn c_create(t *u64, attr *u8, f *u8, arg *u8) i32
+extern "pthread_attr_init" fn c_attr_init(a *u8) i32
+extern "pthread_attr_setstacksize" fn c_attr_stack(a *u8, n u64) i32
+extern "pthread_attr_destroy" fn c_attr_destroy(a *u8) i32
+extern "sigaltstack" fn c_sigaltstack(ss *u8, old *u8) i32
+extern "malloc" fn c_malloc(n u64) *u8
+extern "free" fn c_free(p *u8)
 extern "pthread_join" fn c_join(t u64, out *u8) i32
 extern "sysconf" fn c_sysconf(name i32) i64
 
@@ -21,10 +27,49 @@ type Job[T, R] { cell Cell[R], f fn(own T) R +mem, arg T }
 fn discard[R](own _ R) {
 }
 
+// A thread gets as much stack as the main thread (64 MB), so recursion goes as deep in a task as in `claw run`,
+// where tasks run on the main thread.
+claw fn start(t *u64, f *u8, arg *u8) i32 +mem {
+    attr := c_malloc(64)
+    _ = c_attr_init(attr)
+    _ = c_attr_stack(attr, 67108864)
+    r := c_create(t, attr, f, arg)
+    _ = c_attr_destroy(attr)
+    c_free(attr)
+    ret r
+}
+
+// On macOS the program reports a stack overflow from a handler that runs on a stack of its own; each thread
+// needs one too (`stack_t` is pointer, size, flags). Linux builds have no such handler.
+claw fn guard_on() *u8 +mem {
+    if __linux() { ret none }
+    mem := c_malloc(65536)
+    ss := cast[*u64](c_malloc(24))
+    ss[0] = cast[u64](mem)
+    ss[1] = 65536
+    ss[2] = 0
+    _ = c_sigaltstack(cast[*u8](ss), none)
+    c_free(cast[*u8](ss))
+    ret mem
+}
+
+claw fn guard_off(mem *u8) +mem {
+    if mem == none { ret }
+    ss := cast[*u64](c_malloc(24))
+    ss[0] = 0
+    ss[1] = 0
+    ss[2] = 4 // SS_DISABLE
+    _ = c_sigaltstack(cast[*u8](ss), none)
+    c_free(cast[*u8](ss))
+    c_free(mem)
+}
+
 claw fn thread_main[T, R](p *u8) *u8 +mem {
+    g := guard_on()
     j := cast[*Job[T, R]](p)
     f := j.f
     j.cell.out = f(j.arg)
+    guard_off(g)
     ret none
 }
 
@@ -37,7 +82,7 @@ pub claw fn spawn[T, R](f fn(own T) R +mem, own x T) Task[R] +mem {
     cell := cast[*Cell[R]](j)
     if not __sequential() {
         mut tid u64 = 0
-        if c_create(&tid, none, __entry[T, R](), cast[*u8](j)) == 0 {
+        if start(&tid, __entry[T, R](), cast[*u8](j)) == 0 {
             j.cell.state = 0
             ret Task[R]{tid, cell}
         }
@@ -81,6 +126,7 @@ pub claw fn cores() int {
 type Part[T, R] { f fn(T) R +mem, xs *T, out *R, lo int, hi int }
 
 claw fn map_main[T, R](p *u8) *u8 +mem {
+    g := guard_on()
     j := cast[*Part[T, R]](p)
     f := j.f
     mut i := j.lo
@@ -88,12 +134,14 @@ claw fn map_main[T, R](p *u8) *u8 +mem {
         j.out[i] = f(j.xs[i])
         i += 1
     }
+    guard_off(g)
     ret none
 }
 
 type Gen[R] { f fn(int) R +mem, out *R, lo int, hi int }
 
 claw fn build_main[R](p *u8) *u8 +mem {
+    g := guard_on()
     j := cast[*Gen[R]](p)
     f := j.f
     mut i := j.lo
@@ -101,6 +149,7 @@ claw fn build_main[R](p *u8) *u8 +mem {
         j.out[i] = f(i)
         i += 1
     }
+    guard_off(g)
     ret none
 }
 
@@ -140,7 +189,7 @@ pub claw fn map[T, R](xs []T, f fn(T) R +mem) []R +mem {
     // The last share runs here; the others on new threads.
     k = 0
     for k < w - 1 {
-        if c_create(&tids[k], none, __entry_map[T, R](), cast[*u8](&parts[k])) != 0 {
+        if start(&tids[k], __entry_map[T, R](), cast[*u8](&parts[k])) != 0 {
             _ = map_main[T, R](cast[*u8](&parts[k]))
             tids[k] = 0
         }
@@ -183,7 +232,7 @@ pub claw fn build[R](n int, f fn(int) R +mem) []R +mem
     }
     k = 0
     for k < w - 1 {
-        if c_create(&tids[k], none, __entry_build[R](), cast[*u8](&parts[k])) != 0 {
+        if start(&tids[k], __entry_build[R](), cast[*u8](&parts[k])) != 0 {
             _ = build_main[R](cast[*u8](&parts[k]))
             tids[k] = 0
         }

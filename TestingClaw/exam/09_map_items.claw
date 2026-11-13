@@ -1,0 +1,16 @@
+// expect: p=10
+// expect: q=20
+// expect: r=12
+// expect: total 42
+fn main() {
+    mut m := new_map[str, int](hash_str)
+    put(&m, "p", 10)
+    put(&m, "q", 20)
+    put(&m, "r", 12)
+    mut total := 0
+    for e in m.items {
+        print("{e.key}={e.val}")
+        total += e.val
+    }
+    print("total {total}")
+}

@@ -1,0 +1,5 @@
+// expect: 4611686018427387904
+fn main() {
+    one := 1
+    print(one << 62)
+}

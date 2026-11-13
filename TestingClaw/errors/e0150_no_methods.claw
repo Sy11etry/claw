@@ -1,0 +1,5 @@
+// code: E0150
+fn main() {
+    a := [1, 2]
+    print(a.len())
+}

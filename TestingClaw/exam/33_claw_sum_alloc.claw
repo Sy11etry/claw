@@ -1,0 +1,17 @@
+// expect: 15
+claw fn sum_to(n int) int {
+    p := alloc[int](n)
+    defer free(p)
+    for i in 0..n {
+        p[i] = i + 1
+    }
+    mut s := 0
+    for i in 0..n {
+        s += p[i]
+    }
+    ret s
+}
+
+fn main() {
+    print(sum_to(5))
+}

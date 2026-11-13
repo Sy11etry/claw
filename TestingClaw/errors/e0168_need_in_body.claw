@@ -1,0 +1,8 @@
+// code: E0168
+fn f(a int) int {
+    need a > 0
+    ret a
+}
+fn main() {
+    print(f(1))
+}

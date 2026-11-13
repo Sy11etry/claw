@@ -12,7 +12,7 @@
 // expect: 200
 // expect: 1.5
 // expect: 0.25
-// expect: 1.84467440737096e+19
+// expect: 1.8446744073709552e+19
 // expect: 7
 fn id(x int) int {
     ret x

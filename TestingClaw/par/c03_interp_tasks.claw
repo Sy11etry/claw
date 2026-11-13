@@ -1,0 +1,17 @@
+// expect: mismatch 0 of 5000
+// expect: task 77 says 77 squared 5929
+use par
+
+fn tag(i int) str {
+    ret "task {i} says {i} squared {i * i}"
+}
+
+fn main() {
+    tasks := par.build(5000, tag)
+    mut bad := 0
+    for i in 0..5000 {
+        if tasks[i] != "task {i} says {i} squared {i * i}" { bad += 1 }
+    }
+    print("mismatch {bad} of 5000")
+    print(tasks[77])
+}

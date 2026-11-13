@@ -1,0 +1,6 @@
+// code: E0144
+type Box[T] { v T }
+fn main() {
+    b := Box{1}
+    print(1)
+}

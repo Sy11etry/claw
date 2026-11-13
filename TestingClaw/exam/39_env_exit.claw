@@ -1,0 +1,11 @@
+// expect: env unset
+// expect: bye
+// exit: 3
+use os
+
+fn main() {
+    home := os.env("NO_SUCH_VAR_CLAW") else "unset"
+    print("env {home}")
+    print("bye")
+    os.exit(3)
+}

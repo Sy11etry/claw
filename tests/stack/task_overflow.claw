@@ -1,0 +1,17 @@
+// The same inside a task running on its own thread.
+// stderr: trap: stack overflow
+// crash: yes
+use par
+
+fn forever(n int) int {
+    ret forever(n + 1) + 1
+}
+
+fn work(i int) int {
+    ret forever(i)
+}
+
+fn main() {
+    r := par.build(4, work)
+    print(r[0])
+}

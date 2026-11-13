@@ -1,0 +1,28 @@
+// c: b04_ctype_time.c
+// x64: yes
+// expect: time 1
+// expect: upper 81
+// expect: digit 1
+use c "ctype.h"
+use c "time.h"
+
+claw fn now_ok() int {
+    t := time(none)
+    if t > 1000000000 { ret 1 }
+    ret 0
+}
+
+claw fn upper_of(c i32) int {
+    ret int(toupper(c))
+}
+
+claw fn is_digit(c i32) int {
+    if isdigit(c) != 0 { ret 1 }
+    ret 0
+}
+
+fn main() {
+    print("time {now_ok()}")
+    print("upper {upper_of(i32('q'))}")
+    print("digit {is_digit(i32('7'))}")
+}

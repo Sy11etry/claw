@@ -1,0 +1,5 @@
+// exit: 101
+fn main() {
+    x := 300
+    print(i8(x))
+}

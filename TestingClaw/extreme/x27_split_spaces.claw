@@ -1,0 +1,4 @@
+// expect: 4
+fn main() {
+    print(len(split("   ", " ")))
+}

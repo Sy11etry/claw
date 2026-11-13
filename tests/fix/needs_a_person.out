@@ -4,6 +4,6 @@ fn f() int {
 }
 
 fn main() {
-    x := 2
+    _ = 2
     f()
 }

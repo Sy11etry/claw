@@ -1,0 +1,9 @@
+// code: E0160
+pub fn f() []int {
+    mut a []int = []
+    push(&a, 1)
+    ret a
+}
+fn main() {
+    print(len(f()))
+}

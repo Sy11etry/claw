@@ -1,0 +1,9 @@
+type P { a int, b str }
+
+fn name(p P) str {
+    ret copy(p.b)
+}
+
+fn main() {
+    print(name(P{1, "x"}))
+}

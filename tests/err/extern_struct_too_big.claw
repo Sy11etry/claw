@@ -1,0 +1,8 @@
+// error: E0149
+type Big { a int, b int, c int }
+
+extern fn take_big(b Big) int
+
+claw fn main() {
+    print(take_big(Big{1, 2, 3}))
+}

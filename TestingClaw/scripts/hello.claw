@@ -1,0 +1,10 @@
+#!/usr/bin/env claw
+use os
+
+fn main() {
+    a := os.args()
+    print("count {len(a)}")
+    for x in a {
+        print("[{x}]")
+    }
+}

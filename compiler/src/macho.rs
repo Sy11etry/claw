@@ -1,6 +1,9 @@
 //! Writes a signed arm64 Mach-O executable directly: no assembler, no linker.
 //! The layout mirrors what clang + ld produce on macOS (checked with otool).
 
+/// Size of the main thread's stack, written in LC_MAIN.
+pub const MAIN_STACK: u64 = 64 << 20;
+
 use crate::codegen::Object;
 use crate::codegen_x64::ObjectX64;
 use crate::sha256::sha256;
@@ -376,7 +379,8 @@ pub fn write_macho(obj: &Object, ident: &str, libs: &[String]) -> Vec<u8> {
     w.u32(0x8000_0028); // LC_MAIN
     w.u32(24);
     w.u64(text_off + obj.entry as u64 * 4);
-    w.u64(0);
+    // The main thread's stack (`ld -stack_size`): 64 MB instead of 8, so deep recursion works in every build mode.
+    w.u64(MAIN_STACK);
 
     path_cmd(&mut w, 0x0c, "/usr/lib/libSystem.B.dylib", &[2, 0x0001_0000, 0x0001_0000]);
     for l in libs {
@@ -557,7 +561,7 @@ pub fn write_macho_x64(obj: &ObjectX64, ident: &str, libs: &[String]) -> Vec<u8>
     w.u32(0x8000_0028); // LC_MAIN
     w.u32(24);
     w.u64(text_off + obj.entry as u64);
-    w.u64(0);
+    w.u64(MAIN_STACK);
 
     path_cmd(&mut w, 0x0c, "/usr/lib/libSystem.B.dylib", &[2, 0x0001_0000, 0x0001_0000]);
     for l in libs {

@@ -1,0 +1,9 @@
+// cmd: test
+// exit: nz
+fn add(a int, b int) int {
+    ret a + b
+}
+
+test "wrong expectation" {
+    sure add(2, 3) == 6
+}

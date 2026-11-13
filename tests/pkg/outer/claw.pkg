@@ -1,0 +1,2 @@
+// a package that needs another package
+inner ../inner

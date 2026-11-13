@@ -163,6 +163,8 @@ struct Pre {
     /// `#pragma pack` in force, and the states saved by `push`.
     pack_on: bool,
     pack_stack: Vec<bool>,
+    /// What a C compiler would refuse in these files (an `#if` without `#endif`).
+    problems: Vec<String>,
 }
 
 fn expand(toks: &[T], macros: &HashMap<String, Macro>, hide: &[String], budget: &mut usize) -> Vec<T> {
@@ -365,7 +367,12 @@ impl Eval<'_> {
                 if let Some(v) = self.consts.get(&n) {
                     return *v;
                 }
-                // `__has_include(x)` and friends: swallow the call, answer 0.
+                // `__has_include(x)` and friends in an `#if`: swallow the call, answer 0. A constant that calls
+                // something (a function, an unmeasured `sizeof`) has no value here.
+                if self.strict && self.peek().is_some_and(|t| t.is("(")) {
+                    self.ok = false;
+                    return 0;
+                }
                 if self.eat("(") {
                     let mut d = 1;
                     while d > 0 && self.i < self.t.len() {
@@ -595,6 +602,10 @@ impl Pre {
             }
         }
         self.flush(&mut pending);
+        if !stack.is_empty() {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            self.problems.push(format!("{name}: {} `#if` without `#endif`; a C compiler would refuse this header", stack.len()));
+        }
         self.out.push(T::P(format!("@{}", parent as u8)));
         self.depth -= 1;
     }
@@ -629,6 +640,8 @@ struct Proto {
     ret: C,
     params: Vec<Param>,
     variadic: bool,
+    /// `static` or `inline` in the header: C compiles it into each caller, so a library may not have it.
+    inline: bool,
 }
 
 #[derive(Default)]
@@ -1042,8 +1055,13 @@ impl<'a> Parser<'a> {
         while self.at("[") {
             let s = self.i + 1;
             self.skip_group();
-            let n = eval_expr(&self.t[s..self.i - 1], &self.consts, true).unwrap_or(0);
-            ty = C::Array(Box::new(ty), n);
+            let toks = sizeof_pass(&self.t[s..self.i - 1], &self.d.sizes());
+            // A size it cannot work out makes the field unknown, so the struct is reported, never guessed.
+            ty = match eval_expr(&toks, &self.consts, true) {
+                Some(n) if n > 0 => C::Array(Box::new(ty), n),
+                _ if s == self.i - 1 => C::Array(Box::new(ty), 0),
+                _ => C::Unknown,
+            };
         }
         Some((name, ty, None))
     }
@@ -1185,8 +1203,8 @@ impl<'a> Parser<'a> {
                 return;
             };
             if let (Some((params, variadic)), false) = (f, name.is_empty()) {
-                if !is_static && owned {
-                    self.d.protos.push(Proto { name, ret: ty, params, variadic });
+                if owned {
+                    self.d.protos.push(Proto { name, ret: ty, params, variadic, inline: is_static });
                 }
             }
             self.skip_attrs();
@@ -1206,6 +1224,116 @@ impl<'a> Parser<'a> {
             self.recover();
         }
     }
+}
+
+/// What measuring a type needs: the structs (all of them, written or not), the odd layouts and the typedefs.
+struct Sizes<'a> {
+    structs: &'a [(String, Vec<(String, C)>)],
+    layout: &'a [(String, &'static str)],
+    typedefs: &'a HashMap<String, C>,
+}
+
+impl Decls {
+    fn sizes(&self) -> Sizes<'_> {
+        Sizes { structs: &self.structs, layout: &self.layout, typedefs: &self.typedefs }
+    }
+}
+
+/// Size and alignment in bytes of a C type on the 64-bit targets, if this reader knows it.
+fn size_align(c: &C, d: &Sizes, depth: usize) -> Option<(i64, i64)> {
+    if depth > 32 {
+        return None;
+    }
+    Some(match c {
+        C::Int { bits, .. } => ((*bits / 8) as i64, (*bits / 8) as i64),
+        C::F32 | C::Enum => (4, 4),
+        C::F64 | C::Ptr(_) | C::Func => (8, 8),
+        C::Bool => (1, 1),
+        C::Array(e, n) => {
+            let (s, a) = size_align(e, d, depth + 1)?;
+            (s * n, a)
+        }
+        C::Struct(n) => {
+            if d.layout.iter().any(|(p, _)| p == n) {
+                return None;
+            }
+            let (_, fields) = d.structs.iter().find(|s| s.0 == *n)?;
+            let (mut size, mut align) = (0i64, 1i64);
+            for (_, f) in fields {
+                let (fs, fa) = size_align(f, d, depth + 1)?;
+                size = (size + fa - 1) / fa * fa + fs;
+                align = align.max(fa);
+            }
+            ((size + align - 1) / align * align, align)
+        }
+        C::Void | C::Unknown => return None,
+    })
+}
+
+/// The type named by the tokens inside `sizeof(...)`.
+fn type_of_tokens(toks: &[T], d: &Sizes) -> Option<C> {
+    if toks.iter().any(|t| t.is("*")) {
+        return Some(C::Ptr(Box::new(C::Void)));
+    }
+    let words: Vec<&str> = toks.iter().map(|t| t.id()).collect::<Option<Vec<_>>>()?;
+    let words: Vec<&str> = words.into_iter().filter(|w| !matches!(*w, "const" | "volatile" | "signed")).collect();
+    match words.as_slice() {
+        ["struct" | "union", name] => Some(C::Struct(name.to_string())),
+        ["enum", _] => Some(C::Enum),
+        [one] if builtin_typedef(one).is_some() || d.typedefs.contains_key(*one) => builtin_typedef(one).or_else(|| d.typedefs.get(*one).cloned()),
+        ws => {
+            let has = |w: &str| ws.contains(&w);
+            let longs = ws.iter().filter(|w| **w == "long").count();
+            Some(if has("char") {
+                C::Int { bits: 8, signed: true }
+            } else if has("short") {
+                C::Int { bits: 16, signed: true }
+            } else if has("double") {
+                C::F64
+            } else if has("float") {
+                C::F32
+            } else if has("_Bool") {
+                C::Bool
+            } else if longs > 0 {
+                C::Int { bits: 64, signed: true }
+            } else if has("int") || has("unsigned") {
+                C::Int { bits: 32, signed: true }
+            } else {
+                return None;
+            })
+        }
+    }
+}
+
+/// Replaces each `sizeof(type)` it can measure with the number of bytes, for array sizes and constants.
+fn sizeof_pass(toks: &[T], d: &Sizes) -> Vec<T> {
+    let mut out = Vec::with_capacity(toks.len());
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i].id() == Some("sizeof") && toks.get(i + 1).is_some_and(|t| t.is("(")) {
+            let mut depth = 0;
+            let mut j = i + 1;
+            while j < toks.len() {
+                if toks[j].is("(") {
+                    depth += 1;
+                } else if toks[j].is(")") {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            if let Some((size, _)) = type_of_tokens(&toks[i + 2..j.min(toks.len())], d).and_then(|c| size_align(&c, d, 0)) {
+                out.push(T::Num(size.to_string()));
+                i = j + 1;
+                continue;
+            }
+        }
+        out.push(toks[i].clone());
+        i += 1;
+    }
+    out
 }
 
 // ---------- Claw output ----------
@@ -1282,11 +1410,43 @@ impl Out<'_> {
     }
 }
 
+/// Why a name from a C header is not what a program might expect, for the compiler's messages.
+#[derive(Clone)]
+pub enum CNote {
+    /// The C function has another name in Claw (its first letter is made small).
+    Renamed(String),
+    /// Declared in the header, but not translated: why.
+    Skipped(String),
+    /// A macro with parameters: Claw does not translate those.
+    Macro,
+}
+
 pub struct Header {
     pub source: String,
+    /// Names a program may call that this header knows something about (by their C name), and the header's note.
+    pub notes: Vec<(String, CNote)>,
+    /// C names of `static` or `inline` functions that were written as `extern fn`: a library may not have them.
+    pub inline: Vec<String>,
+    /// What a C compiler would refuse in the header.
+    pub problems: Vec<String>,
     /// Structs that C lays out differently from Claw (packed, aligned, or under `#pragma pack`): the name a program
     /// would use, and why. They are not written, so a program that names one gets E0182.
     pub packed: Vec<(String, String)>,
+}
+
+/// Why a prototype could not be written, in words for a message.
+fn skip_reason(pr: &Proto, out: &Out) -> String {
+    let by_value = |c: &C| matches!(c, C::Struct(_)) || matches!(c, C::Array(..));
+    if by_value(&pr.ret) || pr.params.iter().any(|p| by_value(&p.ty)) {
+        "it passes or returns a union, or a struct with a field Claw cannot hold, by value; call a C function that takes a pointer, or write a small C wrapper".to_string()
+    } else {
+        let bad: Vec<String> = pr.params.iter().filter(|p| out.ty(&p.ty, false).is_none()).map(|p| if p.name.is_empty() { "a parameter".to_string() } else { format!("`{}`", p.name) }).collect();
+        if bad.is_empty() {
+            "its result has a type Claw cannot hold".to_string()
+        } else {
+            format!("{} has a type Claw cannot hold", bad.join(", "))
+        }
+    }
 }
 
 /// Adds `r` unless a reason is already there.
@@ -1323,7 +1483,7 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
             dirs.push(PathBuf::from(sys));
         }
     }
-    let mut pre = Pre { macros: HashMap::new(), defined_here: Vec::new(), incdirs: dirs, out: Vec::new(), seen: HashSet::new(), depth: 0, pack_on: false, pack_stack: Vec::new() };
+    let mut pre = Pre { macros: HashMap::new(), defined_here: Vec::new(), incdirs: dirs, out: Vec::new(), seen: HashSet::new(), depth: 0, pack_on: false, pack_stack: Vec::new(), problems: Vec::new() };
     pre.predefine();
     pre.file(root, true, true);
     // Pull the ownership and packing markers out of the stream; each remaining token keeps their state.
@@ -1385,6 +1545,8 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
             }
         }
     }
+    // Every struct read stays measurable for `sizeof`, written or not.
+    let all_structs = d.structs.clone();
     d.structs.retain(|s| seen_want.contains(&s.0));
 
     // Names of the Claw types written for structs.
@@ -1486,7 +1648,8 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
             continue;
         }
         let mut budget = 1000;
-        let body = expand(&m.body, &pre.macros, &[], &mut budget);
+        let sizes = Sizes { structs: &all_structs, layout: &d.layout, typedefs: &d.typedefs };
+        let body = sizeof_pass(&expand(&m.body, &pre.macros, &[], &mut budget), &sizes);
         if let Some(v) = eval_expr(&body, &empty, true) {
             emit_const(&mut names, &mut s, n, &v.to_string());
         } else if body.len() == 1 {
@@ -1502,16 +1665,24 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
     let mut done: HashSet<String> = HashSet::new();
     let mut fn_ids: HashSet<String> = HashSet::new();
     let mut skipped = Vec::new();
-    for pr in &d.protos {
+    let mut notes: Vec<(String, CNote)> = Vec::new();
+    let mut inline_names: Vec<String> = Vec::new();
+    // A function declared both plainly and as `inline` is the library's: the plain prototype wins.
+    let mut protos: Vec<&Proto> = d.protos.iter().filter(|p| !p.inline).collect();
+    protos.extend(d.protos.iter().filter(|p| p.inline));
+    for pr in protos {
         if !done.insert(pr.name.clone()) {
             continue;
         }
         let mut params = Vec::new();
         let mut ok = true;
         for (k, p) in pr.params.iter().enumerate() {
-            match out.ty(&p.ty, false) {
+            // A struct by value is fine when Claw can write the struct (see `cabi`).
+            match out.ty(&p.ty, true) {
                 Some(t) => {
-                    let mut n = if p.name.is_empty() { format!("a{k}") } else { claw_ident(&p.name) };
+                    // `__s` in a system header is just `s`: the underscores only keep C macros away from it.
+                    let bare = p.name.trim_start_matches('_');
+                    let mut n = if p.name.is_empty() || bare.is_empty() { format!("a{k}") } else { claw_ident(bare) };
                     while params.iter().any(|(x, _): &(String, String)| *x == n) {
                         n.push('_');
                     }
@@ -1522,15 +1693,24 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
         }
         let ret = match &pr.ret {
             C::Void => Some(String::new()),
-            r => out.ty(r, false).map(|t| format!(" {t}")),
+            r => out.ty(r, true).map(|t| format!(" {t}")),
         };
         let Some(ret) = ret.filter(|_| ok) else {
-            skipped.push(pr.name.clone());
+            if !pr.inline {
+                skipped.push(pr.name.clone());
+                notes.push((pr.name.clone(), CNote::Skipped(skip_reason(pr, &out))));
+            }
             continue;
         };
         let id = claw_ident(&pr.name);
         if !fn_ids.insert(id.clone()) {
             continue;
+        }
+        if id != pr.name {
+            notes.push((pr.name.clone(), CNote::Renamed(id.clone())));
+        }
+        if pr.inline {
+            inline_names.push(pr.name.clone());
         }
         let ps: Vec<String> = params.iter().map(|(n, t)| format!("{n} {t}")).collect();
         let mut all = ps.join(", ");
@@ -1544,9 +1724,23 @@ pub fn translate(root: &Path, incdirs: &[PathBuf]) -> Header {
         s.push_str(&format!("extern {sym}fn {id}({all}){ret}\n"));
     }
     if !skipped.is_empty() {
-        s.push_str(&format!("// not translated (struct by value, union or unknown type): {}\n", skipped.join(" ")));
+        s.push_str(&format!("// not translated (a union or unknown type, or a struct Claw cannot hold): {}\n", skipped.join(" ")));
     }
-    Header { source: s, packed: packed_names }
+    if !inline_names.is_empty() {
+        s.push_str(&format!("// static or inline in the header, so a library may not have them (checked when the program is built): {}\n", inline_names.join(" ")));
+    }
+    let mut macros: Vec<&String> = pre.defined_here.iter().filter(|n| pre.macros.get(*n).is_some_and(|m| m.params.is_some()) && !done.contains(*n)).collect();
+    macros.sort();
+    macros.dedup();
+    for m in &macros {
+        notes.push((m.to_string(), CNote::Macro));
+    }
+    if !macros.is_empty() {
+        let shown: Vec<&str> = macros.iter().take(30).map(|m| m.as_str()).collect();
+        let more = if macros.len() > 30 { format!(" and {} more", macros.len() - 30) } else { String::new() };
+        s.push_str(&format!("// macros with parameters are not translated: {}{more}\n", shown.join(" ")));
+    }
+    Header { source: s, packed: packed_names, notes, inline: inline_names, problems: pre.problems }
 }
 
 const SYSTEM_DIRS: &[&str] = &["/opt/homebrew/include", "/usr/local/include", "/usr/include", "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include", "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include"];

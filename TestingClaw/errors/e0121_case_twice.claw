@@ -1,0 +1,12 @@
+// code: E0121
+type S = A | B
+fn f(s S) int {
+    match s {
+        A: ret 1
+        A: ret 2
+        B: ret 0
+    }
+}
+fn main() {
+    print(f(A))
+}

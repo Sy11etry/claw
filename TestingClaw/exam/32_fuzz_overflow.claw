@@ -1,0 +1,8 @@
+// cmd: test
+fn double_plus(x int) int {
+    ret x * 2 + 1
+}
+
+fn main() {
+    print(double_plus(4))
+}

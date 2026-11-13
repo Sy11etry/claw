@@ -1,0 +1,4 @@
+fn main() {
+    z := 0.0
+    print(z / z)
+}

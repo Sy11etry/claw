@@ -1,0 +1,6 @@
+// build-error: E0185
+use c "inline_only.h"
+
+claw fn main() {
+    print(inline_square(3))
+}

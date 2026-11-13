@@ -1,0 +1,3 @@
+pub fn square(x int) int {
+    ret x * x * 2
+}

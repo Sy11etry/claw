@@ -1,0 +1,5 @@
+// code: E0146
+use nothere
+fn main() {
+    print(1)
+}

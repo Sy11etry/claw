@@ -1,0 +1,10 @@
+// error: E0101
+// error: E0101
+// error: E0101
+use c "names.h"
+
+claw fn main() {
+    print(Lib_Scale(2))
+    print(LIB_CLAMP(3))
+    _ = lib_make(1, 2)
+}

@@ -1,0 +1,7 @@
+// code: E0153
+fn main() {
+    mut v []int = [1]
+    push(&v, 2)
+    a [2][]int = [v...]
+    print(len(a))
+}

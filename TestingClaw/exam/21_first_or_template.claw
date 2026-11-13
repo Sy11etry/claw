@@ -1,0 +1,12 @@
+// expect: 7
+// expect: none
+fn first_or[T](xs []T, d T) T {
+    if len(xs) == 0 { ret d }
+    ret xs[0]
+}
+
+fn main() {
+    print(first_or([7, 8], 0))
+    e []str = []
+    print(first_or(e, "none"))
+}

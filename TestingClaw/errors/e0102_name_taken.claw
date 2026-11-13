@@ -1,0 +1,8 @@
+// code: E0102
+const limit = 1
+fn limit() int {
+    ret 2
+}
+fn main() {
+    print(limit)
+}

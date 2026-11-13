@@ -1,0 +1,90 @@
+// c: b18_mylib_c.c
+// cflags: -Llib -lmylib -Wl,-rpath,@executable_path/../lib
+// clw: -L lib -l mylib
+// clw-x64: -L lib/x86_64 -l mylib
+// x64: yes
+// expect: add 5
+// expect: scale 9
+// expect: moved 99
+// expect: apply 42
+// expect: big 2000000000200
+// expect: len 5
+// expect: even true
+// expect: name 109
+// expect: pair 279
+// expect: next 5
+// expect: consts 42 255 84 13
+// expect: blue 6
+use c "mylib.h"
+
+claw fn mul_cb(a i32, b i32) i32 {
+    ret a * b
+}
+
+claw fn add_demo() int {
+    ret int(mylib_add(2, 3))
+}
+
+claw fn scale_demo() int {
+    p := alloc[Point](1)
+    defer free(p)
+    p.x = 1
+    p.y = 2
+    ret int(mylib_scale(p, 3))
+}
+
+claw fn move_demo() int {
+    p := alloc[Point](1)
+    defer free(p)
+    p.x = 1
+    p.y = 2
+    mylib_move(p, 10, 20)
+    ret int(mylib_scale(p, 3))
+}
+
+claw fn apply_demo() int {
+    ret int(mylib_apply(cast[*u8](mul_cb), 6, 7))
+}
+
+claw fn big_demo() int {
+    ret int(mylib_big(200, u64(1000000000000)))
+}
+
+claw fn len_demo() int {
+    ret int(mylib_len("hello"))
+}
+
+claw fn even_demo() bool {
+    ret mylib_is_even(4)
+}
+
+claw fn name_demo() int {
+    p := mylib_name()
+    ret int(p[0])
+}
+
+claw fn pair_demo() int {
+    mut a i32 = 0
+    mut b i32 = 0
+    rc := mylib_pair(&a, &b)
+    ret int(rc) * 100 + int(a) * 10 + int(b)
+}
+
+claw fn next_demo() int {
+    ret int(mylib_next(red))
+}
+
+fn main() {
+    print("add {add_demo()}")
+    print("scale {scale_demo()}")
+    print("moved {move_demo()}")
+    print("apply {apply_demo()}")
+    print("big {big_demo()}")
+    print("len {len_demo()}")
+    print("even {even_demo()}")
+    print("name {name_demo()}")
+    print("pair {pair_demo()}")
+    print("next {next_demo()}")
+    print("consts {mylib_max} {mylib_mask} {mylib_twice} {int(mylib_ratio * 4.0)}")
+    print("blue {blue}")
+}

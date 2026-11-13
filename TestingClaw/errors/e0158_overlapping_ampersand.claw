@@ -1,0 +1,8 @@
+// code: E0158
+fn two(a &int, b &int) {
+    a = b
+}
+fn main() {
+    mut x := 1
+    two(&x, &x)
+}

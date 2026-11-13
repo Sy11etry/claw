@@ -84,11 +84,24 @@ pub struct CArg {
     pub size: u32,
 }
 
+/// One register of a struct that C returns by value: `class` is 0 for an integer register (8 bytes), 32 or 64 for a
+/// float register (4 or 8 bytes); `reg` counts within its class; the bytes go to `off` in the destination.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RetPart {
+    pub class: u8,
+    pub reg: u8,
+    pub off: u32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum CRet {
     None,
     Int(Mem),
     Float(u8),
+    /// A struct of up to 16 bytes, in registers: stored at `dest` after the call.
+    Parts { dest: VReg, parts: [RetPart; 4], n: u8 },
+    /// A bigger struct on arm64: C writes it where `x8` points. (On x86-64 the address is the first argument.)
+    Indirect { dest: VReg },
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +138,8 @@ pub enum Inst {
     MemCopyDyn { dst: VReg, src: VReg, n: VReg },
     IndexAddr { d: VReg, base: VReg, idx: VReg, size: u64 },
     Bounds { idx: VReg, len: u64, loc: Loc },
-    BoundsDyn { idx: VReg, len: VReg, loc: Loc },
+    /// `slice`: the check of a slice's ends, which reports `slice bounds out of range` instead.
+    BoundsDyn { idx: VReg, len: VReg, loc: Loc, slice: bool },
     /// `malloc` of `n` items, trapping on a bad size or on failure.
     Alloc { d: VReg, n: VReg, elem: u64, loc: Loc },
     Free { p: VReg },
@@ -200,6 +214,8 @@ pub struct Block {
 #[derive(Debug, Clone)]
 pub struct Func {
     pub name: String,
+    /// Where the function is written, for messages about the whole function (`E0901`).
+    pub at: Loc,
     pub nparams: usize,
     /// The registers holding the parameters, in order.
     pub params: Vec<VReg>,
@@ -311,9 +327,12 @@ macro_rules! walk_inst {
                     $f(d, true);
                 }
             }
-            Inst::CallC { d, args, .. } => {
+            Inst::CallC { d, args, ret, .. } => {
                 for a in args {
                     $f(&$($m)? a.v, false);
+                }
+                if let CRet::Parts { dest, .. } | CRet::Indirect { dest } = ret {
+                    $f(dest, false);
                 }
                 if let Some(d) = d {
                     $f(d, true);

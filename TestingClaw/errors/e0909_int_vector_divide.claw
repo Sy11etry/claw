@@ -1,0 +1,9 @@
+// code: E0909
+claw fn g() int {
+    a := i32x4(1)
+    b := a / a
+    ret 1
+}
+fn main() {
+    print(g())
+}

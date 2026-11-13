@@ -16,13 +16,18 @@ use crate::cir::*;
 use crate::types::Vk;
 use crate::x64::*;
 
-const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"];
+const IMPORTS: &[&str] = &["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free", "_strtod", "_sigaltstack", "_sigaction"];
 const IMP_WRITE: usize = 0;
 const IMP_EXIT: usize = 1;
 const IMP_SNPRINTF: usize = 2;
 const IMP_MEMCPY: usize = 3;
 const IMP_MALLOC: usize = 4;
 const IMP_FREE: usize = 5;
+/// Reads a printed float back, to find the shortest text that gives the same number (see `rt_buf_float`).
+const IMP_STRTOD: usize = 6;
+/// Set up the handler that reports a stack overflow (see `rt_segv`).
+const IMP_SIGALTSTACK: usize = 7;
+const IMP_SIGACTION: usize = 8;
 
 // The runtime's words live in bss and mirror codegen.rs: same offsets, same sizes.
 /// Output buffer: 8 bytes of length, then the bytes.
@@ -90,6 +95,8 @@ struct Gen {
     files: Vec<String>,
     imports: Vec<String>,
     too_large: Option<String>,
+    /// Where a C call that returns a struct keeps the destination address across the call: `[rsp + ret_slot]`.
+    ret_slot: i32,
     /// Where each virtual register of the function being generated lives.
     pl: Vec<Place>,
     /// Which registers of the function being generated are 128-bit vectors, and how many registers it has:
@@ -237,6 +244,7 @@ enum Trap {
     DivZero,
     Shift,
     Bounds,
+    Slice,
     Convert,
     AllocSize,
     OutOfMemory,
@@ -250,6 +258,7 @@ impl Trap {
             Trap::DivZero => "division by zero",
             Trap::Shift => "shift out of range",
             Trap::Bounds => "index out of bounds",
+            Trap::Slice => "slice bounds out of range",
             Trap::Convert => "value does not fit the target type",
             Trap::AllocSize => "invalid allocation size",
             Trap::OutOfMemory => "out of memory",
@@ -737,19 +746,106 @@ impl Gen {
     }
 
     /// `__claw_buf_float(xmm0 = value, rdx = format)`, via libSystem's snprintf.
-    fn rt_buf_float(&mut self) -> usize {
+    /// `__claw_buf_float(xmm0 = value, rdx = most digits: 17 for f64, 9 for f32)`, as on arm64: the shortest `%g`
+    /// text that reads back as the same number; the exponent form only for |x| >= 1e16 or < 1e-4.
+    fn rt_buf_float(&mut self, fmt: usize) -> usize {
+        let saved = [RBX, R12, R13, R14];
         let pos = self.here();
-        self.prologue(&[]);
-        alu_i(&mut self.c, Alu::Sub, reg(RSP), 80);
+        self.prologue(&saved);
+        alu_i(&mut self.c, Alu::Sub, reg(RSP), 96);
+        movs_store(&mut self.c, 64, at(RSP, 0), 0);
+        mov(&mut self.c, reg(R12), RDX);
+        // r14: may the exponent form be used? NaN, infinities, |x| >= 1e16, and 0 < |x| < 1e-4.
+        mov_ri32(&mut self.c, R14, 1);
+        ucomis(&mut self.c, 64, 0, reg(0));
+        jcc(&mut self.c, Cond::P);
+        let nan = self.c.len() - 4;
+        movq_rx(&mut self.c, RAX, 0);
+        shift_i(&mut self.c, Shift::Shl, RAX, 1);
+        shift_i(&mut self.c, Shift::Shr, RAX, 1);
+        // Non-negative doubles order like their bit patterns.
+        mov_ri64(&mut self.c, RCX, 1e16f64.to_bits() as i64);
+        alu(&mut self.c, Alu::Cmp, reg(RAX), RCX);
+        jcc(&mut self.c, Cond::Ae);
+        let big = self.c.len() - 4;
+        test(&mut self.c, RAX, RAX);
+        jcc(&mut self.c, Cond::E);
+        let zero = self.c.len() - 4;
+        mov_ri64(&mut self.c, RCX, 1e-4f64.to_bits() as i64);
+        alu(&mut self.c, Alu::Cmp, reg(RAX), RCX);
+        jcc(&mut self.c, Cond::B);
+        let small = self.c.len() - 4;
+        let fixed = self.here();
+        mov_ri32(&mut self.c, R14, 0);
+        let start = self.here();
+        patch_rel(&mut self.c, nan, start);
+        patch_rel(&mut self.c, big, start);
+        patch_rel(&mut self.c, zero, fixed);
+        patch_rel(&mut self.c, small, start);
+        mov_ri32(&mut self.c, RBX, 1);
+        let top = self.here();
         lea(&mut self.c, RDI, at(RSP, 16));
         mov_ri32(&mut self.c, RSI, 64);
+        self.lea_data(RDX, fmt);
+        mov(&mut self.c, reg(RCX), RBX);
+        movs_load(&mut self.c, 64, 0, at(RSP, 0));
         mov_ri32(&mut self.c, RAX, 1); // one vector register carries an argument
         self.call_to(Target::Import(IMP_SNPRINTF));
-        mov32(&mut self.c, reg(RSI), RAX);
+        mov(&mut self.c, reg(R13), RAX);
+        alu(&mut self.c, Alu::Cmp, reg(RBX), R12);
+        jcc(&mut self.c, Cond::Ge);
+        let last = self.c.len() - 4;
+        lea(&mut self.c, RDI, at(RSP, 16));
+        mov_ri32(&mut self.c, RSI, 0);
+        self.call_to(Target::Import(IMP_STRTOD));
+        // An f32 is compared as an f32: round what was read to single precision first.
+        alu_i(&mut self.c, Alu::Cmp, reg(R12), 9);
+        jcc(&mut self.c, Cond::Ne);
+        let wide = self.c.len() - 4;
+        cvtsd2ss(&mut self.c, 0, 0);
+        cvtss2sd(&mut self.c, 0, 0);
+        let compare = self.here();
+        patch_rel(&mut self.c, wide, compare);
+        ucomis(&mut self.c, 64, 0, at(RSP, 0));
+        jcc(&mut self.c, Cond::Ne);
+        let differs = self.c.len() - 4;
+        jcc(&mut self.c, Cond::P);
+        let unordered = self.c.len() - 4;
+        test(&mut self.c, R14, R14);
+        jcc(&mut self.c, Cond::Ne);
+        let take = self.c.len() - 4;
+        // Fixed notation wanted: try more digits while the text has an `e`.
+        mov_ri32(&mut self.c, RCX, 0);
+        let scan = self.here();
+        alu(&mut self.c, Alu::Cmp, reg(RCX), R13);
+        jcc(&mut self.c, Cond::Ge);
+        let scanned = self.c.len() - 4;
+        lea(&mut self.c, RDX, at(RSP, 16));
+        alu(&mut self.c, Alu::Add, reg(RDX), RCX);
+        movzx8(&mut self.c, RAX, at(RDX, 0));
+        alu_i(&mut self.c, Alu::Cmp, reg(RAX), b'e' as i32);
+        jcc(&mut self.c, Cond::E);
+        let has_e = self.c.len() - 4;
+        alu_i(&mut self.c, Alu::Add, reg(RCX), 1);
+        jmp(&mut self.c);
+        let back = self.c.len() - 4;
+        patch_rel(&mut self.c, back, scan);
+        let next = self.here();
+        alu_i(&mut self.c, Alu::Add, reg(RBX), 1);
+        jmp(&mut self.c);
+        let again = self.c.len() - 4;
+        patch_rel(&mut self.c, again, top);
+        let done = self.here();
+        for at_ in [last, take, scanned] {
+            patch_rel(&mut self.c, at_, done);
+        }
+        for at_ in [differs, unordered, has_e] {
+            patch_rel(&mut self.c, at_, next);
+        }
+        mov(&mut self.c, reg(RSI), R13);
         lea(&mut self.c, RDI, at(RSP, 16));
         self.call_to(Target::BufStr);
-        leave(&mut self.c);
-        ret(&mut self.c);
+        self.epilogue(&saved);
         pos
     }
 
@@ -764,6 +860,56 @@ impl Gen {
         mov_ri32(&mut self.c, RDI, 101);
         self.call_to(Target::Import(IMP_EXIT));
         ud2(&mut self.c);
+        pos
+    }
+
+    /// `__claw_segv(signo, info, context)`, as on arm64: both signals back to their default, flush, then say whether
+    /// the fault was next to the stack pointer (a full stack) or elsewhere (a bad pointer), and return.
+    fn rt_segv(&mut self) -> usize {
+        let stack_msg = "trap: stack overflow: the recursion is too deep for the stack\n";
+        let bad_msg = "trap: bad memory access: a pointer in `claw fn` points nowhere valid\n";
+        let stack_off = self.add_str(stack_msg.as_bytes());
+        let bad_off = self.add_str(bad_msg.as_bytes());
+        let pos = self.here();
+        self.prologue(&[RBX]);
+        alu_i(&mut self.c, Alu::Sub, reg(RSP), 16);
+        mov(&mut self.c, reg(RBX), RDX);
+        alu(&mut self.c, Alu::Xor, reg(RAX), RAX);
+        mov(&mut self.c, at(RSP, 0), RAX);
+        mov(&mut self.c, at(RSP, 8), RAX);
+        for signo in [11, 10] {
+            mov_ri32(&mut self.c, RDI, signo);
+            mov(&mut self.c, reg(RSI), RSP);
+            mov_ri32(&mut self.c, RDX, 0);
+            self.call_to(Target::Import(IMP_SIGACTION));
+        }
+        mov_ri32(&mut self.c, RDI, 1);
+        self.call_to(Target::Flush);
+        // The fault address (`__es.__faultvaddr`) and the stack pointer (`__ss.__rsp`) of the interrupted code.
+        mov_load(&mut self.c, RAX, at(RBX, 48));
+        mov_load(&mut self.c, RCX, at(RAX, 8));
+        mov_load(&mut self.c, RDX, at(RAX, 72));
+        alu(&mut self.c, Alu::Sub, reg(RCX), RDX);
+        mov_ri32(&mut self.c, RDX, 0x80_0000);
+        alu(&mut self.c, Alu::Add, reg(RCX), RDX);
+        mov_ri32(&mut self.c, RDX, 0x100_0000);
+        alu(&mut self.c, Alu::Cmp, reg(RCX), RDX);
+        jcc(&mut self.c, Cond::Ae);
+        let to_bad = self.c.len() - 4;
+        self.lea_data(RSI, stack_off);
+        mov_ri32(&mut self.c, RDX, stack_msg.len() as u32);
+        jmp(&mut self.c);
+        let to_write = self.c.len() - 4;
+        let bad = self.here();
+        patch_rel(&mut self.c, to_bad, bad);
+        self.lea_data(RSI, bad_off);
+        mov_ri32(&mut self.c, RDX, bad_msg.len() as u32);
+        let write = self.here();
+        patch_rel(&mut self.c, to_write, write);
+        mov_ri32(&mut self.c, RDI, 2);
+        self.call_to(Target::Import(IMP_WRITE));
+        alu_i(&mut self.c, Alu::Add, reg(RSP), 16);
+        self.epilogue(&[RBX]);
         pos
     }
 
@@ -802,6 +948,11 @@ impl Gen {
                     _ => {}
                 }
             }
+        }
+        if f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::CallC { ret: CRet::Parts { .. }, .. })) {
+            outgoing = (outgoing + 15) & !15;
+            self.ret_slot = outgoing as i32;
+            outgoing += 16;
         }
         let vecs = crate::regalloc::vec_classes(f);
         let has_vec = vecs.iter().any(|v| *v);
@@ -1465,10 +1616,10 @@ impl Gen {
                 self.ld(RDX, *n);
                 self.call_to(Target::Import(IMP_MEMCPY));
             }
-            Inst::BoundsDyn { idx, len, loc } => {
+            Inst::BoundsDyn { idx, len, loc, slice } => {
                 self.cmp_vals(*idx, *len);
                 // Unsigned compare: a negative index looks huge.
-                self.trap_if(Cond::Ae, Trap::Bounds, *loc, traps);
+                self.trap_if(Cond::Ae, if *slice { Trap::Slice } else { Trap::Bounds }, *loc, traps);
             }
             Inst::BufPtr { p, n } => {
                 self.ld(RDI, *p);
@@ -1568,7 +1719,8 @@ impl Gen {
                 if *bits == 32 {
                     cvtss2sd(&mut self.c, 0, 0);
                 }
-                self.lea_data(RDX, if *bits == 64 { fmts.0 } else { fmts.1 });
+                let _ = fmts;
+                mov_ri32(&mut self.c, RDX, if *bits == 64 { 17 } else { 9 });
                 self.call_to(Target::BufFloat);
             }
             Inst::WideBin { op, dlo, dhi, alo, ahi, blo, bhi, loc } => {
@@ -1657,6 +1809,11 @@ impl Gen {
                 mov(&mut self.c, at(RSP, *off as i32), RAX);
             }
         }
+        // The address a struct result goes to must outlive the call: it waits in the frame.
+        if let CRet::Parts { dest, .. } = ret {
+            self.ld(RAX, dest);
+            mov(&mut self.c, at(RSP, self.ret_slot), RAX);
+        }
         let mut nflt = 0;
         for (a, s) in args.iter().zip(&slots) {
             match s {
@@ -1677,7 +1834,18 @@ impl Gen {
         self.call_to(Target::Import(index));
         // C leaves the upper bits of a narrow result undefined.
         match ret {
-            CRet::None => {}
+            CRet::None | CRet::Indirect { .. } => {}
+            CRet::Parts { parts, n, .. } => {
+                // Integer pieces come back in rax then rdx; float pieces in xmm0 then xmm1.
+                mov_load(&mut self.c, RCX, at(RSP, self.ret_slot));
+                for p in &parts[..n as usize] {
+                    if p.class == 0 {
+                        mov(&mut self.c, at(RCX, p.off as i32), if p.reg == 0 { RAX } else { RDX });
+                    } else {
+                        movs_store(&mut self.c, 64, at(RCX, p.off as i32), p.reg);
+                    }
+                }
+            }
             CRet::Float(bits) => {
                 if let Some(d) = d {
                     if bits == 64 {
@@ -1859,6 +2027,7 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
         files: files.to_vec(),
         imports: imports.clone(),
         too_large: None,
+        ret_slot: 0,
         pl: Vec::new(),
         vecs: Vec::new(),
         nv: 0,
@@ -1867,8 +2036,8 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     };
     let mut symbols: Vec<(String, usize)> = Vec::new();
 
-    let fmt64 = g.add_str(b"%.15g\0");
-    let fmt32 = g.add_str(b"%.7g\0");
+    let fmt = g.add_str(b"%.*g\0");
+    let (fmt64, fmt32) = (fmt, fmt);
 
     let stubs: Vec<usize> = (0..imports.len()).map(|s| g.import_stub(s)).collect();
     // Every allocation passes through these two, so a later version can record them.
@@ -1881,7 +2050,8 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     let buf_int = g.rt_buf_num(true);
     let buf_uint = g.rt_buf_num(false);
     let buf_bool = g.rt_buf_bool();
-    let buf_float = g.rt_buf_float();
+    let buf_float = g.rt_buf_float(fmt);
+    let segv = g.rt_segv();
     for (n, p) in [
         ("alloc", rt_alloc),
         ("free", rt_free),
@@ -1904,6 +2074,32 @@ pub fn generate(m: &Module, files: &[String], alloc_stats: bool) -> Result<Objec
     g.lea_bss(RAX, STATE + 112);
     mov(&mut g.c, at(RAX, 0), RDI);
     mov(&mut g.c, at(RAX, 8), RSI);
+    // A stack overflow is reported, not a silent crash: the handler needs a stack of its own to run on.
+    mov_ri32(&mut g.c, RDI, 65536);
+    g.call_to(Target::Import(IMP_MALLOC));
+    alu_i(&mut g.c, Alu::Sub, reg(RSP), 48);
+    mov(&mut g.c, at(RSP, 0), RAX);
+    mov_ri32(&mut g.c, RAX, 65536);
+    mov(&mut g.c, at(RSP, 8), RAX);
+    alu(&mut g.c, Alu::Xor, reg(RAX), RAX);
+    mov(&mut g.c, at(RSP, 16), RAX);
+    mov(&mut g.c, reg(RDI), RSP);
+    mov_ri32(&mut g.c, RSI, 0);
+    g.call_to(Target::Import(IMP_SIGALTSTACK));
+    // struct sigaction { handler, mask 0, flags SA_ONSTACK | SA_SIGINFO }
+    lea(&mut g.c, RAX, Op::Rip);
+    let at_handler = g.c.len() - 4;
+    patch_rel(&mut g.c, at_handler, segv);
+    mov(&mut g.c, at(RSP, 24), RAX);
+    mov_ri64(&mut g.c, RAX, 0x41 << 32);
+    mov(&mut g.c, at(RSP, 32), RAX);
+    for signo in [11, 10] {
+        mov_ri32(&mut g.c, RDI, signo);
+        lea(&mut g.c, RSI, at(RSP, 24));
+        mov_ri32(&mut g.c, RDX, 0);
+        g.call_to(Target::Import(IMP_SIGACTION));
+    }
+    alu_i(&mut g.c, Alu::Add, reg(RSP), 48);
     g.call_to(Target::User(m.main));
     if let Some(c) = m.check {
         g.call_to(Target::User(c.finish));

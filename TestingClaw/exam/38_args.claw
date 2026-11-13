@@ -1,0 +1,10 @@
+// args: x y
+// expect: count 3
+// expect: last y
+use os
+
+fn main() {
+    a := os.args()
+    print("count {len(a)}")
+    print("last {a[len(a) - 1]}")
+}

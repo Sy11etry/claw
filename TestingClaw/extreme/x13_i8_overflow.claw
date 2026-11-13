@@ -1,0 +1,5 @@
+// exit: 101
+fn main() {
+    x i8 = 127
+    print(x + 1)
+}

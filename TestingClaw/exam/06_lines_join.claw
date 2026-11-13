@@ -1,0 +1,8 @@
+// expect: lines 3
+// expect: one, two, three
+fn main() {
+    text := "one\ntwo\nthree"
+    ls := lines(text)
+    print("lines {len(ls)}")
+    print(join(ls, ", "))
+}

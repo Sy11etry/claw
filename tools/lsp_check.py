@@ -88,7 +88,7 @@ def main():
             check(diags[0]["range"]["start"] == {"line": 1, "character": 4}, f"position of the error: {diags[0]['range']}", failures)
             check("fix:" in diags[0]["message"], "message carries the fix", failures)
         acts = c.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": diags[0]["range"], "context": {"diagnostics": diags}})["result"]
-        check(len(acts) == 1 and acts[0]["edit"]["changes"][uri][0]["newText"] == "_", f"quick fix: {acts}", failures)
+        check(len(acts) == 1 and acts[0]["edit"]["changes"][uri][0]["newText"] == "_ = ", f"quick fix: {acts}", failures)
 
         # The error goes away when the text is fixed, and hover and definition work on the checked program.
         c.notify("textDocument/didChange", {"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": good}]})

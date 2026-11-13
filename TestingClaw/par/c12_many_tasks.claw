@@ -1,0 +1,15 @@
+// expect: count 100000
+// expect: sum 333328333350000
+use par
+
+fn square(x int) int {
+    ret x * x
+}
+
+fn main() {
+    xs := par.build(100000, square)
+    mut s := 0
+    for x in xs { s += x }
+    print("count {len(xs)}")
+    print("sum {s}")
+}

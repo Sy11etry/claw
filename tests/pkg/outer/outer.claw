@@ -1,0 +1,5 @@
+use inner
+
+pub fn area(w int, h int) int {
+    ret inner.mul(w, h) + 1
+}

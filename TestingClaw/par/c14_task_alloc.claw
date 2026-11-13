@@ -1,0 +1,19 @@
+// expect: total 990000
+use par
+
+fn make_and_sum(n int) int {
+    mut xs []int = []
+    for i in 0..100 {
+        push(&xs, i + n)
+    }
+    mut s := 0
+    for x in xs { s += x }
+    ret s
+}
+
+fn main() {
+    rows := par.build(100, make_and_sum)
+    mut total := 0
+    for r in rows { total += r }
+    print("total {total}")
+}

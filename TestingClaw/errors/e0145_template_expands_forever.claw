@@ -1,0 +1,7 @@
+// code: E0145
+fn f[T](x T) int {
+    ret f([x, x])
+}
+fn main() {
+    print(f(1))
+}

@@ -1,0 +1,9 @@
+// code: E0118
+type S = A{r int} | B
+fn main() {
+    x := 1
+    match x {
+        A{r}: print(r)
+        B: print(0)
+    }
+}

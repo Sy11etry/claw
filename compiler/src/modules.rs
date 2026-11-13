@@ -43,6 +43,8 @@ pub struct Unit {
     pub is_std: bool,
     /// Structs of the C headers this module reads that Claw cannot lay out: name, then why and the header.
     pub packed: HashMap<String, (String, String)>,
+    /// What the C headers this module reads say about names a program may call: by C name, the note and the header.
+    pub cnotes: HashMap<String, (crate::cheader::CNote, String)>,
 }
 
 pub struct Loaded {
@@ -56,6 +58,8 @@ pub struct Loaded {
     pub base_names: Vec<String>,
     /// Shared libraries named by `link "name"` in any module.
     pub links: Vec<String>,
+    /// `static inline` C functions written as `extern fn`: (C name, header). A library may not have them.
+    pub c_inline: Vec<(String, String)>,
 }
 
 struct Loader {
@@ -70,6 +74,7 @@ struct Loader {
     diags: Vec<Diag>,
     core: Option<usize>,
     links: Vec<String>,
+    c_inline: Vec<(String, String)>,
     /// Also load the memory checker written in Claw.
     check: bool,
 }
@@ -91,7 +96,7 @@ impl Loader {
     }
 
     /// `use c "x.h"`: the header's declarations join this module as if they were written here.
-    fn c_headers(&mut self, program: &mut Program, here: &Path, packed: &mut HashMap<String, (String, String)>) {
+    fn c_headers(&mut self, program: &mut Program, here: &Path, packed: &mut HashMap<String, (String, String)>, cnotes: &mut HashMap<String, (crate::cheader::CNote, String)>) {
         let incdirs = INCDIRS.with(|d| d.borrow().clone());
         for (name, span) in std::mem::take(&mut program.cimports) {
             let Some(h) = crate::cheader::locate(&name, here, &incdirs) else {
@@ -103,6 +108,15 @@ impl Loader {
             let base = h.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             for (ty, why) in out.packed {
                 packed.insert(ty, (why, base.clone()));
+            }
+            for (name, note) in out.notes {
+                cnotes.insert(name, (note, base.clone()));
+            }
+            for name in out.inline {
+                self.c_inline.push((name, base.clone()));
+            }
+            for p in out.problems {
+                self.diags.push(Diag::new("E0184", span, format!("the C header is broken: {p}")));
             }
             let file = self.files.len() as u32;
             self.files.push(h.to_string_lossy().into_owned());
@@ -178,7 +192,8 @@ impl Loader {
         }
         self.links.extend(program.links.iter().cloned());
         let mut packed = HashMap::new();
-        self.c_headers(&mut program, &path, &mut packed);
+        let mut cnotes = HashMap::new();
+        self.c_headers(&mut program, &path, &mut packed, &mut cnotes);
         computed_consts(&mut program);
 
         self.in_progress.push(key.clone());
@@ -198,7 +213,14 @@ impl Loader {
             let found = match self.locate(&dir, &u.path) {
                 Ok(Some(f)) => f,
                 Ok(None) => {
-                    self.diags.push(Diag::new("E0146", u.span, format!("cannot find module `{dotted}`")));
+                    let first = &u.path[0];
+                    let file = format!("{}.claw", u.path.join("/"));
+                    let msg = if self.root_dir.join(".claw/pkg").join(first).is_dir() {
+                        format!("cannot find module `{dotted}`: package `{first}` has no `{}`", u.path[1..].join("/") + ".claw")
+                    } else {
+                        format!("cannot find module `{dotted}`: there is no `{file}` next to this file, in the standard library or in .claw/pkg; for a package, add the line `{first} <folder or git url>` to claw.pkg and run `claw get`")
+                    };
+                    self.diags.push(Diag::new("E0146", u.span, msg));
                     continue;
                 }
                 Err(msg) => {
@@ -215,7 +237,7 @@ impl Loader {
         self.in_progress.pop();
 
         let is_std = self.std_root.as_ref().is_some_and(|r| r.canonicalize().map(|c| key.starts_with(c)).unwrap_or(false));
-        self.units.push(Unit { prefix, program, imports, import_spans, is_std, packed });
+        self.units.push(Unit { prefix, program, imports, import_spans, is_std, packed, cnotes });
         let idx = self.units.len() - 1;
         self.done.insert(key, idx);
         Some(idx)
@@ -312,6 +334,7 @@ pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)>
         diags: Vec::new(),
         core: None,
         links: Vec::new(),
+        c_inline: Vec::new(),
         check,
     };
     l.load(root.to_string(), PathBuf::from(root), String::new(), None);
@@ -319,5 +342,5 @@ pub fn load(root: &str, check: bool) -> Result<Loaded, (Vec<Diag>, Vec<String>)>
         return Err((l.diags, l.files));
     }
     let core = l.core.expect("core was loaded with the root");
-    Ok(Loaded { units: l.units, core, files: l.files, base_names: l.base_names, links: l.links })
+    Ok(Loaded { units: l.units, core, files: l.files, base_names: l.base_names, links: l.links, c_inline: l.c_inline })
 }

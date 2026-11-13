@@ -1,0 +1,14 @@
+// expect: 25
+type Point { x int, y int }
+
+claw fn norm2() int {
+    p := alloc[Point](1)
+    defer free(p)
+    p.x = 3
+    p.y = 4
+    ret p.x * p.x + p.y * p.y
+}
+
+fn main() {
+    print(norm2())
+}

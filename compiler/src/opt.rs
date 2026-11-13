@@ -778,7 +778,7 @@ fn key_of(i: &Inst, float: &[bool]) -> Option<(Key, Option<VReg>)> {
         Inst::FNeg { d, s, bits } => ((12, *s as u64, *bits as u64, 0), Some(*d)),
         Inst::FCmp { cc, d, a: x, b: y, bits } => ((13, *x as u64, *y as u64, *cc as u64 | (*bits as u64) << 8), Some(*d)),
         Inst::Bounds { idx, len, .. } => ((14, *idx as u64, *len, 0), None),
-        Inst::BoundsDyn { idx, len, .. } => ((15, *idx as u64, *len as u64, 0), None),
+        Inst::BoundsDyn { idx, len, slice, .. } => ((15, *idx as u64, *len as u64, *slice as u64), None),
         // 0 and 0.0 are the same bits but live in different registers.
         Inst::Const { d, v } => ((16, *v as u64, float[*d as usize] as u64, 0), Some(*d)),
         Inst::ObjAddr { d, obj } => ((17, *obj as u64, 0, 0), Some(*d)),
@@ -1089,7 +1089,7 @@ fn rotate_loops(f: &mut Func) {
 }
 
 fn placeholder() -> Func {
-    Func { name: String::new(), nparams: 0, params: Vec::new(), vsig: 0, c_abi: false, claw: false, optimized: false, dead: true, nvregs: 0, objects: Vec::new(), blocks: Vec::new() }
+    Func { name: String::new(), at: Loc { line: 0, col: 0, file: 0 }, nparams: 0, params: Vec::new(), vsig: 0, c_abi: false, claw: false, optimized: false, dead: true, nvregs: 0, objects: Vec::new(), blocks: Vec::new() }
 }
 
 /// Functions nothing can reach get no code at all.

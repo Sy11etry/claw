@@ -1,0 +1,199 @@
+{
+  "b01_libc_string.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "len 5",
+      "cmp -1",
+      "same 0",
+      "chr 119",
+      "missing -1",
+      "byte 121"
+    ]
+  },
+  "b02_libc_qsort.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "sorted 1 2 5 9",
+      "found 2",
+      "missing -1"
+    ]
+  },
+  "b03_math.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "sqrt 12",
+      "pow 1024",
+      "floor 2",
+      "ceil 3"
+    ]
+  },
+  "b04_ctype_time.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "time 1",
+      "upper 81",
+      "digit 1"
+    ]
+  },
+  "b05_stdio.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "len 4",
+      "first 52",
+      "read 4"
+    ]
+  },
+  "b06_ctype_extern.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "time 1",
+      "upper 81",
+      "digit 1"
+    ]
+  },
+  "b07_zlib.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "roundtrip ok",
+      "smaller 1",
+      "crc 1083670228",
+      "adler 1344471755"
+    ]
+  },
+  "b08_sqlite.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "rows 1000",
+      "sum 500500",
+      "exec 0"
+    ]
+  },
+  "b09_libxml2.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "len 5",
+      "cmp -1",
+      "root 1"
+    ]
+  },
+  "b10_bz2.claw": {
+    "ok": false,
+    "detail": "claw build: /Users/markuza/dev/claw/TestingClaw/cinterop/b10_bz2.claw:19:11 E0101 `BZ2_bzBuffToBuffCompress` from bzlib.h is called `bZ2_bzBuffToBuffCompress` in Claw: function names start with a small letter; fi"
+  },
+  "b11_curl.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "init 0",
+      "prefix 1"
+    ]
+  },
+  "b12_iconv.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "bytes 4",
+      "first 104"
+    ]
+  },
+  "b13_expat.claw": {
+    "ok": false,
+    "detail": "claw build: /Users/markuza/dev/claw/TestingClaw/cinterop/b13_expat.claw:14:10 E0101 `XML_ParserCreate` from expat.h is called `xML_ParserCreate` in Claw: function names start with a small letter; fix: write `xML_"
+  },
+  "b14_bz2_renamed.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "ok 1",
+      "smaller 1"
+    ]
+  },
+  "b15_expat_renamed.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "elements 4"
+    ]
+  },
+  "b16_curl_extern.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "init 0",
+      "prefix 1"
+    ]
+  },
+  "b18_mylib.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "add 5",
+      "scale 9",
+      "moved 99",
+      "apply 42",
+      "big 2000000000200",
+      "len 5",
+      "even true",
+      "name 109"
+    ]
+  },
+  "b19_cb_float_param.claw": {
+    "ok": true,
+    "code": "E0180",
+    "detail": ""
+  },
+  "b19_cb_own_param.claw": {
+    "ok": true,
+    "code": "E0180",
+    "detail": ""
+  },
+  "b19_cb_plain_fn.claw": {
+    "ok": false,
+    "code": null,
+    "detail": "compiled, but an error was expected"
+  },
+  "b19_cb_seven_params.claw": {
+    "ok": true,
+    "code": "E0180",
+    "detail": ""
+  },
+  "b19_cb_struct_param.claw": {
+    "ok": true,
+    "code": "E0180",
+    "detail": ""
+  },
+  "b19_cb_template.claw": {
+    "ok": true,
+    "code": "E0176",
+    "detail": ""
+  },
+  "b19_missing_header.claw": {
+    "ok": true,
+    "code": "E0181",
+    "detail": ""
+  },
+  "b20_libc_tm.claw": {
+    "ok": true,
+    "detail": "",
+    "got": [
+      "year 70",
+      "mon 0",
+      "mday 1",
+      "hour 0"
+    ]
+  },
+  "b21_div_struct_by_value.claw": {
+    "ok": false,
+    "code": null,
+    "detail": "compiled, but an error was expected"
+  }
+}

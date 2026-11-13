@@ -1,0 +1,8 @@
+// expect: 81
+// expect: true
+use c "ctype.h"
+
+claw fn main() {
+    print(toupper(113))
+    print(isdigit(55) != 0)
+}

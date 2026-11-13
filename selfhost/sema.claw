@@ -57,7 +57,7 @@ type InstOf { ty int, m int, name str, targs []int }
 type Work { m int, index int, targs []int, full str }
 
 // Borrowed from elsewhere (`view`), a `&` parameter (`by_ref`), and what happened to it.
-type Var { name str, ty int, view bool, by_ref bool, mutable bool, read bool, written bool, span diag.Span, decl diag.Span }
+type Var { name str, ty int, view bool, by_ref bool, mutable bool, read bool, written bool, span diag.Span, decl diag.Span, discard bool }
 
 // A variable whose value has left, and where it left.
 type Moved { name str, span diag.Span }
@@ -104,6 +104,8 @@ pub type Global {
 
     func_name str,
     func_claw bool,
+    // Parameters that only read (not `own`): a move of one can suggest `own`.
+    read_params []str,
     addressed []str,
     vars []Var,
     scope_start []int,
@@ -194,6 +196,13 @@ fn tenv_of(tparams []ast.Binding, targs []int) []Bind {
 fn kind_is_err(k types.Kind) bool {
     match k {
         Err: ret true
+        _: ret false
+    }
+}
+
+fn kind_is_result(k types.Kind) bool {
+    match k {
+        Result{_, _}: ret true
         _: ret false
     }
 }
@@ -426,7 +435,8 @@ fn resolve_name(l modules.Loaded, g &Global, span diag.Span, alias str, name str
         }
         tparams := len(l.units[m].program.types[d.index].tparams)
         if len(targs) != tparams {
-            push(&g.diags, diag.new("E0144", span, "`{name}` takes {tparams} type arguments, found {len(targs)}"))
+            taken := counted(tparams, type_arg_word())
+            push(&g.diags, diag.new("E0144", span, "`{name}` takes {taken}, found {len(targs)}"))
             ret types.t_err
         }
         mut args []int = []
@@ -444,7 +454,7 @@ fn resolve_name(l modules.Loaded, g &Global, span diag.Span, alias str, name str
             core := g.core
             tparams := len(l.units[core].program.types[d.index].tparams)
             if len(targs) != tparams {
-                push(&g.diags, diag.new("E0144", span, "`{name}` takes {tparams} type arguments, found {len(targs)}"))
+                push(&g.diags, diag.new("E0144", span, "`{name}` takes {counted(tparams, type_arg_word())}, found {len(targs)}"))
                 ret types.t_err
             }
             mut args []int = []
@@ -605,7 +615,20 @@ fn instantiate_type(l modules.Loaded, g &Global, m int, index int, targs []int) 
 
 fn report_cycle(g &Global, t int) {
     span := get(g.spans, t) else no_span()
-    push(&g.diags, diag.new("E0127", span, "type `{types.name(g.types, t)}` contains itself, so it would be infinitely large; use a pointer"))
+    n := types.name(g.types, t)
+    push(&g.diags, diag.new("E0127", span, "type `{n}` contains itself, so it would be infinitely large; hold the others in an array: `kids []{n}`"))
+}
+
+fn type_arg_word() str { ret "type argument" }
+
+fn field_word() str { ret "field" }
+
+fn value_word() str { ret "value" }
+
+// `1 value`, `2 values`.
+fn counted(n int, word str) str +mem {
+    if n == 1 { ret "1 {word}" }
+    ret "{n} {word}s"
 }
 
 // Lays out `t` after everything it contains by value.
@@ -1249,7 +1272,11 @@ fn collect_funcs(l modules.Loaded, g &Global) {
             push(&g.diags, diag.new("E0102", f.name_span, "`{f.name}` is a built-in name"))
             continue
         }
-        if has_key(g.mods[cur].funcs, f.name) or has_key(g.mods[cur].consts, f.name) {
+        if has_key(g.mods[cur].consts, f.name) {
+            push(&g.diags, diag.new("E0102", f.name_span, "`{f.name}` is already a constant; a function needs another name"))
+            continue
+        }
+        if has_key(g.mods[cur].funcs, f.name) {
             push(&g.diags, diag.new("E0110", f.name_span, "function `{f.name}` is defined twice"))
             continue
         }
@@ -1366,6 +1393,10 @@ fn check_body(l modules.Loaded, g &Global, f ast.Func, module int, full str, is_
     g.cur = module
     g.func_name = copy(f.name)
     g.func_claw = f.is_claw
+    clear(&g.read_params)
+    for p in f.params {
+        if not p.is_own { push(&g.read_params, copy(p.name)) }
+    }
     clear(&g.addressed)
     clear(&g.vars)
     clear(&g.scope_start)
@@ -1608,7 +1639,7 @@ pub fn check(l &modules.Loaded, tests_only bool, diags &[]diag.Diag) Checked +me
         [], types.new_types(), mods, 0, [], new_map[str, int](hash_str), [], new_map[str, int](hash_str), new_map[str, str](hash_str), [], [],
         new_map[int, int](hash_int), new_map[int, diag.Span](hash_int), false, false, l.core, false, 0, [], [],
         [], [], [],
-        "", false, [], [], [], 0, 0, false, [], [], false, false, [], [], false, false, false,
+        "", false, [], [], [], [], 0, 0, false, [], [], false, false, [], [], false, false, false,
     }
     swap(&g.diags, &diags)
     new_tables(&g, len(l.a.exprs))
@@ -1705,7 +1736,22 @@ pub fn check(l &modules.Loaded, tests_only bool, diags &[]diag.Diag) Checked +me
         mut inst := clone_func(&l.a, l.units[w.m].program.funcs[w.index], w.full)
         new_tables(&g, len(l.a.exprs))
         g.tenv = tenv_of(l.units[w.m].program.funcs[w.index].tparams, w.targs)
+        before := len(g.diags)
         check_body(l, &g, inst, w.m, w.full, false)
+        // A template is checked once per set of types: say which set broke it.
+        if len(g.diags) > before {
+            mut parts []str = []
+            for p, k in l.units[w.m].program.funcs[w.index].tparams {
+                push(&parts, "{p.name} = {types.name(g.types, w.targs[k])}")
+            }
+            note := join(parts, ", ")
+            // E0145 already says the types keep growing; the last of them would only be noise.
+            for k in before..len(g.diags) {
+                if g.diags[k].code != "E0145" {
+                    g.diags[k].msg = "{g.diags[k].msg} (in `{l.units[w.m].program.funcs[w.index].name}` with {note})"
+                }
+            }
+        }
         clear(&g.tenv)
         if len(g.addressed) > 0 { set_addressed(&inst, g.addressed) }
         push(&instances, inst)
@@ -2019,12 +2065,12 @@ fn declare(g &Global, name str, ty int, mutable bool, span diag.Span, decl diag.
     if taken {
         push(&g.diags, diag.new("E0102", span, "`{name}` is already defined; names cannot be reused or hidden"))
         if lookup(g, name) == -1 {
-            push(&g.vars, Var{copy(name), ty, false, false, mutable, true, true, span, decl})
+            push(&g.vars, Var{copy(name), ty, false, false, mutable, true, true, span, decl, false})
         }
         ret
     }
     moved_remove(&g, name)
-    push(&g.vars, Var{copy(name), ty, false, false, mutable, false, false, span, decl})
+    push(&g.vars, Var{copy(name), ty, false, false, mutable, false, false, span, decl, false})
 }
 
 fn push_scope(g &Global) {
@@ -2044,7 +2090,11 @@ fn pop_scope(g &Global) {
         v := copy(g.vars[i])
         moved_remove(&g, v.name)
         if not v.read and not (v.by_ref and v.written) {
-            push(&g.diags, fix("E0105", v.span, "`{v.name}` is never read", "rename `{v.name}` to `_`"))
+            if v.discard {
+                push(&g.diags, fix("E0105", v.span, "`{v.name}` is never read", "write `_ = ` instead of `{v.name} :=`"))
+            } else {
+                push(&g.diags, fix("E0105", v.span, "`{v.name}` is never read", "rename `{v.name}` to `_`"))
+            }
         } else if v.mutable and not v.written and not v.by_ref {
             push(&g.diags, fix("E0116", v.span, "`{v.name}` is `mut` but never changes", "remove `mut`"))
         }
@@ -2149,7 +2199,7 @@ fn mismatch(g &Global, span diag.Span, got int, want int) {
 fn value_type(g &Global, span diag.Span, ty int) int {
     match tkind(g, ty) {
         Void: ret err(&g, "E0104", span, "this has no value")
-        StrLit: ret err(&g, "E0900", span, "this string form only works directly inside `print`")
+        StrLit: ret err(&g, "E0104", span, "this has no value")
         Ref{_}: ret err(&g, "E0157", span, "`&x` only works as an argument to a `&` parameter")
         _: ret ty
     }
@@ -2203,7 +2253,7 @@ fn place(l modules.Loaded, g &Global, e int) int {
         Deref{inner}: t = deref_type(l, &g, e, inner)
         _: {
             _ = expr(l, &g, e, -1)
-            t = err(&g, "E0131", span, "this cannot be assigned to")
+            t = err(&g, "E0131", span, "only a variable, a field or an element can be assigned to")
         }
     }
     g.ty[e] = t
@@ -2326,6 +2376,8 @@ fn stmt(l modules.Loaded, g &Global, s int) bool {
             mut decl := diag.Span{span.start, span.start, span.line, span.col, span.file}
             if mutable { decl = diag.Span{span.start, name_span.start, span.line, span.col, span.file} }
             declare(&g, name, final_ty, mutable, name_span, decl)
+            at := lookup(g, name)
+            if at != -1 and g.vars[at].span.start == name_span.start { g.vars[at].discard = true }
             if len(held) > 0 {
                 v := lookup(g, name)
                 if v != -1 { g.vars[v].view = true }
@@ -2354,7 +2406,7 @@ fn stmt(l modules.Loaded, g &Global, s int) bool {
                 RootThrough: {}
                 RootOther: {
                     if ty != types.t_err {
-                        push(&g.diags, diag.new("E0131", tspan, "this cannot be assigned to"))
+                        push(&g.diags, diag.new("E0131", tspan, "only a variable, a field or an element can be assigned to"))
                     }
                 }
             }
@@ -2422,7 +2474,12 @@ fn stmt(l modules.Loaded, g &Global, s int) bool {
             }
             if is_call {
                 if got != types.t_void and got != types.t_err {
-                    push(&g.diags, fix("E0111", l.a.exprs[e].span, "result is not used", "assign it to `_` if it really does not matter"))
+                    if kind_is_result(types.kind(g.types, got)) {
+                        // `_ = f()` would only hide the error (E0125): it has to be handled.
+                        push(&g.diags, diag.new("E0111", l.a.exprs[e].span, "result is not used, and it may be an error: handle it with `?` or `else`"))
+                    } else {
+                        push(&g.diags, fix("E0111", l.a.exprs[e].span, "result is not used", "assign it to `_` if it really does not matter"))
+                    }
                 }
             } else {
                 push(&g.diags, diag.new("E0114", l.a.exprs[e].span, "this expression does nothing"))
@@ -2717,7 +2774,10 @@ fn consume(l modules.Loaded, g &Global, e int) {
             v := lookup(g, n)
             if v == -1 { ret }
             if g.vars[v].view {
-                push(&g.diags, fix("E0152", span, "`{n}` is borrowed here, so it cannot be moved away", "write `copy({n})`"))
+                line := g.vars[v].span.line
+                mut how := ""
+                if has(g.read_params, n) { how = "; or take the parameter as `own {n}`" }
+                push(&g.diags, fix("E0152", span, "`{n}` (line {line}) only reads a value it does not own, so it cannot be moved or returned; write `copy({n})`{how}", "write `copy({n})`"))
                 ret
             }
             if has(g.locks, n) {
@@ -2730,9 +2790,49 @@ fn consume(l modules.Loaded, g &Global, e int) {
         Index{_, _}: consume_part(l, &g, e, span)
         Deref{_}: consume_part(l, &g, e, span)
         Slice{_, _, _}: {
-            push(&g.diags, diag.new("E0152", span, "a slice only borrows; write `copy(...)` to keep it"))
+            text := expr_text(l, e) else "" 
+            if len(text) > 0 {
+                push(&g.diags, fix("E0152", span, "the slice `{text}` only borrows; write `copy({text})` to keep it", "write `copy({text})`"))
+            } else {
+                push(&g.diags, diag.new("E0152", span, "a slice only borrows; write `copy(...)` to keep it"))
+            }
         }
         _: {}
+    }
+}
+
+// The source text of a simple path like `p.b`, `xs[0]`, `a[i].name` or `s[1..]`, for messages and patches.
+fn expr_text(l modules.Loaded, e int) ?str +mem {
+    match l.a.exprs[e].kind {
+        Var{n}: ret copy(n)
+        Int{v}: ret num_text(v)
+        Field{b, name, _}: {
+            base := expr_text(l, b)?
+            ret "{base}.{name}"
+        }
+        Index{b, i}: {
+            base := expr_text(l, b)?
+            idx := expr_text(l, i)?
+            ret "{base}[{idx}]"
+        }
+        Slice{b, lo, hi}: {
+            base := expr_text(l, b)?
+            mut a := ""
+            mut z := ""
+            if lo != -1 { a = expr_text(l, lo)? }
+            if hi != -1 { z = expr_text(l, hi)? }
+            ret "{base}[{a}..{z}]"
+        }
+        Binary{op, x, y}: {
+            left := expr_text(l, x)?
+            right := expr_text(l, y)?
+            match op {
+                Add: ret "{left} + {right}"
+                Sub: ret "{left} - {right}"
+                _: ret none
+            }
+        }
+        _: ret none
     }
 }
 
@@ -2740,7 +2840,17 @@ fn consume_part(l modules.Loaded, g &Global, e int, span diag.Span) {
     // `module.Variant` is a new value, not a field being moved out.
     if res_is_variant(g.res[e]) { ret }
     if g.func_claw and root_is_through(l, g, e) { ret }
-    push(&g.diags, diag.new("E0152", span, "only a whole variable can be moved; write `copy(...)`, or use `remove` or `swap`"))
+    mut tail := ""
+    match l.a.exprs[e].kind {
+        Index{_, _}: tail = ", or take it out with `remove` or `swap`"
+        _: {}
+    }
+    text := expr_text(l, e) else ""
+    if len(text) > 0 {
+        push(&g.diags, fix("E0152", span, "`{text}` is part of another value: only a whole variable can be moved or returned; write `copy({text})`{tail}", "write `copy({text})`"))
+    } else {
+        push(&g.diags, diag.new("E0152", span, "only a whole variable can be moved or returned; write `copy(...)`{tail}"))
+    }
 }
 
 fn match_stmt(l modules.Loaded, g &Global, span diag.Span, subject int, arms []ast.Arm) bool {
@@ -2781,10 +2891,11 @@ fn match_stmt(l modules.Loaded, g &Global, span diag.Span, subject int, arms []a
             PatWild: wild = true
             PatBool{b}: {
                 if not kind_is_bool(kind) and not kind_is_err(kind) {
-                    push(&g.diags, diag.new("E0118", arm.span, "this pattern does not match the type being matched"))
+                    n := tname(g, t)
+                    push(&g.diags, diag.new("E0118", arm.span, "`{b}` is a `bool` pattern, but the value matched is `{n}`"))
                 }
                 if has(seen_bools, b) {
-                    push(&g.diags, diag.new("E0121", arm.span, "this case is already handled"))
+                    push(&g.diags, diag.new("E0121", arm.span, "`{b}` is already handled above"))
                 }
                 push(&seen_bools, b)
             }
@@ -2797,14 +2908,17 @@ fn match_stmt(l modules.Loaded, g &Global, span diag.Span, subject int, arms []a
                         }
                     }
                     Err: {}
-                    _: push(&g.diags, diag.new("E0118", arm.span, "this pattern does not match the type being matched"))
+                    _: {
+                        n := tname(g, t)
+                        push(&g.diags, diag.new("E0118", arm.span, "`{num_text(v)}` is a number pattern, but the value matched is `{n}`"))
+                    }
                 }
                 mut dup := false
                 for x in seen_ints {
                     if num_eq(x, v) { dup = true }
                 }
                 if dup {
-                    push(&g.diags, diag.new("E0121", arm.span, "this case is already handled"))
+                    push(&g.diags, diag.new("E0121", arm.span, "`{num_text(v)}` is already handled above"))
                 }
                 push(&seen_ints, v)
             }
@@ -2857,7 +2971,8 @@ fn variant_pat(g &Global, span diag.Span, kind types.Kind, t int, name str, bind
         Enum{e}: id = e
         Err: ret
         _: {
-            push(&g.diags, diag.new("E0118", span, "this pattern does not match the type being matched"))
+            n := tname(g, t)
+            push(&g.diags, diag.new("E0118", span, "`{name}` is a variant pattern, but the value matched is `{n}`"))
             ret
         }
     }
@@ -2875,7 +2990,7 @@ fn variant_pat(g &Global, span diag.Span, kind types.Kind, t int, name str, bind
         ret
     }
     if has(seen, idx) {
-        push(&g.diags, diag.new("E0121", span, "this case is already handled"))
+        push(&g.diags, diag.new("E0121", span, "`{name}` is already handled above"))
     }
     push(&seen, idx)
     fields := def.variants[idx].fields
@@ -3704,7 +3819,8 @@ fn call_value(l modules.Loaded, g &Global, e int, ty int, span diag.Span, args [
     }
     f := copy(g.types.fns[id])
     if len(args) != len(f.params) {
-        push(&g.diags, diag.new("E0106", span, "this function takes {len(f.params)} values, found {len(args)}"))
+        taken := counted(len(f.params), value_word())
+        push(&g.diags, diag.new("E0106", span, "this function takes {taken}, found {len(args)}"))
     }
     mut got []int = []
     for _ in args {
@@ -3823,10 +3939,11 @@ fn call(l modules.Loaded, g &Global, e int, alias str, name str, span diag.Span,
         f := l.units[m].program.funcs[entry.index]
         explicit := resolve_targs(l, &g, targs) else { ret types.t_err }
         if len(explicit) > len(f.tparams) {
-            ret err(&g, "E0144", span, "`{name}` takes {len(f.tparams)} type arguments, found {len(explicit)}")
+            taken := counted(len(f.tparams), type_arg_word())
+            ret err(&g, "E0144", span, "`{name}` takes {taken}, found {len(explicit)}")
         }
         if len(f.params) != len(args) {
-            push(&g.diags, diag.new("E0106", span, "`{name}` takes {len(f.params)} values, found {len(args)}"))
+            push(&g.diags, diag.new("E0106", span, "`{name}` takes {counted(len(f.params), value_word())}, found {len(args)}"))
         }
         mut pats []int = []
         for p in f.params {
@@ -3837,6 +3954,8 @@ fn call(l modules.Loaded, g &Global, e int, alias str, name str, span diag.Span,
         for p in f.tparams {
             t := tenv_get(inf.bind, p.name)
             if t == types.t_err { ret types.t_err }
+            // An argument already has its own error.
+            if t == -1 and has(inf.got, types.t_err) { ret types.t_err }
             if t == -1 {
                 ret err(&g, "E0144", span, "cannot work out `{p.name}`; write `{name}[...](...)`")
             }
@@ -3863,7 +3982,7 @@ fn call(l modules.Loaded, g &Global, e int, alias str, name str, span diag.Span,
     }
     arity_ok := len(args) == len(sig.params) or (sig.variadic and len(args) > len(sig.params))
     if not arity_ok and not entry.generic {
-        push(&g.diags, diag.new("E0106", span, "`{name}` takes {len(sig.params)} values, found {len(args)}"))
+        push(&g.diags, diag.new("E0106", span, "`{name}` takes {counted(len(sig.params), value_word())}, found {len(args)}"))
     }
     finish_args(l, &g, args, sig.params, got, sig.owned)
     for a, i in args {
@@ -3915,11 +4034,13 @@ fn check_all(l modules.Loaded, g &Global, args []int) {
     }
 }
 
-fn ordered_targs(g &Global, bind []Bind, tparams []ast.Binding, name str, span diag.Span) ?[]int {
+fn ordered_targs(g &Global, bind []Bind, got []int, tparams []ast.Binding, name str, span diag.Span) ?[]int {
     mut ordered []int = []
     for p in tparams {
         t := tenv_get(bind, p.name)
         if t == types.t_err { ret none }
+        // An argument already has its own error.
+        if t == -1 and has(got, types.t_err) { ret none }
         if t == -1 {
             _ = err(&g, "E0144", span, "cannot work out `{p.name}`; write `{name}[...]{{...}`")
             ret none
@@ -3949,15 +4070,20 @@ fn struct_lit(l modules.Loaded, g &Global, e int, alias str, name str, span diag
         match d.body {
             Struct{fields}: {
                 explicit := resolve_targs(l, &g, targs) else { ret types.t_err }
+                if len(explicit) != 0 and len(explicit) != len(d.tparams) {
+                    check_all(l, &g, args)
+                    taken := counted(len(d.tparams), type_arg_word())
+                    ret err(&g, "E0144", span, "`{name}` takes {taken}, found {len(explicit)}")
+                }
                 if len(args) != len(fields) {
-                    push(&g.diags, diag.new("E0106", span, "`{name}` has {len(fields)} fields, found {len(args)}"))
+                    push(&g.diags, diag.new("E0106", span, "`{name}` has {counted(len(fields), field_word())}, found {len(args)}"))
                 }
                 mut pats []int = []
                 for f in fields {
                     push(&pats, f.ty)
                 }
                 inf := infer(l, &g, d.tparams, pats, args, explicit, -1)
-                ordered := ordered_targs(&g, inf.bind, d.tparams, name, span) else { ret types.t_err }
+                ordered := ordered_targs(&g, inf.bind, inf.got, d.tparams, name, span) else { ret types.t_err }
                 ty := instantiate_type(l, &g, m, gt.index, ordered)
                 if ty == types.t_err { ret types.t_err }
                 id := struct_of(g.types, ty)
@@ -3986,18 +4112,22 @@ fn struct_lit(l modules.Loaded, g &Global, e int, alias str, name str, span diag
             Variants{vars}: {
                 fields := vars[gv.vidx].fields
                 mut explicit := resolve_targs(l, &g, targs) else { ret types.t_err }
+                if len(explicit) != 0 and len(explicit) != len(d.tparams) {
+                    check_all(l, &g, args)
+                    ret err(&g, "E0144", span, "`{name}` takes {counted(len(d.tparams), type_arg_word())}, found {len(explicit)}")
+                }
                 if len(explicit) == 0 {
                     explicit = targs_from_hint(g, d.name, m, hint) else []
                 }
                 if len(args) != len(fields) {
-                    push(&g.diags, diag.new("E0106", span, "`{name}` has {len(fields)} fields, found {len(args)}"))
+                    push(&g.diags, diag.new("E0106", span, "`{name}` has {counted(len(fields), field_word())}, found {len(args)}"))
                 }
                 mut pats []int = []
                 for f in fields {
                     push(&pats, f.ty)
                 }
                 inf := infer(l, &g, d.tparams, pats, args, explicit, -1)
-                ordered := ordered_targs(&g, inf.bind, d.tparams, name, span) else { ret types.t_err }
+                ordered := ordered_targs(&g, inf.bind, inf.got, d.tparams, name, span) else { ret types.t_err }
                 ty := instantiate_type(l, &g, m, gv.index, ordered)
                 eid := enum_of(g.types, ty)
                 if eid == -1 { ret types.t_err }
@@ -4041,8 +4171,11 @@ fn struct_lit(l modules.Loaded, g &Global, e int, alias str, name str, span diag
     if not entry.public and m != cur {
         push(&g.diags, diag.new("E0147", span, private_msg(name)))
     }
+    if len(targs) != 0 {
+        push(&g.diags, diag.new("E0144", span, "`{name}` takes no type arguments"))
+    }
     if len(args) != len(fields) {
-        push(&g.diags, diag.new("E0106", span, "`{name}` has {len(fields)} fields, found {len(args)}"))
+        push(&g.diags, diag.new("E0106", span, "`{name}` has {counted(len(fields), field_word())}, found {len(args)}"))
     }
     for a, i in args {
         if i >= len(fields) { break }

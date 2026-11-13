@@ -1,0 +1,6 @@
+// code: E0135
+fn main() {
+    for a, b in 0..3 {
+        print(a)
+    }
+}

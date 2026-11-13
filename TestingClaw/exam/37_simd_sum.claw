@@ -1,0 +1,11 @@
+// expect: simd 7
+claw fn simd_sum() int {
+    a := f64x2(1.5)
+    b := f64x2(2.0)
+    c := a + b
+    ret int(lane(c, 0) + lane(c, 1))
+}
+
+fn main() {
+    print("simd {simd_sum()}")
+}

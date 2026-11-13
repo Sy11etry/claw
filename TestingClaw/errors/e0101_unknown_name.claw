@@ -1,0 +1,4 @@
+// code: E0101
+fn main() {
+    print(zz)
+}

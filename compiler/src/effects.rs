@@ -38,6 +38,8 @@ struct Scan<'t> {
     statements: Vec<Vec<Use>>,
     /// Functions used as values: (function, what the value's type allows, where).
     values: Vec<(String, u8, Span)>,
+    /// Arguments of `par.map`, `par.build` and `par.spawn`: the tasks.
+    tasks: Vec<Span>,
 }
 
 impl Scan<'_> {
@@ -72,8 +74,11 @@ impl Scan<'_> {
                     self.through_value(t, ty, x.span);
                 }
             }
-            ExprKind::Call { name, .. } => match &*x.res.borrow() {
+            ExprKind::Call { name, args, .. } => match &*x.res.borrow() {
                 Res::Func(full) => {
+                    if full.starts_with("par.") {
+                        self.tasks.extend(args.iter().map(|a| a.span));
+                    }
                     self.uses.push(Use { effect: 0, callee: Some(full.clone()), span: x.span, what: format!("`{}`", short_name(full)), from_drop: false });
                     self.drops(ty, x.span);
                 }
@@ -182,10 +187,11 @@ struct Node<'a> {
     /// What each contract and `sure` statement does; contracts must do nothing.
     pure: Vec<Vec<Use>>,
     values: Vec<(String, u8, Span)>,
+    tasks: Vec<Span>,
 }
 
 fn node<'a>(full: String, f: &'a Func, is_entry: bool, c: &Checked) -> Node<'a> {
-    let mut scan = Scan { types: &c.types, uses: Vec::new(), statements: Vec::new(), values: Vec::new() };
+    let mut scan = Scan { types: &c.types, uses: Vec::new(), statements: Vec::new(), values: Vec::new(), tasks: Vec::new() };
     scan.block(&f.body);
     if let Some(sig) = c.sigs.get(&full) {
         for (p, t) in f.params.iter().zip(&sig.params) {
@@ -205,7 +211,7 @@ fn node<'a>(full: String, f: &'a Func, is_entry: bool, c: &Checked) -> Node<'a> 
     } else {
         None
     };
-    Node { full, f, declared, uses: scan.uses, pure, values: scan.values }
+    Node { full, f, declared, uses: scan.uses, pure, values: scan.values, tasks: scan.tasks }
 }
 
 /// Is there a call to an ordinary function in this expression?
@@ -326,7 +332,13 @@ pub fn check(units: &[Unit], c: &Checked, diags: &mut Vec<Diag>) -> Report {
             let extra = known.get(full).copied().unwrap_or(0) & !allowed;
             if extra != 0 {
                 let word = spell(extra);
-                diags.push(Diag::new("E0178", *span, format!("`{}` is `{word}`, which this function type does not allow; add `{word}` to the type", short_name(full))));
+                let name = short_name(full);
+                let msg = if n.tasks.contains(span) && extra & IO != 0 {
+                    format!("`{name}` is `+io`, but a `par` task cannot touch the world: tasks run at the same time; return the data from `{name}` and print or write it after `par` is done")
+                } else {
+                    format!("`{name}` is `{word}`, which this function type does not allow; add `{word}` to the type")
+                };
+                diags.push(Diag::new("E0178", *span, msg));
             }
         }
         for uses in &n.pure {

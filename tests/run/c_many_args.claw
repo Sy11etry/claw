@@ -30,7 +30,7 @@
 // expect: 107
 // expect: 1024
 // expect: 24
-// expect: 1.414214
+// expect: 1.4142135
 // expect: 5
 // expect: 65
 // expect: 387

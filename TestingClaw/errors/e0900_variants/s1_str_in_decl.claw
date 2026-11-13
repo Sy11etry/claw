@@ -1,0 +1,5 @@
+fn main() {
+    x := 3
+    s := "n{x}"
+    print(s)
+}

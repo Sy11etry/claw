@@ -1,0 +1,9 @@
+use c "bad_attribute.h"
+
+claw fn size() int {
+    ret int(sizeof[Pk]())
+}
+
+fn main() {
+    print("claw size {size()}")
+}

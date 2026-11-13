@@ -202,7 +202,10 @@ fn load_file(l &Loader, display str, path str, prefix str, is_root bool, at diag
         }
         dotted := join(u.path, ".")
         found := locate(l, dir, u.path) else {
-            push(&l.diags, diag.new("E0146", u.span, "cannot find module `{dotted}`"))
+            first := u.path[0]
+            slash := "/"
+            wanted := "{join(u.path, slash)}.claw"
+            push(&l.diags, diag.new("E0146", u.span, "cannot find module `{dotted}`: there is no `{wanted}` next to this file, in the standard library or in .claw/pkg; for a package, add the line `{first} <folder or git url>` to claw.pkg and run `claw get`"))
             continue
         }
         i := load_file(&l, found, found, "{dotted}.", false, u.span)

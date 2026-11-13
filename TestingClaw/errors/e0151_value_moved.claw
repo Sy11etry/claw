@@ -1,0 +1,7 @@
+// code: E0151
+fn main() {
+    mut a []int = []
+    b := a
+    print(len(a))
+    print(len(b))
+}

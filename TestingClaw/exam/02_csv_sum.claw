@@ -1,0 +1,12 @@
+// expect: count 4
+// expect: sum 20
+fn main() {
+    line := "3,10,x,7"
+    fields := split(line, ",")
+    mut total := 0
+    for f in fields {
+        total += to_int(f) else 0
+    }
+    print("count {len(fields)}")
+    print("sum {total}")
+}

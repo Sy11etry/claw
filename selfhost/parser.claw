@@ -368,7 +368,7 @@ fn parse_type_base(p &Parser) int ! Failed +mem {
     if at_op(p, "?") {
         _ = bump(&p)
         inner := parse_type_base(&p)?
-        if is_option(p, inner) { fail error(&p, "E0134", span, "`??T` is not allowed") }
+        if is_option(p, inner) { fail error(&p, "E0134", span, "`??T` is not allowed: one `?` already means the value may be missing; write `?T`") }
         ret ast.new_type(&p.a, ast.TOption{inner}, span)
     }
     if at_op(p, "[") {

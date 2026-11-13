@@ -1,0 +1,8 @@
+// code: E0176
+fn twice[T](x T) T {
+    ret x
+}
+fn main() {
+    f := twice
+    print(1)
+}

@@ -1,0 +1,14 @@
+// expect-compile-error
+claw fn cb(own s str) i32 {
+    ret i32(len(s))
+}
+
+claw fn run() int {
+    p := cast[*u8](cb)
+    if p == none { ret 1 }
+    ret 0
+}
+
+fn main() {
+    print("run {run()}")
+}

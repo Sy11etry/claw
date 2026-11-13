@@ -1,0 +1,5 @@
+#!/usr/bin/env claw
+
+fn main() {
+    x := 1
+}

@@ -1,0 +1,13 @@
+// expect: start
+// exit: 101
+use par
+
+fn ratio(i int) int {
+    ret 10 / (i - 2)
+}
+
+fn main() {
+    print("start")
+    ys := par.build(4, ratio)
+    print("n {len(ys)}")
+}

@@ -1,0 +1,8 @@
+// expect: 10000
+fn main() {
+    mut parts []str = []
+    for _ in 0..10000 {
+        push(&parts, "a")
+    }
+    print(len(join(parts, "")))
+}

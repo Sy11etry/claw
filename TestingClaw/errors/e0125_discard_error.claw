@@ -1,0 +1,9 @@
+// code: E0125
+type E = A
+fn g() int ! E {
+    fail A
+}
+fn main() {
+    _ = g()
+    print(1)
+}

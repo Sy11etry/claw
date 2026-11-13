@@ -1,0 +1,5 @@
+// code: E0202
+fn main() {
+    ret := 1
+    print(ret)
+}

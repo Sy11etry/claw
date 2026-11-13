@@ -1,0 +1,9 @@
+use c "bad_nested_if.h"
+
+claw fn f() int {
+    ret int(mac_only())
+}
+
+fn main() {
+    print("f {f()}")
+}

@@ -1,0 +1,24 @@
+// c: b11_curl.c
+// clw: -l curl
+// cflags: -lcurl
+// x64: yes
+// expect: init 0
+// expect: prefix 1
+use c "string.h"
+use c "curl/curl.h"
+
+claw fn init_code() int {
+    rc := curl_global_init(3)
+    curl_global_cleanup()
+    ret int(rc)
+}
+
+claw fn prefix_ok() int {
+    if strncmp(curl_version(), "libcurl", 7) == 0 { ret 1 }
+    ret 0
+}
+
+fn main() {
+    print("init {init_code()}")
+    print("prefix {prefix_ok()}")
+}

@@ -1,0 +1,6 @@
+linux: 246/246 programs gave the same output on Linux
+FAIL lsp: FAIL quick fix: [{'title': 'fix: write `_ = ` instead of `x :=`', 'kind': 'quickfix', 'isPreferred': True, 'edit': {'changes': {'file:///private/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmp6n4iozgz/demo%20file.claw': [{'range': {'start': {'line': 1, 'character': 4}, 'end': {'line': 1, 'character': 9}}, 'newText': '_ = '}]}}}]
+
+card: about 2000 tokens (budget 2000)
+2528/2529 passed
+done 1

@@ -342,7 +342,7 @@ impl<'a> Parser<'a> {
             self.bump();
             let inner = self.parse_type_base()?;
             if matches!(inner.kind, TypeKind::Option(_)) {
-                return self.error("E0134", span, "`??T` is not allowed".to_string());
+                return self.error("E0134", span, "`??T` is not allowed: one `?` already means the value may be missing; write `?T`".to_string());
             }
             return Ok(TypeExpr { kind: TypeKind::Option(Box::new(inner)), span });
         }

@@ -1,0 +1,9 @@
+// code: E0156
+type H { v int }
+fn drop(x &H) {
+}
+fn main() {
+    h := H{1}
+    drop(&h)
+    print(1)
+}

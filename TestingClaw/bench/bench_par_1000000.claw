@@ -1,0 +1,21 @@
+use par
+
+const inner = 1000000
+const tasks = 200
+
+fn work(x int) int {
+    mut s := 0
+    for i in 0..inner {
+        s += (x * i + i) % 7
+    }
+    ret s
+}
+
+fn main() {
+    out := par.build(tasks, work)
+    mut total := 0
+    for v in out {
+        total += v
+    }
+    print(total)
+}

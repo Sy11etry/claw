@@ -1,0 +1,9 @@
+// code: E0165
+fn f(own s str) int
+    sure len(s) > 0
+{
+    ret 1
+}
+fn main() {
+    print(f("x"))
+}

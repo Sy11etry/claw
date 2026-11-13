@@ -39,6 +39,11 @@ const imp_snprintf int = 2
 const imp_memcpy int = 3
 const imp_malloc int = 4
 const imp_free int = 5
+// Reads a printed float back, to find the shortest text that gives the same number (see `rt_buf_float`).
+const imp_strtod int = 6
+// macOS only: set up the handler that reports a stack overflow (see `rt_segv`).
+const imp_sigaltstack int = 7
+const imp_sigaction int = 8
 
 // Output buffer: 8 bytes of length, then the bytes.
 const buf_cap u64 = 65536
@@ -169,7 +174,7 @@ fn float_cond(cc cir.Cc) arm64.Cond {
     }
 }
 
-type Trap = Overflow | DivZero | Shift | Bounds | Convert | AllocSize | OutOfMemory | ContractMath
+type Trap = Overflow | DivZero | Shift | Bounds | Slice | Convert | AllocSize | OutOfMemory | ContractMath
 
 fn trap_text(t Trap) str {
     match t {
@@ -177,6 +182,7 @@ fn trap_text(t Trap) str {
         DivZero: ret "division by zero"
         Shift: ret "shift out of range"
         Bounds: ret "index out of bounds"
+        Slice: ret "slice bounds out of range"
         Convert: ret "value does not fit the target type"
         AllocSize: ret "invalid allocation size"
         OutOfMemory: ret "out of memory"
@@ -533,20 +539,109 @@ fn rt_buf_bool(g &Gen) int {
 
 // `__claw_buf_float(d0 = value, x2 = format)`, via libSystem's snprintf.
 // On Apple ARM64 the variadic double is passed on the stack.
-fn rt_buf_float(g &Gen) int {
+// `__claw_buf_float(d0 = value, x2 = most digits: 17 for f64, 9 for f32)`: the shortest `%g` text that reads
+// back as the same number, as Python prints it. The exponent form is taken only for |x| >= 1e16 or < 1e-4.
+fn rt_buf_float(g &Gen, fmt int) int {
+    x22 u32 = 22
+    d2 u32 = 2
+    d8 u32 = 8
     pos := here(g)
-    emit(&g, arm64.stp_pre(fp, lr, sp, -16))
+    emit(&g, arm64.stp_pre(fp, lr, sp, -64))
     emit(&g, arm64.mov_sp(fp, sp))
-    emit(&g, arm64.sub_imm(sp, sp, 80))
-    emit(&g, arm64.str_d(d0, sp, 0))
+    emit(&g, arm64.stp(x19, x20, sp, 16))
+    emit(&g, arm64.stp(x21, x22, sp, 32))
+    emit(&g, arm64.str_d(d8, sp, 48))
+    emit(&g, arm64.sub_imm(sp, sp, 96))
+    emit(&g, arm64.fmov_d_d(d8, d0))
+    emit(&g, arm64.mov(x20, x2))
+    // x22: may the exponent form be used? NaN, infinities, |x| >= 1e16, and 0 < |x| < 1e-4.
+    emit(&g, arm64.movz(x22, 1, 0))
+    emit(&g, arm64.fcmp(d8, d8, 64))
+    nan := here(g)
+    emit(&g, 0)
+    emit(&g, arm64.fmov_x_d(x9, d8))
+    emit(&g, arm64.movz(x10, 1, 0))
+    emit(&g, arm64.lsl(x9, x9, x10))
+    emit(&g, arm64.lsr(x9, x9, x10))
+    emit(&g, arm64.fmov_d_x(d1, x9))
+    mov_imm(&g, x10, 0x4341_c379_37e0_8000)
+    emit(&g, arm64.fmov_d_x(d2, x10))
+    emit(&g, arm64.fcmp(d1, d2, 64))
+    big := here(g)
+    emit(&g, 0)
+    emit(&g, arm64.cmp_imm(x9, 0))
+    zero := here(g)
+    emit(&g, 0)
+    mov_imm(&g, x10, 0x3f1a_36e2_eb1c_432d)
+    emit(&g, arm64.fmov_d_x(d2, x10))
+    emit(&g, arm64.fcmp(d1, d2, 64))
+    small := here(g)
+    emit(&g, 0)
+    fixed := here(g)
+    emit(&g, arm64.movz(x22, 0, 0))
+    start := here(g)
+    g.code[nan] = arm64.b_cond(arm64.Vs, i32(start - nan))
+    g.code[big] = arm64.b_cond(arm64.Ge, i32(start - big))
+    g.code[zero] = arm64.b_cond(arm64.Eq, i32(fixed - zero))
+    g.code[small] = arm64.b_cond(arm64.Mi, i32(start - small))
+    emit(&g, arm64.movz(x19, 1, 0))
+    top := here(g)
+    emit(&g, arm64.str_x(x19, sp, 0))
+    emit(&g, arm64.str_d(d8, sp, 8))
     emit(&g, arm64.add_imm(x0, sp, 16))
     emit(&g, arm64.movz(x1, 64, 0))
+    data_addr(&g, x2, fmt)
     call(&g, bl_op, TgImport{imp_snprintf})
-    emit(&g, arm64.mov(x1, x0))
+    emit(&g, arm64.mov(x21, x0))
+    emit(&g, arm64.cmp(x19, x20))
+    last := here(g)
+    emit(&g, 0)
+    emit(&g, arm64.add_imm(x0, sp, 16))
+    emit(&g, arm64.movz(x1, 0, 0))
+    call(&g, bl_op, TgImport{imp_strtod})
+    // An f32 is compared as an f32: round what was read to single precision first.
+    emit(&g, arm64.cmp_imm(x20, 9))
+    emit(&g, arm64.b_cond(arm64.Ne, 3))
+    emit(&g, arm64.fcvt_d_to_s(d0, d0))
+    emit(&g, arm64.fcvt_s_to_d(d0, d0))
+    emit(&g, arm64.fcmp(d0, d8, 64))
+    differs := here(g)
+    emit(&g, 0)
+    take := here(g)
+    emit(&g, 0)
+    // Fixed notation wanted: try more digits while the text has an `e`.
+    emit(&g, arm64.movz(x9, 0, 0))
+    scan := here(g)
+    emit(&g, arm64.cmp(x9, x21))
+    scanned := here(g)
+    emit(&g, 0)
+    emit(&g, arm64.add_imm(x10, sp, 16))
+    emit(&g, arm64.add(x10, x10, x9))
+    emit(&g, arm64.ldrb(x11, x10, 0))
+    emit(&g, arm64.cmp_imm(x11, 101))
+    has_e := here(g)
+    emit(&g, 0)
+    emit(&g, arm64.add_imm(x9, x9, 1))
+    back := here(g)
+    emit(&g, arm64.b_at(b_op, i32(scan - back)))
+    next := here(g)
+    emit(&g, arm64.add_imm(x19, x19, 1))
+    again := here(g)
+    emit(&g, arm64.b_at(b_op, i32(top - again)))
+    done := here(g)
+    g.code[last] = arm64.b_cond(arm64.Ge, i32(done - last))
+    g.code[differs] = arm64.b_cond(arm64.Ne, i32(next - differs))
+    g.code[take] = arm64.cbnz(x22, i32(done - take))
+    g.code[scanned] = arm64.b_cond(arm64.Ge, i32(done - scanned))
+    g.code[has_e] = arm64.b_cond(arm64.Eq, i32(next - has_e))
+    emit(&g, arm64.mov(x1, x21))
     emit(&g, arm64.add_imm(x0, sp, 16))
     call(&g, bl_op, TgBufStr)
     emit(&g, arm64.mov_sp(sp, fp))
-    emit(&g, arm64.ldp_post(fp, lr, sp, 16))
+    emit(&g, arm64.ldp(x19, x20, sp, 16))
+    emit(&g, arm64.ldp(x21, x22, sp, 32))
+    emit(&g, arm64.ldr_d(d8, sp, 48))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 64))
     emit(&g, arm64.ret_x())
     ret pos
 }
@@ -563,6 +658,51 @@ fn rt_trap(g &Gen) int {
     emit(&g, arm64.movz(x0, 101, 0))
     call(&g, bl_op, TgImport{imp_exit})
     emit(&g, arm64.brk(1))
+    ret pos
+}
+
+// `__claw_segv(signo, info, context)`: runs on its own stack when the program touches memory it must not.
+// If the address is next to the stack pointer, the stack is full: recursion too deep. Either way it says so
+// after flushing what was printed, then returns; both signals were reset, so the same access ends the program.
+fn rt_segv(g &Gen) int {
+    stack_msg := "trap: stack overflow: the recursion is too deep for the stack\n"
+    bad_msg := "trap: bad memory access: a pointer in `claw fn` points nowhere valid\n"
+    stack_off := add_str(&g, stack_msg)
+    bad_off := add_str(&g, bad_msg)
+    pos := here(g)
+    emit(&g, arm64.stp_pre(fp, lr, sp, -48))
+    emit(&g, arm64.mov_sp(fp, sp))
+    emit(&g, arm64.str_x(x19, sp, 16))
+    emit(&g, arm64.mov(x19, x2))
+    emit(&g, arm64.str_x(xzr, sp, 24))
+    emit(&g, arm64.str_x(xzr, sp, 32))
+    for signo in [11, 10] {
+        emit(&g, arm64.movz(x0, u32(signo), 0))
+        emit(&g, arm64.add_imm(x1, sp, 24))
+        emit(&g, arm64.movz(x2, 0, 0))
+        call(&g, bl_op, TgImport{imp_sigaction})
+    }
+    emit(&g, arm64.movz(x0, 1, 0))
+    call(&g, bl_op, TgFlush)
+    emit(&g, arm64.ldr(x9, x19, 48))
+    emit(&g, arm64.ldr(x10, x9, 0))
+    emit(&g, arm64.ldr(x11, x9, 264))
+    emit(&g, arm64.sub(x12, x10, x11))
+    mov_imm(&g, x13, 0x80_0000)
+    emit(&g, arm64.add(x12, x12, x13))
+    mov_imm(&g, x13, 0x100_0000)
+    emit(&g, arm64.cmp(x12, x13))
+    emit(&g, arm64.b_cond(arm64.Hs, 5))
+    data_addr(&g, x1, stack_off)
+    emit(&g, arm64.movz(x2, u32(len(stack_msg)), 0))
+    emit(&g, b_op | 4)
+    data_addr(&g, x1, bad_off)
+    emit(&g, arm64.movz(x2, u32(len(bad_msg)), 0))
+    emit(&g, arm64.movz(x0, 2, 0))
+    call(&g, bl_op, TgImport{imp_write})
+    emit(&g, arm64.ldr(x19, sp, 16))
+    emit(&g, arm64.ldp_post(fp, lr, sp, 48))
+    emit(&g, arm64.ret_x())
     ret pos
 }
 
@@ -721,7 +861,7 @@ fn addr_x9(g &Gen, fr Frame, p int, off u64) {
     }
 }
 
-fn inst(g &Gen, fr Frame, i cir.Inst, traps &[]TrapAt, fmts Fmts) {
+fn inst(g &Gen, fr Frame, i cir.Inst, traps &[]TrapAt, _ Fmts) {
     match i {
         Const{d, v}: {
             mov_imm(&g, x9, u64(v))
@@ -905,9 +1045,11 @@ fn inst(g &Gen, fr Frame, i cir.Inst, traps &[]TrapAt, fmts Fmts) {
             load(&g, fr, x2, n)
             call(&g, bl_op, TgImport{imp_memcpy})
         }
-        BoundsDyn{idx, n, loc}: {
+        BoundsDyn{idx, n, loc, slice}: {
             compare(&g, fr, idx, n)
-            trap_if(&g, arm64.Hs, Bounds, loc, &traps)
+            mut kind Trap = Bounds
+            if slice { kind = Slice }
+            trap_if(&g, arm64.Hs, kind, loc, &traps)
         }
         BufPtr{p, n}: {
             load(&g, fr, x0, p)
@@ -995,9 +1137,9 @@ fn inst(g &Gen, fr Frame, i cir.Inst, traps &[]TrapAt, fmts Fmts) {
             fload(&g, fr, d0, s, bits)
             if bits == 32 {
                 emit(&g, arm64.fcvt_s_to_d(d0, d0))
-                data_addr(&g, x2, fmts.fmt32)
+                emit(&g, arm64.movz(x2, 9, 0))
             } else {
-                data_addr(&g, x2, fmts.fmt64)
+                emit(&g, arm64.movz(x2, 17, 0))
             }
             call(&g, bl_op, TgBufFloat)
         }
@@ -1424,7 +1566,7 @@ fn add_symbol(symbols &[]Sym, name str, pos int) {
 
 pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +mem {
     mut imports []str = []
-    for name in ["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free"] {
+    for name in ["_write", "_exit", "_snprintf", "_memcpy", "_malloc", "_free", "_strtod", "_sigaltstack", "_sigaction"] {
         push(&imports, copy(name))
     }
     for f in m.funcs {
@@ -1446,7 +1588,8 @@ pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +me
     mut g := Gen{[], [], [], [], [], [], [], copy(files), copy(imports), ""}
     mut symbols []Sym = []
 
-    fmts := Fmts{add_str(&g, "%.15g\0"), add_str(&g, "%.7g\0")}
+    fmt := add_str(&g, "%.*g\0")
+    fmts := Fmts{fmt, fmt}
 
     mut stubs []int = []
     for s in 0..len(imports) {
@@ -1476,7 +1619,9 @@ pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +me
     buf_int := rt_buf_num(&g, true)
     buf_uint := rt_buf_num(&g, false)
     buf_bool := rt_buf_bool(&g)
-    buf_float := rt_buf_float(&g)
+    buf_float := rt_buf_float(&g, fmt)
+    segv := rt_segv(&g)
+    mut segv_ref := 0
     add_symbol(&symbols, "___claw_alloc", rt_alloc)
     add_symbol(&symbols, "___claw_free", rt_free)
     add_symbol(&symbols, "___claw_trap", trap)
@@ -1498,6 +1643,31 @@ pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +me
     emit(&g, arm64.add(x9, x9, x16))
     emit(&g, arm64.str_x(x0, x9, 0))
     emit(&g, arm64.str_x(x1, x9, 8))
+    // A stack overflow is reported, not a silent crash: the handler needs a stack of its own to run on.
+    mov_imm(&g, x0, 65536)
+    call(&g, bl_op, TgImport{imp_malloc})
+    emit(&g, arm64.sub_imm(sp, sp, 64))
+    emit(&g, arm64.str_x(x0, sp, 0))
+    mov_imm(&g, x9, 65536)
+    emit(&g, arm64.str_x(x9, sp, 8))
+    emit(&g, arm64.str_x(xzr, sp, 16))
+    emit(&g, arm64.mov_sp(x0, sp))
+    emit(&g, arm64.movz(x1, 0, 0))
+    call(&g, bl_op, TgImport{imp_sigaltstack})
+    // struct sigaction { handler, mask 0, flags SA_ONSTACK | SA_SIGINFO }
+    segv_ref = here(g)
+    emit(&g, arm64.adrp(x9, 0))
+    emit(&g, arm64.add_imm(x9, x9, 0))
+    emit(&g, arm64.str_x(x9, sp, 24))
+    mov_imm(&g, x9, 0x41_0000_0000)
+    emit(&g, arm64.str_x(x9, sp, 32))
+    for signo in [11, 10] {
+        emit(&g, arm64.movz(x0, u32(signo), 0))
+        emit(&g, arm64.add_imm(x1, sp, 24))
+        emit(&g, arm64.movz(x2, 0, 0))
+        call(&g, bl_op, TgImport{imp_sigaction})
+    }
+    emit(&g, arm64.add_imm(sp, sp, 64))
     call(&g, bl_op, TgUser{m.main})
     if rtc.alloc != -1 {
         call(&g, bl_op, TgUser{rtc.finish})
@@ -1541,6 +1711,7 @@ pub fn generate(m cir.Module, files []str, alloc_stats bool) Object ! GenErr +me
     for r in g.func_refs {
         push(&code_refs, Ref{r.at, func_pos[r.x]})
     }
+    push(&code_refs, Ref{segv_ref, segv})
 
     if len(g.too_large) > 0 {
         fail GenErr{"E0901 function `{g.too_large}` is too large for this version: at most 1 MB of code and 7 MB of local data"}

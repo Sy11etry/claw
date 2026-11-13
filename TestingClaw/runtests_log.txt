@@ -1,0 +1,27 @@
+FAIL debug/stop_at_line.claw: --target x86_64 --no-opt: nothing at `main at stop_at_line.claw:11` in:
+(lldb) target create "/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmpsgr0ydw3/dbgtargetx86_64no-opt_stop_at_line"
+Current executable set to '/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmpsgr0ydw3/dbgtargetx86_64no-opt_stop_at_line' (x86_64).
+(lldb) breakpoint set -f stop_at_line.claw -l 5
+Breakpoint 1: where = dbgtargetx86_64no-opt_stop_at_line`square + 16 at stop_at_line.claw:5:5, address = 0x000000010000370c
+(lldb) run
+error: process exited with status -1 (attach failed (attached to process, but could not pause execution; attach failed))
+
+--target x86_64 --no-opt: no frame `square at stop_at_line.claw:5` in:
+(lldb) target create "/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmpsgr0ydw3/dbgtargetx86_64no-opt_stop_at_line"
+Current executable set to '/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmpsgr0ydw3/dbgtargetx86_64no-opt_stop_at_line' (x86_64).
+(lldb) breakpoint set -f stop_at_line.claw -l 5
+Breakpoint 1: where = dbgtargetx86_64no-opt_stop_at_line`square + 16 at stop_at_line.claw:5:5, address = 0x000000010000370c
+(lldb) run
+error: process exited with status -1 (attach failed (attached to process, but could not pause execution; attach failed))
+
+--target x86_64 --no-opt: no frame `main at stop_at_line.claw:11` in:
+(lldb) target create "/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmpsgr0ydw3/dbgtargetx86_64no-opt_stop_at_line"
+Current executable set to '/var/folders/sk/lkvchxjd3mx67vyy2k314cb40000gn/T/tmpsgr0ydw3/dbgtargetx86_64no-opt_stop_at_line' (x86_64).
+(lldb) breakpoint set -f stop_at_line.claw -l 5
+Breakpoint 1: where = dbgtargetx86_64no-opt_stop_at_line`square + 16 at stop_at_line.claw:5:5, address = 0x000000010000370c
+(lldb) run
+error: process exited with status -1 (attach failed (attached to process, but could not pause execution; attach failed))
+
+linux: 246/246 programs gave the same output on Linux
+card: about 1999 tokens (budget 2000)
+2504/2505 passed

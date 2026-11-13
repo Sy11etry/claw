@@ -1,0 +1,23 @@
+const inner = 10
+const tasks = 2000000
+
+fn work(x int) int {
+    mut s := 0
+    for i in 0..inner {
+        s += (x * i + i) % 7
+    }
+    ret s
+}
+
+fn main() {
+    mut out []int = []
+    reserve(&out, tasks)
+    for i in 0..tasks {
+        push(&out, work(i))
+    }
+    mut total := 0
+    for v in out {
+        total += v
+    }
+    print(total)
+}

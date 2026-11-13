@@ -1272,7 +1272,7 @@ fn element_addr(l modules.Loaded, c sema.Checked, me &Lower, array int, addr int
     }
     x := seq(c, &me, array, addr)
     idx := expr_value(l, c, &me, i)
-    emit(&me, cir.BoundsDyn{idx, x.b, loc_of(span)})
+    emit(&me, cir.BoundsDyn{idx, x.b, loc_of(span), false})
     d := vreg(&me)
     emit(&me, cir.IndexAddr{d, x.a, idx, types.size(c.types, elem_of(c, array))})
     ret d
@@ -2107,10 +2107,10 @@ fn slice_expr(l modules.Loaded, c sema.Checked, me &Lower, base int, lo int, hi 
     // 0 <= start <= end <= len, checked as two unsigned comparisons.
     n_plus := vreg(&me)
     emit(&me, cir.AddImm{n_plus, x.b, 1})
-    emit(&me, cir.BoundsDyn{end, n_plus, loc_of(span)})
+    emit(&me, cir.BoundsDyn{end, n_plus, loc_of(span), true})
     end_plus := vreg(&me)
     emit(&me, cir.AddImm{end_plus, end, 1})
-    emit(&me, cir.BoundsDyn{start, end_plus, loc_of(span)})
+    emit(&me, cir.BoundsDyn{start, end_plus, loc_of(span), true})
 
     size := types.size(c.types, elem_of(c, base_ty))
     first := vreg(&me)

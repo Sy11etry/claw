@@ -1,0 +1,10 @@
+// A wild pointer in `claw fn` is not mistaken for a stack overflow.
+// expect: before
+// stderr: trap: bad memory access
+// crash: yes
+// build-only: yes
+claw fn main() {
+    print("before")
+    p := cast[*int](4096)
+    print(*p)
+}
