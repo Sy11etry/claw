@@ -10,7 +10,8 @@ the reasons behind the choices are in `docs/DESIGN.md`, and what works today is 
   quick test suite (`tools/quicktests.py`, 686 checks in about 20 seconds), `tools/install.py --no-path`.
 - The specification, the status page and the design notes (`docs/DESIGN.md`) are in English, and so is everything else in
   the repository.
-- No change to the language or the compiler since 0.13. The flight recorder costs about 0.5% on a program that reads
+- No change to the language since 0.13. The compiler builds without warnings on newer Rust too (the `read` and `write`
+  declarations in `interp.rs` now use `c_void`, as a newer lint wants). The flight recorder costs about 0.5% on a program that reads
   15000 files in a loop (measured once, on one machine).
 
 ## 0.13: the flight recorder

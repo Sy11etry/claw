@@ -26,8 +26,8 @@ extern "C" {
     fn strtod(s: *const u8, end: *mut *mut u8) -> f64;
     fn open(path: *const std::ffi::c_char, flags: i32, ...) -> i32;
     fn close(fd: i32) -> i32;
-    fn read(fd: i32, p: *mut u8, n: usize) -> isize;
-    fn write(fd: i32, p: *const u8, n: usize) -> isize;
+    fn read(fd: i32, p: *mut std::ffi::c_void, n: usize) -> isize;
+    fn write(fd: i32, p: *const std::ffi::c_void, n: usize) -> isize;
     fn unlink(path: *const std::ffi::c_char) -> i32;
     fn __error() -> *mut i32;
     fn toupper(c: i32) -> i32;
@@ -1846,14 +1846,14 @@ impl<'m> Machine<'m> {
                     return int(a[2] as i64);
                 }
                 // SAFETY: the pointer and length describe `bytes`, which outlives the call.
-                let n = unsafe { write(fd, bytes.as_ptr(), bytes.len()) };
+                let n = unsafe { write(fd, bytes.as_ptr().cast(), bytes.len()) };
                 self.keep_errno();
                 int(n as i64)
             }
             "read" => {
                 let mut tmp = vec![0u8; a[2].min(1 << 30) as usize];
                 // SAFETY: the buffer holds exactly as many bytes as the call may write.
-                let n = unsafe { read(a[0] as i32, tmp.as_mut_ptr(), tmp.len()) };
+                let n = unsafe { read(a[0] as i32, tmp.as_mut_ptr().cast(), tmp.len()) };
                 self.keep_errno();
                 if n > 0 {
                     let (r, o) = fault!(self.find(a[1], n as u64, true));
