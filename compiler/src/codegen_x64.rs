@@ -782,7 +782,26 @@ impl Gen {
         patch_rel(&mut self.c, big, start);
         patch_rel(&mut self.c, zero, fixed);
         patch_rel(&mut self.c, small, start);
+        // The shortest text has at most 15 digits (f32: 6) exactly when the text of that many digits reads back, since
+        // a number that short is the nearest one on that grid; so start there, and only go up if it does not.
+        mov_ri32(&mut self.c, RBX, 6);
+        alu_i(&mut self.c, Alu::Cmp, reg(R12), 17);
+        jcc(&mut self.c, Cond::Ne);
+        let keep = self.c.len() - 4;
+        mov_ri32(&mut self.c, RBX, 15);
+        let go = self.here();
+        patch_rel(&mut self.c, keep, go);
+        // Not for a number so small that it may be a denormal: it has fewer digits than the grid assumes (5e-324).
+        movq_rx(&mut self.c, RAX, 0);
+        shift_i(&mut self.c, Shift::Shl, RAX, 1);
+        shift_i(&mut self.c, Shift::Shr, RAX, 1);
+        mov_ri64(&mut self.c, RCX, 0x3841039d428a8b8fu64 as i64);
+        alu(&mut self.c, Alu::Cmp, reg(RAX), RCX);
+        jcc(&mut self.c, Cond::Ae);
+        let big_enough = self.c.len() - 4;
         mov_ri32(&mut self.c, RBX, 1);
+        let here_now = self.here();
+        patch_rel(&mut self.c, big_enough, here_now);
         let top = self.here();
         lea(&mut self.c, RDI, at(RSP, 16));
         mov_ri32(&mut self.c, RSI, 64);
@@ -853,6 +872,10 @@ impl Gen {
     fn rt_trap(&mut self) -> usize {
         let pos = self.here();
         self.prologue(&[]);
+        // The text stays in the runtime state for the flight recorder (`std/trace.claw`) to put in a trace file.
+        self.lea_bss(RAX, STATE + 72);
+        mov(&mut self.c, at(RAX, 0), RDI);
+        mov(&mut self.c, at(RAX, 8), RSI);
         mov(&mut self.c, reg(RDX), RSI);
         mov(&mut self.c, reg(RSI), RDI);
         mov_ri32(&mut self.c, RDI, 2);

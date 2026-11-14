@@ -1,0 +1,182 @@
+// The flight recorder. Started with `CLAW_RECORD=crash.clawtrace ./program`, a program remembers what came in from
+// the outside world (its arguments, the environment variables and files it read). If it then ends in a trap, it
+// leaves that file behind, and `claw why crash.clawtrace program.claw` plays the same run again, in the interpreter.
+// Without the variable nothing is recorded and nothing is written. Only `os` and `fs` call into this module.
+
+extern "getenv" fn c_getenv(name *u8) *u8
+extern "strlen" fn c_strlen(s *u8) u64
+extern "atexit" fn c_atexit(f *u8) i32
+extern "malloc" fn c_malloc(n u64) *u8
+extern "open" fn c_open(path *u8, flags i32, ...) i32
+extern "close" fn c_close(fd i32) i32
+extern "write" fn c_write(fd i32, p *u8, n u64) i64
+
+// Room for what the program read; a run that read more is marked `truncated` in the file.
+const room = 4194304
+
+// Words of __state() used here: 9 and 10 the text of the trap (set by the runtime), 11 and 12 the notes so far
+// (address and length), 13 what this module decided (0 not yet, 1 off, 2 on, 3 on, no room left).
+const w_trap = 9
+const w_notes = 11
+const w_mode = 13
+
+type Out { p *u8, n int }
+
+claw fn put_byte(o &Out, b u8) {
+    o.p[o.n] = b
+    o.n += 1
+}
+
+claw fn put_bytes(o &Out, p *u8, n int) {
+    for i in 0..n { o.p[o.n + i] = p[i] }
+    o.n += n
+}
+
+claw fn put_text(o &Out, s str) {
+    for c, i in s { o.p[o.n + i] = c }
+    o.n += len(s)
+}
+
+claw fn put_num(o &Out, n int) {
+    mut v := n
+    if v < 0 {
+        put_byte(&o, '-')
+        v = 0 - v
+    }
+    mut digits := 1
+    mut t := v
+    for t >= 10 {
+        t = t / 10
+        digits += 1
+    }
+    mut i := digits
+    for i > 0 {
+        i -= 1
+        o.p[o.n + i] = u8(48 + v % 10)
+        v = v / 10
+    }
+    o.n += digits
+}
+
+// Writes what the program collected, plus how it ended, to the chosen file. Runs when the program exits.
+claw fn dump() {
+    s := __state()
+    if s[w_trap] == 0 or s[w_mode] < 2 { ret }
+    msg := cast[*u8](s[w_trap])
+    mlen := s[w_trap + 1]
+    // Once only, and no second trap while writing the file.
+    s[w_trap] = 0
+    argc := s[14]
+    argv := cast[**u8](s[15])
+    mut total := s[w_notes + 1] + mlen + 256
+    for i in 0..argc { total += int(c_strlen(argv[i])) + 24 }
+    mem := c_malloc(u64(total))
+    if mem == none { ret }
+    mut o := Out{mem, 0}
+    put_text(&o, "clawtrace 1\ntrap ")
+    put_num(&o, mlen)
+    put_byte(&o, 10)
+    put_bytes(&o, msg, mlen)
+    put_text(&o, "\nargv ")
+    put_num(&o, argc)
+    put_byte(&o, 10)
+    for i in 0..argc {
+        n := int(c_strlen(argv[i]))
+        put_num(&o, n)
+        put_byte(&o, 10)
+        put_bytes(&o, argv[i], n)
+        put_byte(&o, 10)
+    }
+    put_bytes(&o, cast[*u8](s[w_notes]), s[w_notes + 1])
+    if s[w_mode] == 3 { put_text(&o, "truncated\n") }
+    put_text(&o, "end\n")
+    mut flags := 1 | 512 | 1024
+    if __linux() { flags = 1 | 64 | 512 }
+    path := c_getenv("CLAW_RECORD")
+    if path == none { ret }
+    fd := c_open(path, i32(flags), 420)
+    if fd < 0 { ret }
+    mut done := 0
+    for done < o.n {
+        n := c_write(fd, o.p + done, u64(o.n - done))
+        if n <= 0 { break }
+        done += int(n)
+    }
+    _ = c_close(fd)
+}
+
+// Is this run being recorded? The first call looks at the environment and sets everything up.
+pub claw fn on() bool +io {
+    s := __state()
+    if s[w_mode] == 0 {
+        s[w_mode] = 1
+        path := c_getenv("CLAW_RECORD")
+        if path != none {
+            if int(c_strlen(path)) > 0 {
+                notes := c_malloc(u64(room))
+                if notes != none {
+                    s[w_notes] = cast[int](notes)
+                    s[w_notes + 1] = 0
+                    if c_atexit(cast[*u8](dump)) == 0 { s[w_mode] = 2 }
+                }
+            }
+        }
+    }
+    ret s[w_mode] >= 2
+}
+
+// Makes room for `want` more bytes of notes; false (and the file says so) when the program has read too much.
+claw fn reserve_notes(want int) bool {
+    s := __state()
+    if s[w_notes + 1] + want > room {
+        s[w_mode] = 3
+        ret false
+    }
+    ret true
+}
+
+/// An environment variable was asked for: `value` is what `getenv` gave, `none` if it is not set.
+pub claw fn note_env(name str, value *u8) +io {
+    if not on() { ret }
+    s := __state()
+    mut vlen := -1
+    if value != none { vlen = int(c_strlen(value)) }
+    if not reserve_notes(len(name) + vlen + 64) { ret }
+    mut o := Out{cast[*u8](s[w_notes]), s[w_notes + 1]}
+    put_text(&o, "env ")
+    put_num(&o, len(name))
+    put_byte(&o, 32)
+    put_num(&o, vlen)
+    put_byte(&o, 10)
+    put_text(&o, name)
+    put_byte(&o, 10)
+    if vlen >= 0 {
+        put_bytes(&o, value, vlen)
+        put_byte(&o, 10)
+    }
+    s[w_notes + 1] = o.n
+}
+
+/// A whole file was read: `ok` and its bytes, or not `ok` and the `errno` it failed with.
+pub claw fn note_file(path str, data str, ok bool, errno int) +io {
+    if not on() { ret }
+    s := __state()
+    mut dlen := -1
+    if ok { dlen = len(data) }
+    if not reserve_notes(len(path) + len(data) + 96) { ret }
+    mut o := Out{cast[*u8](s[w_notes]), s[w_notes + 1]}
+    put_text(&o, "file ")
+    put_num(&o, len(path))
+    put_byte(&o, 32)
+    put_num(&o, dlen)
+    put_byte(&o, 32)
+    put_num(&o, errno)
+    put_byte(&o, 10)
+    put_text(&o, path)
+    put_byte(&o, 10)
+    if ok {
+        put_text(&o, data)
+        put_byte(&o, 10)
+    }
+    s[w_notes + 1] = o.n
+}

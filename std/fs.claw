@@ -1,5 +1,7 @@
 // Whole-file reading and writing.
 
+use trace
+
 extern "open" fn c_open(path *u8, flags i32, ...) i32
 extern "close" fn c_close(fd i32) i32
 extern "read" fn c_read(fd i32, p *u8, n u64) i64
@@ -19,7 +21,10 @@ claw fn o_create_trunc() i32 {
 }
 
 claw fn last_error() IoErr {
-    code := int(*c_errno())
+    ret error_of(int(*c_errno()))
+}
+
+claw fn error_of(code int) IoErr {
     if code == 2 { ret NotFound }
     if code == 13 { ret Denied }
     ret Failed{code}
@@ -32,11 +37,18 @@ claw fn c_path(path str) *u8 +mem {
     ret p
 }
 
+// A read that did not work, as the flight recorder sees it, and as the caller sees it.
+claw fn read_failed(path str) IoErr +io {
+    code := int(*c_errno())
+    trace.note_file(path, "", false, code)
+    ret error_of(code)
+}
+
 pub claw fn read(path str) str ! IoErr +io +mem {
     name := c_path(path)
     defer free(name)
     fd := c_open(name, o_rdonly)
-    if fd < 0 { fail last_error() }
+    if fd < 0 { fail read_failed(path) }
     defer {
         _ = c_close(fd)
     }
@@ -45,7 +57,7 @@ pub claw fn read(path str) str ! IoErr +io +mem {
     for {
         reserve(&bytes, bytes.len + 4096)
         n := c_read(fd, bytes.ptr + bytes.len, 4096)
-        if n < 0 { fail last_error() }
+        if n < 0 { fail read_failed(path) }
         if n == 0 { break }
         bytes.len += int(n)
     }
@@ -58,6 +70,7 @@ pub claw fn read(path str) str ! IoErr +io +mem {
         bytes.len = 0
         bytes.cap = 0
     }
+    trace.note_file(path, out, true, 0)
     ret out
 }
 

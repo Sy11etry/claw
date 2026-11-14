@@ -124,6 +124,23 @@ pub enum Stop {
 }
 
 #[derive(Clone)]
+/// What a recorded run (see `std/trace.claw`) was given from outside: the interpreter serves it instead of asking
+/// the real world, so a crash of another machine happens again here.
+#[derive(Default)]
+pub struct Replay {
+    pub args: Vec<Vec<u8>>,
+    pub env: HashMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Per path, the files it named in the order the program read them (the last one answers every later read).
+    pub files: HashMap<Vec<u8>, VecDeque<Result<Vec<u8>, i32>>>,
+}
+
+/// A file of the replayed run that is open: bytes to read, or a place to throw writes away.
+struct Virt {
+    data: Vec<u8>,
+    pos: usize,
+    sink: bool,
+}
+
 pub struct Config {
     pub steps: u64,
     pub memory: u64,
@@ -238,6 +255,10 @@ pub struct Machine<'m> {
     statics: usize,
     static_at: HashMap<*const Inst, u64>,
     state_block: u64,
+    replay: Option<Replay>,
+    virt: HashMap<i32, Virt>,
+    next_fd: i32,
+    env_at: HashMap<Vec<u8>, u64>,
     free_stack: Vec<u32>,
     quarantine: VecDeque<u32>,
     frames: Vec<Frame>,
@@ -579,6 +600,10 @@ impl<'m> Machine<'m> {
             statics: 0,
             static_at: HashMap::new(),
             state_block: 0,
+            replay: None,
+            virt: HashMap::new(),
+            next_fd: 1000,
+            env_at: HashMap::new(),
             free_stack: Vec::new(),
             quarantine: VecDeque::new(),
             frames: Vec::new(),
@@ -668,6 +693,105 @@ impl<'m> Machine<'m> {
     pub fn adopt_all(&mut self) {
         for r in self.regions.iter_mut().filter(|r| r.state == State::Heap) {
             r.input = true;
+        }
+    }
+
+    /// Makes the program see the arguments, environment and files of a recorded run.
+    pub fn set_replay(&mut self, r: Replay) {
+        let argc = r.args.len();
+        let argv = self.fresh(8 * argc.max(1) as u64, State::Static, 0);
+        for (i, a) in r.args.iter().enumerate() {
+            let mut v = a.clone();
+            v.push(0);
+            let at = self.fresh(v.len() as u64, State::Static, 0);
+            self.put(at, &v);
+            self.put(argv + 8 * i as u64, &at.to_le_bytes());
+        }
+        // `os.args()` reads argc and argv from the last two words of the runtime state.
+        self.put(self.state_block + 112, &(argc as u64).to_le_bytes());
+        self.put(self.state_block + 120, &argv.to_le_bytes());
+        self.replay = Some(r);
+    }
+
+    /// The C calls that reach the outside world, answered from the recording; `None` when this one is not such a call.
+    fn world_call(&mut self, sym: &str, a: &[u64]) -> Option<CResult> {
+        macro_rules! fault {
+            ($e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(what) => return Some(CResult::Fault(what)),
+                }
+            };
+        }
+        let errno = |mc: &mut Self, e: i32| {
+            let at = mc.state_block + ERRNO_AT;
+            mc.put(at, &e.to_le_bytes());
+        };
+        match sym {
+            "getenv" => {
+                let name = fault!(self.cstr_at(a[0]));
+                let value = match &self.replay {
+                    Some(r) => r.env.get(&name).cloned().flatten(),
+                    // Not replaying: the flight recorder stays off, anything else is the real environment.
+                    None if name == b"CLAW_RECORD" => None,
+                    None => std::env::var_os(String::from_utf8_lossy(&name).as_ref()).map(|v| v.to_string_lossy().into_owned().into_bytes()),
+                };
+                let Some(mut v) = value else { return Some(CResult::Value(0)) };
+                if let Some(at) = self.env_at.get(&name) {
+                    return Some(CResult::Value(*at));
+                }
+                v.push(0);
+                let at = self.fresh(v.len() as u64, State::Static, 0);
+                self.put(at, &v);
+                self.env_at.insert(name, at);
+                Some(CResult::Value(at))
+            }
+            _ if self.replay.is_none() => None,
+            "open" => {
+                let path = fault!(self.cstr_at(a[0]));
+                let writing = a[1] as i32 & 3 != 0;
+                let data = if writing {
+                    Ok(Vec::new())
+                } else {
+                    let queue = self.replay.as_mut().unwrap().files.get_mut(&path);
+                    match queue {
+                        Some(q) if q.len() > 1 => q.pop_front().unwrap(),
+                        Some(q) => q.front().cloned().unwrap_or(Err(2)),
+                        None => Err(2),
+                    }
+                };
+                match data {
+                    Ok(data) => {
+                        let fd = self.next_fd;
+                        self.next_fd += 1;
+                        self.virt.insert(fd, Virt { data, pos: 0, sink: writing });
+                        Some(CResult::Value(fd as u64))
+                    }
+                    Err(e) => {
+                        errno(self, e);
+                        Some(CResult::Value(-1i64 as u64))
+                    }
+                }
+            }
+            "read" => {
+                let fd = a[0] as i32;
+                let v = self.virt.get_mut(&fd)?;
+                let n = (v.data.len() - v.pos).min(a[2].min(1 << 30) as usize);
+                let chunk = v.data[v.pos..v.pos + n].to_vec();
+                v.pos += n;
+                if n > 0 {
+                    let (r, o) = fault!(self.find(a[1], n as u64, true));
+                    self.regions[r].data[o..o + n].copy_from_slice(&chunk);
+                }
+                Some(CResult::Value(n as u64))
+            }
+            "write" if self.virt.get(&(a[0] as i32)).is_some_and(|v| v.sink) => Some(CResult::Value(a[2])),
+            "close" if self.virt.contains_key(&(a[0] as i32)) => {
+                self.virt.remove(&(a[0] as i32));
+                Some(CResult::Value(0))
+            }
+            "unlink" => Some(CResult::Value(0)),
+            _ => None,
         }
     }
 
@@ -1636,6 +1760,9 @@ impl<'m> Machine<'m> {
                     Err(what) => return Ok(CResult::Fault(what)),
                 }
             };
+        }
+        if let Some(done) = self.world_call(sym, a) {
+            return Ok(done);
         }
         match sym {
             "sqrt" => float(f(0).sqrt()),

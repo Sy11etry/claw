@@ -1,0 +1,11 @@
+// The arguments of the recorded run are the arguments of the replay.
+// args: 7 8
+// why: replayed the recorded run: the same trap happens here
+// why: index = 9, len = 2
+use os
+
+fn main() {
+    args := os.args()
+    xs := [1, 2]
+    print(xs[len(args) + 6])
+}

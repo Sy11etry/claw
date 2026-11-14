@@ -1,5 +1,7 @@
 // The command line, the environment and leaving early.
 
+use trace
+
 extern "getenv" fn c_getenv(name *u8) *u8
 extern "strlen" fn c_strlen(s *u8) u64
 extern "exit" fn c_exit(code i32)
@@ -20,6 +22,8 @@ claw fn text_of(p *u8) str +mem {
 
 /// What the user typed: `args()[0]` is the program, the rest are its arguments.
 pub claw fn args() []str +io +mem {
+    // Asking for the arguments starts the flight recorder, which keeps them (see trace.claw).
+    _ = trace.on()
     s := __state()
     argc := s[14]
     argv := cast[**u8](s[15])
@@ -35,6 +39,7 @@ pub claw fn env(name str) ?str +io +mem {
     for c, i in name { p[i] = c }
     p[len(name)] = 0
     v := c_getenv(p)
+    trace.note_env(name, v)
     if v == none { ret none }
     ret text_of(v)
 }

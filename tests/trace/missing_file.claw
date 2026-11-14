@@ -1,0 +1,10 @@
+// A file that was not there: the replay finds it missing too, even if it exists on the replaying machine.
+// why: replayed the recorded run: the same trap happens here
+// why: index = 6, len = 3
+use fs
+
+fn main() {
+    text := fs.read("/nonexistent/claw-trace-test") else "x"
+    xs := [10, 20, 30]
+    print(xs[len(text) + 5])
+}

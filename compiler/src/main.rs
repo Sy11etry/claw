@@ -3,6 +3,7 @@
 mod arm64;
 mod ast;
 mod cabi;
+mod trace;
 mod cir;
 mod codegen;
 mod codegen_x64;
@@ -46,6 +47,7 @@ claw test <file.claw>           run the `test` blocks, then try every function w
     --blocks                    only the `test` blocks
 claw why <file.claw>            run again and say which lines led to the failure
     --test <name>               of that `test` block instead of `main`
+claw why <x.clawtrace> [file.claw]  play a recorded crash again (record with CLAW_RECORD=x.clawtrace ./program)
 claw fix <file.claw>            apply the compiler's safe patches
 claw build <file.claw> [-o out] optimized executable; contracts with calls are left out
     --fast                      remove every run-time check: speed like C, risk like C
@@ -639,7 +641,38 @@ fn test_all(o: &Options) -> ! {
 }
 
 /// `claw why`: the program runs again, this time remembering where every value came from.
-fn why_file(o: &Options) -> ! {
+/// `claw why file.claw`, or `claw why crash.clawtrace [file.claw]`: the same run again, from a flight recorder file.
+fn why_entry(args: &[String]) -> ! {
+    let Some(at) = args.iter().position(|a| a.ends_with(".clawtrace")) else { why_file(&parse_options(args), None) };
+    let path = &args[at];
+    let bytes = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("claw: cannot read {path}: {e}");
+        exit(2);
+    });
+    let t = trace::parse(&bytes).unwrap_or_else(|e| {
+        eprintln!("claw: {path}: {e}");
+        exit(2);
+    });
+    let mut rest: Vec<String> = args.to_vec();
+    rest.remove(at);
+    if !rest.iter().any(|a| !a.starts_with('-') && a.ends_with(".claw")) {
+        // The program's own name usually says where its source is: `app` was built from `app.claw`.
+        let name = t.replay.args.first().map(|a| String::from_utf8_lossy(a).into_owned()).unwrap_or_default();
+        let base = std::path::Path::new(&name).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let near = std::path::Path::new(path).parent().map(|d| d.join(format!("{base}.claw")));
+        let guess = [Some(std::path::PathBuf::from(format!("{base}.claw"))), near].into_iter().flatten().find(|p| !base.is_empty() && p.is_file());
+        match guess {
+            Some(p) => rest.push(p.to_string_lossy().into_owned()),
+            None => {
+                eprintln!("claw: which source made this program? write `claw why {path} <file.claw>`");
+                exit(2);
+            }
+        }
+    }
+    why_file(&parse_options(&rest), Some(t))
+}
+
+fn why_file(o: &Options, recorded: Option<trace::Trace>) -> ! {
     let f = front(o, false, o.test_name.is_some());
     let m = for_interp(&f, o.test_name.is_some());
     let files = &f.loaded.base_names;
@@ -654,6 +687,13 @@ fn why_file(o: &Options) -> ! {
         None => m.main,
     };
     let mut mc = interp::Machine::new(&m, files, replay_config(true, false));
+    let expected = recorded.as_ref().map(|t| t.trap.clone());
+    if let Some(t) = recorded {
+        if t.truncated {
+            println!("note: the program read more than the recorder could keep, so this run may differ from the real one");
+        }
+        mc.set_replay(t.replay);
+    }
     let failure = match mc.call(start, &[]) {
         interp::Stop::Done(_) => mc.check_leaks(),
         interp::Stop::Exit(0) => None,
@@ -673,10 +713,21 @@ fn why_file(o: &Options) -> ! {
         interp::Stop::NeedConst(_) => unreachable!("constants were computed in the front end"),
     };
     let Some(x) = failure else {
-        println!("no failure: the program ran to the end");
-        exit(0);
+        let was = expected.is_some();
+        match expected {
+            Some(t) => println!("not reproduced: the recorded run ended with `{t}`, this one ran to the end; is this the source the program was built from?"),
+            None => println!("no failure: the program ran to the end"),
+        }
+        exit(if was { 1 } else { 0 });
     };
     let src = why::Sources::new(&f.loaded.units, &f.loaded.files, files, &f.checked.types);
+    if let Some(t) = &expected {
+        if x.msg.lines().next().unwrap_or("").trim() == t.trim() {
+            println!("replayed the recorded run: the same trap happens here");
+        } else {
+            println!("not the same crash: recorded `{t}`, here `{}`; is this the source the program was built from?", x.msg.lines().next().unwrap_or("").trim());
+        }
+    }
     println!("FAIL {}", x.msg.lines().next().unwrap_or("").trim_start_matches("trap: "));
     for line in why::report(&src, &mc, &x, None) {
         println!("{line}");
@@ -831,7 +882,7 @@ fn real_main() {
             compile(&o, &out, Mode::Build);
         }
         Some("test") => test_all(&parse_options(&args[1..])),
-        Some("why") => why_file(&parse_options(&args[1..])),
+        Some("why") => why_entry(&args[1..]),
         Some("fix") => fix_file(&parse_options(&args[1..])),
         Some("card") => print!("{}", info::CARD),
         Some("get") => {

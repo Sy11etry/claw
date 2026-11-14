@@ -2655,11 +2655,11 @@ impl<'a, 'b> Ctx<'a, 'b> {
                 }
                 self.simd(name, span, args)
             }
-            "__state" if matches!(self.g.mods[self.g.cur].prefix.as_str(), "__check." | "os.") => self.g.types.intern(Kind::Pointer(INT)),
+            "__state" if matches!(self.g.mods[self.g.cur].prefix.as_str(), "__check." | "os." | "trace.") => self.g.types.intern(Kind::Pointer(INT)),
             // For `std/par.claw` only: whether tasks must run one after another, and where a task's thread starts.
             "__sequential" if self.g.mods[self.g.cur].prefix == "par." => BOOL,
             // For `std/fs.claw` only: the values of `open` flags differ between macOS and Linux.
-            "__linux" if matches!(self.g.mods[self.g.cur].prefix.as_str(), "fs." | "par.") => BOOL,
+            "__linux" if matches!(self.g.mods[self.g.cur].prefix.as_str(), "fs." | "par." | "trace.") => BOOL,
             "__entry" | "__entry_map" | "__entry_build" if self.g.mods[self.g.cur].prefix == "par." => {
                 let targs = self.resolve_targs(targs)?;
                 let m = self.g.cur;

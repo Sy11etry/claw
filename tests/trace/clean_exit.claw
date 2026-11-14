@@ -1,0 +1,11 @@
+// A program that ends well leaves no trace, even when it is being recorded.
+// clean: yes
+// input: 5
+// args: {file}
+use fs
+use os
+
+fn main() {
+    text := fs.read(os.args()[1]) else "0"
+    print(len(text))
+}

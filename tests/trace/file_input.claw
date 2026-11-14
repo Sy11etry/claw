@@ -1,0 +1,23 @@
+// A crash that depends on a file the program read: the file is gone when the trace is replayed.
+// input: 30 0
+// args: {file}
+// why: replayed the recorded run: the same trap happens here
+// why: division by zero
+use fs
+use os
+
+fn ratio(a int, b int) int {
+    ret a / b
+}
+
+fn main() {
+    args := os.args()
+    text := fs.read(args[1]) else {
+        print("cannot read")
+        ret
+    }
+    parts := split(trim(text), " ")
+    a := to_int(parts[0]) else 0
+    b := to_int(parts[1]) else 0
+    print(ratio(a, b))
+}

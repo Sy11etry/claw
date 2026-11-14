@@ -1,0 +1,67 @@
+// Floats print as the shortest text that reads back as the same number (checked against Python's repr).
+// Rules: exponent only for |x| >= 1e16 or 0 < |x| < 1e-4.
+// expect: 0.1
+// expect: 0.30000000000000004
+// expect: 0.3333333333333333
+// expect: 0.6666666666666666
+// expect: 100
+// expect: 1000000000000000
+// expect: 123456789012345.6
+// expect: 1234567890123456
+// expect: 1e+16
+// expect: 1.5e+16
+// expect: 0.0001
+// expect: 1.5e-05
+// expect: 5e-324
+// expect: 1.7976931348623157e+308
+// expect: 0.5
+// expect: 255
+// expect: 3.14159
+// expect: 2.718281828459045
+// expect: 1e+22
+// expect: 123.456
+// expect: 0.1
+// expect: 0.3
+// expect: 16777216
+// expect: 1.5
+// expect: 1e+30
+// expect: 1e-05
+// expect: 123456.7
+// expect: 0.7
+// expect: 0.30000000000000004
+// expect: 1e-45
+
+fn main() {
+    print(0.1)
+    print(0.30000000000000004)
+    print(0.3333333333333333)
+    print(0.6666666666666666)
+    print(100.0)
+    print(1000000000000000.0)
+    print(123456789012345.6)
+    print(1234567890123456.0)
+    print(1e+16)
+    print(1.5e+16)
+    print(0.0001)
+    print(1.5e-05)
+    print(5e-324)
+    print(1.7976931348623157e+308)
+    print(0.5)
+    print(255.0)
+    print(3.14159)
+    print(2.718281828459045)
+    print(1e+22)
+    print(123.456)
+    print(f32(0.1))
+    print(f32(0.3))
+    print(f32(16777216.0))
+    print(f32(1.5))
+    print(f32(1e+30))
+    print(f32(1e-05))
+    print(f32(123456.7))
+    print(f32(0.7))
+    a := 0.1
+    b := 0.2
+    print(a + b)
+    print(f32(1e-45))
+}

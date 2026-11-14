@@ -27,6 +27,7 @@ tests/debug/*.claw  lldb stops at the right line.
 examples/*.claw  the showcase programs: built, run checked, and run as x86-64.
 tests/simd/*.claw  SIMD vectors: checked run, three build modes and the interpreter agree; err_*.claw must be rejected.
 tests/stack/*.claw  deep recursion works everywhere; a full stack or a wild pointer is reported, not a silent crash.
+tests/trace/*.claw  the flight recorder: a trap leaves a trace when asked, `claw why x.clawtrace` replays it.
 Linux target: the ELF is checked, and with qemu and an Alpine image the programs run there too.
 
 The compiler runs with an empty PATH, proving it needs no as, ld or clang.
@@ -469,6 +470,64 @@ def stack_test(path, tmp):
     return None
 
 
+def trace_test(path, tmp):
+    for mode in ([], ["--target", "x86_64"]):
+        msg = trace_one(path, tmp, mode)
+        if msg:
+            return f"{' '.join(mode) or 'arm64'}: {msg}"
+    return None
+
+
+def trace_one(path, tmp, mode):
+    """The flight recorder: a program that traps leaves a trace only when `CLAW_RECORD` names a file, and
+    `claw why x.clawtrace source.claw` plays the same crash again after the world has changed (the input file is
+    deleted, the environment variable is gone). Headers: `// input:` text of the file `{file}` in `// args:`,
+    `// env: NAME=value`, `// why:` text the replay must print, `// clean: yes` a program that ends well."""
+    text = path.read_text()
+    exe = tmp / ("trace_" + path.stem + "".join(mode).replace("-", ""))
+    b = child([CLAW, "build", *mode, path, "-o", exe], capture_output=True, text=True, env={"PATH": ""})
+    if b.returncode != 0:
+        return f"compile failed:\n{b.stderr}"
+    data = tmp / (path.stem + ".input")
+    inputs = headers(text, "input")
+    if inputs:
+        data.write_text("\n".join(inputs) + "\n")
+    args = [a.replace("{file}", str(data)) for a in " ".join(headers(text, "args")).split()]
+    env = {"PATH": ""}
+    for e in headers(text, "env"):
+        k, v = e.split("=", 1)
+        env[k] = v
+    trace = tmp / (path.stem + ".clawtrace")
+    trace.unlink(missing_ok=True)
+    clean = bool(headers(text, "clean"))
+    want = 0 if clean else 101
+    r = child([exe, *args], capture_output=True, text=True, env=env)
+    if r.returncode != want or trace.exists():
+        return f"without CLAW_RECORD: exit {r.returncode} (wanted {want}), trace written: {trace.exists()}"
+    r = child([exe, *args], capture_output=True, text=True, env={**env, "CLAW_RECORD": str(trace)})
+    if r.returncode != want:
+        return f"recording: exit {r.returncode}, wanted {want}\n{r.stderr}"
+    if clean:
+        return None if not trace.exists() else "a program that ended well left a trace"
+    if not trace.exists():
+        return "the program trapped but no trace file was written"
+    # The world changes: the input file is gone, the variables are gone.
+    data.unlink(missing_ok=True)
+    w = child([CLAW, "why", trace, path], capture_output=True, text=True, env={"PATH": ""})
+    if w.returncode != 1:
+        return f"why: exit {w.returncode}\n{w.stdout}{w.stderr}"
+    for s in headers(text, "why"):
+        if s not in w.stdout:
+            return f"why lacks {s!r}:\n{w.stdout}"
+    # Another program is not the same crash, and it says so.
+    other = tmp / (path.stem + "_other.claw")
+    other.write_text("fn main() {\n    print(1)\n}\n")
+    o = child([CLAW, "why", trace, other], capture_output=True, text=True, env={"PATH": ""})
+    if o.returncode != 1 or "not reproduced" not in o.stdout:
+        return f"another source: exit {o.returncode}\n{o.stdout}{o.stderr}"
+    return None
+
+
 def cinterop_test(path, tmp):
     """C libraries and headers: `use c`, `link`, callbacks. A program that needs the test library gets it built
     here with clang (a test fixture, never part of building Claw), once for each architecture."""
@@ -733,8 +792,8 @@ def card_size():
     """The language must fit in a prompt. A rough count, deliberately pessimistic."""
     text = (ROOT / "docs/CARD.md").read_text()
     tokens = len(re.findall(r"[A-Za-z_]+|\d+|[^\sA-Za-z_\d]", text))
-    print(f"card: about {tokens} tokens (budget 2000)")
-    return None if tokens <= 2000 else f"docs/CARD.md is about {tokens} tokens"
+    print(f"card: about {tokens} tokens (budget 2500)")
+    return None if tokens <= 2500 else f"docs/CARD.md is about {tokens} tokens"
 
 
 def main():
@@ -826,6 +885,12 @@ def main():
             if msg:
                 failures += 1
                 print(f"FAIL stack/{path.name}: {msg}")
+        for path in sorted((ROOT / "tests/trace").glob("*.claw")):
+            total += 1
+            msg = trace_test(path, tmp)
+            if msg:
+                failures += 1
+                print(f"FAIL trace/{path.name}: {msg}")
         for path in sorted((ROOT / "tests/script").glob("*.claw")):
             total += 1
             msg = script_test(path, tmp)

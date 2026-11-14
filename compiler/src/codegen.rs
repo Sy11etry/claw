@@ -43,6 +43,8 @@ const STATE: u64 = BUF_CAP + 32;
 const BUF_LOCK: u64 = STATE + STATE_SIZE;
 const STATE_SIZE: u64 = 128;
 const SITE_WORD: u64 = 8;
+/// Byte offset in the state of the message of the trap that ended the program: pointer, then length (words 9 and 10; word 8 is where the interpreter keeps errno).
+const TRAP_WORD: u64 = 72;
 
 #[derive(Clone, Copy)]
 enum Target {
@@ -795,6 +797,22 @@ impl Gen {
         self.code[big] = b_cond(Cond::Ge, (start - big) as i32);
         self.code[zero] = b_cond(Cond::Eq, (fixed - zero) as i32);
         self.code[small] = b_cond(Cond::Mi, (start - small) as i32);
+        // The shortest text has at most 15 digits (f32: 6) exactly when the text of that many digits reads back, since
+        // a number that short is the nearest one on that grid; so start there, and only go up if it does not.
+        self.e(movz(X19, 6, 0));
+        self.e(cmp_imm(X20, 17));
+        self.e(b_cond(Cond::Ne, 2));
+        self.e(movz(X19, 15, 0));
+        // Not for a number so small that it may be a denormal: it has fewer digits than the grid assumes (5e-324).
+        self.e(fmov_x_d(X9, D8));
+        self.e(movz(X10, 1, 0));
+        self.e(lsl(X9, X9, X10));
+        self.e(lsr(X9, X9, X10));
+        self.e(fmov_d_x(D1, X9));
+        self.mov_imm(X10, 0x3841039d428a8b8fu64 as i64);
+        self.e(fmov_d_x(D2, X10));
+        self.e(fcmp(D1, D2, 64));
+        self.e(b_cond(Cond::Ge, 2));
         self.e(movz(X19, 1, 0));
         let top = self.here();
         if self.linux {
@@ -867,6 +885,12 @@ impl Gen {
         let pos = self.here();
         self.e(stp_pre(FP, LR, SP, -16));
         self.e(mov_sp(FP, SP));
+        // The text stays in the runtime state for the flight recorder (`std/trace.claw`) to put in a trace file.
+        self.bss_addr(X9);
+        self.mov_imm(X16, (STATE + TRAP_WORD) as i64);
+        self.e(add(X9, X9, X16));
+        self.e(str(X0, X9, 0));
+        self.e(str(X1, X9, 8));
         self.e(mov(X2, X1));
         self.e(mov(X1, X0));
         self.e(movz(X0, 2, 0));

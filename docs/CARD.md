@@ -1,4 +1,4 @@
-# Claw 0.12 card
+# Claw 0.13 card
 
 One statement per line, no `;`. A line ending in an operator, comma or open bracket continues.
 
@@ -29,7 +29,7 @@ fn first(a []int) ?int {
 fn main() {
     x := 5                               // immutable
     mut s := 0
-    for i in 0..10 { s += i }
+    for i in 0..10 { s += i }            // `for v, i in a` walks values with their index
     for s > 40 { s -= 1 }                // while; `for { }` loops forever
     if s == 40 { print("s = {s + x}") }
     mut a [4]int = [0...]                // all 0
@@ -50,12 +50,16 @@ Operators as in C, but `and or not`; no `++` or `?:`.
 Structs and arrays copy on assignment. `==` works on numbers and bool; `match` variants.
 Types and variants start with a capital, the rest with a small letter.
 
-`print` takes one value or a string with `{expr}` (`{{` is a brace) and adds a newline.
+`print` takes one value or a string with `{expr}` (`{{` is a brace) and adds a newline. A float prints as the shortest
+text that reads back exactly (`0.1`, `3`, `1e+16`). `match` also takes ints, chars and `bool`:
+`0: ret "zero"`, `_: ret "many"`; a failure is matched by its variants: `Failed{code}: ...`.
 
 Errors, not warnings: an unused variable, parameter (name it `_`) or result (`_ = f()`), a reused name,
 `mut` never changed, unreachable code, a missing `ret`, an ignored `T ! E`.
 
-Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index or conversion. Unsigned types and integer conversions to them wrap.
+Exit code 101 with `file:line:col`: signed overflow, division by zero, bad shift, index, slice (`a[3..1]`) or conversion.
+Unsigned types and integer conversions to them wrap; `f64` to an int out of range traps. Endless recursion prints
+`stack overflow` and ends with signal 139.
 
 ## Memory is automatic
 
@@ -85,7 +89,8 @@ A collection cannot change while `for` walks it; one call cannot pass a thing wi
 
 Always available: `push pop insert remove clear reserve swap sort has index_of find contains starts_with ends_with
 trim split lines join upper lower to_int`; `claw sig std` lists them.
-Modules: `fs.read(path)`, `fs.write(path, s)`, `math`, `os.args()`, `os.env(name)`, `os.exit(n)`, `par`.
+Modules: `fs.read(path)` and `fs.write(path, s)` fail with `IoErr` (`NotFound | Denied | Failed{code}`), `math`,
+`os.args()` (`[0]` is the program), `os.env(name)` (`?str`), `os.exit(n)`, `par`.
 Threads share nothing: `t := par.spawn(work, x)`, `par.join(t)`, `work` is `fn(own T) R +mem`.
 `par.map(xs, f)`, `par.build(n, f)` run `f` on all cores, results in order.
 
@@ -134,7 +139,19 @@ claw fn sum() int {
 `sizeof[T]()` is in bytes. `cast` converts between pointers, `int`, `u64`. A string literal as `*u8` is NUL-terminated;
 `s.ptr` is the bytes of a `str`. Raw pointers are unchecked.
 C: `use c "zlib.h"` brings `extern fn`, `type`, `const` from a header (`Z_OK` is `z_ok`, C `int` is `i32`);
-`link "z"` or `-l z` loads the library; `cast[*u8](f)` passes `f` to C as a callback.
+`link "z"` or `-l z` loads the library; `cast[*u8](f)` passes `f` to C as a callback (up to 6 numbers or pointers).
+A C struct of numbers, pointers and arrays goes by value up to 16 bytes, and comes back by value of any size;
+`str`, `[]T` and `own` never go to C.
+
+Vectors (`f64x2 f32x4 i32x4`) live in `claw fn` only: `+ - *`, `/` on floats, `f64x2(x)` fills every lane.
+
+```claw
+claw fn dot2(a *f64, b *f64, out *f64) f64 {
+    v := vload(a) * vload(b)             // 16 bytes
+    vstore(out, fma(v, f64x2(2.0), v))   // a * b + c
+    ret lane(v, 0) + lane(v, 1)          // a literal
+}
+```
 
 ## Contracts, effects, tests
 
@@ -157,3 +174,9 @@ test "div" {
 functions, `--fast` every check. `claw test` also fuzzes functions without `+io`. `claw why f.claw` explains a failure,
 `fix` applies patches, `sig` lists signatures, `ctx f.claw name` gives one function's context, `audit` shows trusted code.
 `claw f.claw args` runs a script (`#!` works). Packages: `claw.pkg` lines `name source`, `claw get`, `use name`.
+`claw fmt` formats; `claw cdecl h.h` shows what a header becomes.
+`claw build --target x86_64` (or `aarch64-linux`) picks the machine; `-g` writes debug info for lldb.
+
+Crash of a program that runs elsewhere: start it as `CLAW_RECORD=crash.clawtrace ./app`. If it traps, it writes what it
+was given (arguments, environment, files it read) to that file. Then `claw why crash.clawtrace app.claw` plays the same
+crash again here and names the lines that caused it. Without the variable nothing is recorded or written.

@@ -1,0 +1,11 @@
+// A crash that depends on an environment variable: the replay has no such variable of its own.
+// env: LIMIT=0
+// why: replayed the recorded run: the same trap happens here
+// why: index = -1, len = 3
+use os
+
+fn main() {
+    limit := to_int(os.env("LIMIT") else "5") else 5
+    xs := [10, 20, 30]
+    print(xs[limit - 1])
+}

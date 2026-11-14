@@ -34,7 +34,7 @@ why    avg.claw:2  need len(xs) > 0
 
 ## Eight ideas
 
-1. **The whole language fits in a prompt.** `docs/CARD.md` is the complete reference and stays under 2000 tokens
+1. **The whole language fits in a prompt.** `docs/CARD.md` is the complete reference and stays under 2500 tokens
    (`claw card` prints it). Every feature has to pay for its place on the card.
 2. **Paw and Claw.** `fn` is safe: no pointers, no `free`, memory is released by the compiler at the end of the scope.
    `claw fn` is plain C: raw pointers, `alloc`/`free`, `defer`. One language, two gears, `claw audit` lists every spot where
@@ -43,7 +43,7 @@ why    avg.claw:2  need len(xs) > 0
    and removes the check; it never stays silent about the rest.
 4. **The compiler writes the tests.** `claw test` fuzzes every function without side effects: boundary values, random inputs,
    inputs picked by code coverage, and shrinks a failure to a small example.
-5. **`claw why`.** Not an address and a stack, but the lines that led to the failure and the values on them.
+5. **`claw why`.** Not an address and a stack, but the lines that led to the failure and the values on them. A program started with `CLAW_RECORD=crash.clawtrace` leaves a small file when it traps, and `claw why crash.clawtrace app.claw` replays that crash on another machine.
 6. **The signature tells the truth.** `+mem +io` mark allocation and I/O; no plus means a guarantee. A reader (or a model)
    does not have to read the body.
 7. **We count tokens of the whole loop:** write, read, fix. Short words, no `;`, compiler messages of about 30-45 tokens, most with a ready patch.
@@ -66,6 +66,7 @@ claw run examples/tour.claw
 | `claw build f.claw -o out` | optimized executable; `--fast` removes every check, `-g` adds debug info |
 | `claw test f.claw` | your `test` blocks, then automatic tests for every function without `+io` |
 | `claw why f.claw` | which lines led to the failure |
+| `claw why x.clawtrace f.claw` | the same, for a crash recorded elsewhere with `CLAW_RECORD=x.clawtrace` |
 | `claw fix f.claw` | apply the compiler's safe patches |
 | `claw sig` / `ctx` / `audit` / `card` | signatures only / one function's context / trusted code / the language on a page |
 | `claw fmt f.claw` | the one standard format |
