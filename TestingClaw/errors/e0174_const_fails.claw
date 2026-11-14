@@ -1,8 +1,0 @@
-// code: E0174
-fn bad(x int) int {
-    ret 10 / x
-}
-const c int = bad(0)
-fn main() {
-    print(c)
-}

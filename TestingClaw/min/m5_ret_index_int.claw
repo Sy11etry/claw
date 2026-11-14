@@ -1,7 +1,0 @@
-fn first(xs []int) int {
-    ret xs[0]
-}
-
-fn main() {
-    print(first([4, 5]))
-}

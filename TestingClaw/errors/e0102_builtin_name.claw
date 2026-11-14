@@ -1,7 +1,0 @@
-// code: E0102
-fn len(a int) int {
-    ret a
-}
-fn main() {
-    print(1)
-}

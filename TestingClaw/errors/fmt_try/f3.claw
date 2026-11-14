@@ -1,5 +1,0 @@
-fn main() {
-    x := [1, // note
-        2]
-    print(x)
-}

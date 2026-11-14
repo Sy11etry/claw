@@ -1,0 +1,15 @@
+name: Idea for the language
+description: A feature, a library function, a better error message
+labels: [idea]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to write, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: card
+    attributes:
+      label: What would it cost on the card?
+      description: The card must stay under 2500 tokens. Roughly how many lines of it would change, and what could be dropped?

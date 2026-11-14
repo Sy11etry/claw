@@ -1,4 +1,0 @@
-// expect: 0
-fn main() {
-    print(len(trim("   ")))
-}

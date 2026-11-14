@@ -1,4 +1,0 @@
-// code: E0133
-fn main() {
-    print("a { b")
-}

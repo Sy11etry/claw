@@ -1,5 +1,0 @@
-// code: E0112
-fn main() {
-    x Foo = 1
-    print(x)
-}

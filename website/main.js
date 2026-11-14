@@ -44,7 +44,7 @@ function codeHTML(src) {
     `<div class="ln" data-l="${k + 1}"><span class="no" aria-hidden="true">${k + 1}</span><span class="src">${hl(l) || " "}</span></div>`).join("");
 }
 
-/* ═════════════ the files (real) and their output (recorded from claw 0.10) ═════════════ */
+/* ═════════════ the files (real) and their output (recorded from claw 0.10 and replayed on claw 1.0: identical) ═════════════ */
 const SRC = {
   "avg.claw": `fn avg(xs []int) int
     need len(xs) > 0
@@ -538,7 +538,7 @@ function desk() {
     cap.textContent = plan ? `proof · ${m[1]}` : "";
     await galleyType(g, cmd, 18);
     if (!plan) {
-      if (cmd === "claw --version") galleyLine(g, "claw 0.10.0");
+      if (cmd === "claw --version") galleyLine(g, "claw 1.0.0");
       else if (cmd === "help" || cmd === "claw" || cmd === "claw help") galleyLine(g, "This desk replays recorded output. Pick one of the commands on the left.", "ui");
       else galleyLine(g, "Not recorded for this page. Pick one of the commands on the left; the output of those is real.", "ui");
       busy = false; return;
@@ -671,13 +671,16 @@ function index() {
     ["Claw mode", "Pointers, <code>alloc</code> / <code>free</code>, <code>defer</code>, any C function through <code>extern fn</code>, <code>cast</code>, <code>sizeof</code>."],
     ["Abstraction", "Templates (<code>fn max[T]</code>, <code>type Pair[A, B]</code>), modules with <code>use</code>, a hash map and string functions in the standard library, functions as values."],
     ["Compile time", "<code>const big int = twice(limit)</code> runs while the program builds."],
-    ["Threads", "<code>par.spawn(work, x)</code> and <code>par.join(t)</code>. A task takes its input with <code>own</code> and hands back its result: no data races by construction."],
+    ["Threads", "<code>par.map(xs, f)</code> and <code>par.build(n, f)</code> spread work over every core; <code>par.spawn(work, x)</code> and <code>par.join(t)</code> run one task. Tasks share no memory: no data races by construction."],
+    ["C libraries", "<code>use c \"zlib.h\"</code> and <code>link \"z\"</code> call a C library with no hand-written declarations, structs by value included. Callbacks with <code>cast[*u8](f)</code>."],
+    ["Flight recorder", "Start a program with <code>CLAW_RECORD=crash.clawtrace</code>: if it traps it leaves a small file, and <code>claw why crash.clawtrace app.claw</code> replays the crash anywhere."],
+    ["Packages", "<code>claw.pkg</code>, <code>claw get</code> and a lock file with a SHA-256 of every package's tree. A folder or a git URL; no registry."],
     ["SIMD", "<code>f64x2</code>, <code>f32x4</code>, <code>i32x4</code> with <code>vload</code>, <code>vstore</code>, <code>lane</code>, <code>fma</code>. NEON on arm64, SSE on x86-64."],
     ["Build modes", "<code>claw run</code>: every check, plus heap misuse and leaks. <code>claw build</code>: optimized, unproven checks stay. <code>--fast</code>: no checks, risk like C."],
-    ["Tools", "<code>run build test why fix check fmt sig ctx audit card lsp</code>, and <code>-g</code> so lldb stops on source lines."],
+    ["Tools", "<code>run build test why fix check fmt sig ctx audit card cdecl get lsp</code>, and <code>-g</code> so lldb stops on source lines."],
     ["Optimizer", "SSA, inlining, constant folding, repeated work removed, invariants hoisted out of loops, register allocation, proven checks removed."],
     ["Targets", "macOS arm64, macOS x86-64, ARM64 Linux."],
-    ["Size", "About 25,000 lines of Rust, no crates; about 15,000 lines of the same compiler in Claw; a standard library under 900 lines; about 2,500 tests."],
+    ["Size", "About 29,000 lines of Rust, no crates; about 15,700 lines of the same compiler in Claw; a standard library of about 1,300 lines; about 2,500 tests."],
   ];
   $("#index").innerHTML = I.map(([t, d]) => `<div><dt>${t}</dt><dd>${d}</dd></div>`).join("");
 }
@@ -735,7 +738,7 @@ function palette() {
   const ITEMS = [
     ["The question", "§01", go("#question")], ["The language on one page", "§02", go("#prompt")], ["Paw and Claw", "§03", go("#gears")],
     ["The compiler marks your work", "§04", go("#desk")], ["Signatures and contracts", "§05", go("#truth")], ["Measured", "§06", go("#numbers")],
-    ["Source to signed binary", "§07", go("#metal")], ["Everything in 0.10", "§08", go("#spec")], ["The fine print", "§09", go("#limits")], ["Start", "§10", go("#start")],
+    ["Source to signed binary", "§07", go("#metal")], ["Everything in 1.0", "§08", go("#spec")], ["The fine print", "§09", go("#limits")], ["Start", "§10", go("#start")],
     ["claw test pick.claw", "run", () => window.__desk("claw test pick.claw")], ["claw why avg.claw", "run", () => window.__desk("claw why avg.claw")],
     ["claw fix move.claw", "run", () => window.__desk("claw fix move.claw")], ["claw audit paw_and_claw.claw", "run", () => window.__desk("claw audit paw_and_claw.claw")],
     ["Switch Paw / Claw mode", "action", () => $("#mode").click()], ["Show the layout grid", "action", () => document.documentElement.classList.toggle("grid-on")],

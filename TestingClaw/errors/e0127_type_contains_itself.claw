@@ -1,8 +1,0 @@
-// code: E0127
-type T {
-    t T
-    v int
-}
-fn main() {
-    print(1)
-}

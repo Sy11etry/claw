@@ -1,5 +1,0 @@
-use hole
-
-fn main() {
-    print("x")
-}

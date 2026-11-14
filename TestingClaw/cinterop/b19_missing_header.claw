@@ -1,6 +1,0 @@
-// expect-compile-error
-use c "no_such_header_here.h"
-
-fn main() {
-    print("never")
-}

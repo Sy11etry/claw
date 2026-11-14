@@ -17,3 +17,5 @@ Real measurements on this machine, median of 5 runs. `claw build` keeps every ch
 Compiler speed: 44004 lines in 303.1 ms, about 145,194 lines/s (full build to a signed binary).
 
 Note on this run (0.13, 2026-11-14): the machine was not idle (load average about 4), so compare the ratio columns. They match 0.12. Compile speed is the same as in 0.12 within noise (the compiler's own work did not change). Printing floats, measured separately on 2 million `print(x)` calls (best of 3): 3.4 s in 0.11, 9.4 s in 0.12 (shortest-text search from one digit), 4.4 s in 0.13 (search starts at 15 digits, 6 for `f32`). The flight recorder costs nothing unless `CLAW_RECORD` is set: one `getenv` at the first `fs.read`, `os.env` or `os.args`. Not measured: the cost with recording on.
+
+Note on 1.0 (2026-11-14): the compiler is the same as 0.13, so the numbers above stand; only the version number changed. Not re-measured.

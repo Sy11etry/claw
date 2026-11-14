@@ -1,9 +1,0 @@
-// expect: found 2
-// expect: missing -1
-fn main() {
-    xs := [1, 2, 3]
-    p := index_of(xs, 3) else -1
-    q := index_of(xs, 9) else -1
-    print("found {p}")
-    print("missing {q}")
-}

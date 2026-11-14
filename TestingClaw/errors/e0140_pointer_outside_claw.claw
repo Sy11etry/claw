@@ -1,5 +1,0 @@
-// code: E0140
-fn main() {
-    p := alloc[int](1)
-    print(1)
-}

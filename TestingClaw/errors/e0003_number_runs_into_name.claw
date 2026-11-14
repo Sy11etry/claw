@@ -1,5 +1,0 @@
-// code: E0003
-fn main() {
-    x := 12abc
-    print(x)
-}

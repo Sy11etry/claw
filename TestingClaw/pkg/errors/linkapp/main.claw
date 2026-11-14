@@ -1,5 +1,0 @@
-use geo
-
-fn main() {
-    print("sq {geo.square(3)}")
-}

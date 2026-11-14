@@ -1,227 +1,228 @@
-# Спецификация Claw 0.13
+# Claw 1.0 specification
 
-Краткая справка для людей: `docs/CARD.md`. Здесь точные правила.
+A short reference for people is `docs/CARD.md`. This file has the exact rules.
 
-## Лексика
+## Lexical rules
 
-Комментарий: `//` до конца строки. Числа: десятичные, `0x`, `0b`, с `_` между цифрами; дробные `1.5`, `1e3`, `2.5e-3`. Символ `'a'` имеет тип `u8`. Строки: `\n \t \r \0 \\ \"`, а `{выражение}` подставляет значение (`{{` и `}}` дают скобку).
+A comment is `//` to the end of the line. Numbers: decimal, `0x`, `0b`, with `_` between digits; floating-point `1.5`, `1e3`, `2.5e-3`. The character `'a'` has type `u8`. Strings: `\n \t \r \0 \\ \"`, and `{expression}` inserts a value (`{{` and `}}` give a brace).
 
-Конец строки завершает инструкцию, кроме случаев: строка кончается бинарным оператором, оператором присваивания, запятой, открывающей скобкой, `and`, `or` или `not`; либо строка находится внутри `()` или `[]`. Перед `{` тела функции переводы строк разрешены. `else` пишется на одной строке с закрывающей `}`.
+The end of a line ends a statement, except when the line ends with a binary operator, an assignment operator, a comma, an opening bracket, `and`, `or` or `not`, or when the line is inside `()` or `[]`. Line breaks are allowed before the `{` of a function body. `else` is written on the same line as the closing `}`.
 
-## Приоритеты, от слабого к сильному
+## Precedence, weakest to strongest
 
-`or`, `and`, `not`, сравнения (`== != < <= > >=`), `+ - | ^`, `* / % << >> &`, унарные `- ~`.
+`or`, `and`, `not`, comparisons (`== != < <= > >=`), `+ - | ^`, `* / % << >> &`, unary `- ~`.
 
-## Семантика
+## Semantics
 
-- Операнды и аргументы вычисляются слева направо; `and` и `or` с коротким замыканием.
-- Границы `for i in a..b` вычисляются один раз, диапазон полуоткрытый; при `a >= b` тело не выполняется.
-- `int` это `i64`. Знаковые типы завершают программу при переполнении `+ - *`, унарного `-` и `MIN / -1`.
-- Беззнаковые типы заворачиваются по модулю 2^N.
-- Литерал принимает тип из контекста; целый литерал подходит и для дробного типа. Других неявных преобразований нет.
-- `T(x)`: в знаковый тип завершает программу, если значение не помещается; в беззнаковый обрезает старшие биты. Из дробного в целое отбрасывает дробную часть, NaN и выход за диапазон завершают программу.
-- Структуры, варианты и массивы: значения. Присваивание копирует; параметры доступны только для чтения.
-- Раскладка: структуры как в C, в порядке объявления. У вариантов, `?T` и `T ! E` 8 байт метки, затем данные.
-- Индекс вне массива завершает программу. Постоянный индекс вне массива это ошибка компиляции.
-- Массив нельзя менять внутри `for`, который его обходит.
-- `?` передаёт отсутствие или ошибку выше; в `main` печатает `error: ...` и завершает программу с кодом 1.
-- Блок `else` обязан выйти (`ret`, `fail`, `break`, `continue`). `else` и литерал структуры в заголовке `if/for/match` пишутся в скобках.
-- Сравнения дробных с NaN ложны, кроме `!=`.
-- `/` и `%` при делителе 0 завершают программу. `MIN % -1` равно 0.
-- `<<` и `>>`: сдвиг на величину вне `0..N-1` (N это размер типа в битах) завершает программу. У знаковых `<<` с потерей значащих битов тоже завершает программу. `>>` у знаковых арифметический, у беззнаковых логический.
-- Срез вне массива (`a[i..j]` с `i > j` или `j` больше длины) завершает программу с причиной `slice bounds out of range`.
-- Дробные числа печатаются кратчайшей записью, которая читается обратно в то же число (до 17 знаков для `f64`, до 9 для `f32`): `0.1`, не `0.10000000000000001`. Экспонента только при `|x| >= 1e16` или `0 < |x| < 1e-4` (кроме чисел от `1e16` до `1e17`, которым нужны все 17 знаков: их `%g` пишет без экспоненты); `NaN`, `inf`, `-inf` как есть.
-- Аварийное завершение: сообщение в stderr `trap: <причина> at <файл>:<строка>:<колонка>`, код выхода 101.
-- Переполнение стека (бесконечная рекурсия) печатает `stack overflow` в stderr и завершает программу сигналом (код 139); указатель в никуда в `claw fn` печатает `bad pointer`. Стек главного потока 64 МБ, у задач `par` тоже 64 МБ.
+- Operands and arguments are evaluated left to right; `and` and `or` short-circuit.
+- The bounds of `for i in a..b` are evaluated once, the range is half-open; when `a >= b` the body does not run.
+- `int` is `i64`. Signed types end the program on overflow of `+ - *`, of unary `-` and of `MIN / -1`.
+- Unsigned types wrap modulo 2^N.
+- A literal takes its type from the context; an integer literal also fits a floating-point type. There are no other implicit conversions.
+- `T(x)`: to a signed type, ends the program if the value does not fit; to an unsigned type, drops the high bits. From floating point to an integer it drops the fraction; NaN and out-of-range values end the program.
+- Structs, variants and arrays are values. Assignment copies; parameters are read-only.
+- Layout: structs as in C, fields in declaration order. Variants, `?T` and `T ! E` have an 8-byte tag followed by the data.
+- An index outside an array ends the program. A constant index outside an array is a compile error.
+- An array cannot be changed inside a `for` that walks over it.
+- `?` passes an absence or an error up; in `main` it prints `error: ...` and ends the program with exit code 1.
+- An `else` block must leave (`ret`, `fail`, `break`, `continue`). In the header of `if/for/match`, `else` and struct literals are written in parentheses.
+- Comparisons of floating-point numbers with NaN are false, except `!=`.
+- `/` and `%` by 0 end the program. `MIN % -1` is 0.
+- `<<` and `>>`: a shift by an amount outside `0..N-1` (N is the size of the type in bits) ends the program. For signed types, a `<<` that loses significant bits also ends the program. `>>` is arithmetic for signed types and logical for unsigned.
+- A slice outside the array (`a[i..j]` with `i > j`, or `j` larger than the length) ends the program with the reason `slice bounds out of range`.
+- Floating-point numbers print in the shortest form that reads back as the same number (up to 17 digits for `f64`, 9 for `f32`): `0.1`, not `0.10000000000000001`. An exponent is used only when `|x| >= 1e16` or `0 < |x| < 1e-4` (except numbers from `1e16` to `1e17`, which need all 17 digits: `%g` writes those without an exponent); `NaN`, `inf`, `-inf` as they are.
+- A trap: the message `trap: <reason> at <file>:<line>:<column>` on stderr, exit code 101.
+- A stack overflow (endless recursion) prints `stack overflow` on stderr and ends the program with a signal (exit code 139); a wild pointer in `claw fn` prints `bad pointer`. The main thread's stack is 64 MB, and so is the stack of every `par` task.
 
-## Владение
+## Ownership
 
-Значение принадлежит одному владельцу. Типы, владеющие памятью: `[]T`, `str`, типы со своим `drop`, и всё, что их содержит.
+A value has one owner. The types that own memory are `[]T`, `str`, types with their own `drop`, and everything that contains them.
 
-- Параметр по умолчанию только читается и живёт на время вызова. `&T` разрешает менять значение; вызов пишется `f(&x)`. `own x T` забирает значение.
-- Потребляют значение: объявление, присваивание, `ret`, `fail`, `own`-аргумент, поле структуры, элемент массива, `?`, `else`.
-- Перемещать можно только целую локальную переменную или `own`-параметр. Поля, элементы, срезы, параметры для чтения и привязки `for` и `match` перемещать нельзя.
-- После перемещения переменную нельзя читать, пока ей не присвоят новое значение. Перемещение внутри цикла запрещено, если значение не восстановлено к следующему проходу.
-- В конце области владеющие значения освобождаются в порядке, обратном объявлению. Временные значения живут до конца инструкции. `defer` и освобождение идут в одной очереди.
-- При присваивании старое значение освобождается после вычисления нового. При записи через голый указатель старое значение не освобождается.
-- Запись `x` как `for`-субъекта или `match`-субъекта запрещает менять и перемещать его внутри тела.
-- В одном вызове нельзя передать одно и то же с `&` дважды или прочитать составное значение, которое другой аргумент меняет через `&`. В `claw fn` эта проверка не действует.
-- `[]T` и `str` в памяти: указатель, длина, ёмкость. Ёмкость 0 значит, что байты не свои: статические данные или срез.
+- A parameter is read-only by default and lives for the duration of the call. `&T` allows changing the value; the call is written `f(&x)`. `own x T` takes the value.
+- These consume a value: a declaration, an assignment, `ret`, `fail`, an `own` argument, a struct field, an array element, `?`, `else`.
+- Only a whole local variable or an `own` parameter can be moved. Fields, elements, slices, read-only parameters and the bindings of `for` and `match` cannot.
+- After a move the variable cannot be read until it is given a new value. A move inside a loop is forbidden unless the value is restored before the next pass.
+- At the end of a scope the owning values are freed in the reverse order of declaration. Temporary values live to the end of the statement. `defer` and freeing share one queue.
+- On assignment the old value is freed after the new one is computed. When writing through a raw pointer the old value is not freed.
+- Using `x` as the subject of a `for` or a `match` forbids changing or moving it inside the body.
+- In one call the same thing cannot be passed with `&` twice, nor can a compound value be read while another argument changes it through `&`. In `claw fn` this check does not apply.
+- `[]T` and `str` in memory: a pointer, a length, a capacity. Capacity 0 means the bytes are not owned: static data or a slice.
 
-## Коготь
+## Claw mode
 
-- Указатели, `&`, `*`, `alloc`, `free`, `cast`, `defer` и вызовы `extern` существуют только внутри `claw fn`.
-- `&` требует изменяемую переменную. Запись через указатель не требует `mut` у самого указателя.
-- `p + n` и `p - n` сдвигают на целые элементы, `q - p` даёт число элементов. `p[i]` границ не проверяет.
-- Арифметика и индексы массивов проверяются и в `claw fn`.
-- `alloc[T](n)` завершает программу при неверном размере и нехватке памяти.
-- `defer` выполняется при выходе из своего блока, в порядке, обратном объявлению. Значение `ret` вычисляется до `defer`. Внутри `defer` нельзя `ret`, `fail`, `?`. При аварийном завершении `defer` не выполняются; при `?` в `main` выполняются.
+- Pointers, `&`, `*`, `alloc`, `free`, `cast`, `defer` and `extern` calls exist only inside `claw fn`.
+- `&` needs a mutable variable. Writing through a pointer does not need `mut` on the pointer itself.
+- `p + n` and `p - n` move by whole elements, `q - p` gives a number of elements. `p[i]` does not check bounds.
+- Arithmetic and array indices are checked in `claw fn` too.
+- `alloc[T](n)` ends the program on a bad size or when memory runs out.
+- `defer` runs when its block is left, in the reverse order of declaration. The value of `ret` is computed before `defer`. Inside `defer` there can be no `ret`, `fail` or `?`. On a trap `defer` does not run; on `?` in `main` it does.
 
-## Функция как значение
+## Function as a value
 
-Тип: `fn(T, &U, own V) R ! E +mem +io`. Значением становится только именованная функция и только там, где тип известен: `f fn(int) int = g`, аргумент, поле, элемент, `ret`. Вызов: `f(x)`, `s.f(x)`, `a[i](x)`, `g()(x)`. Эффекты вызова это эффекты из типа. Сравнивать значения нельзя.
+The type is `fn(T, &U, own V) R ! E +mem +io`. Only a named function becomes a value, and only where the type is known: `f fn(int) int = g`, an argument, a field, an element, `ret`. A call is `f(x)`, `s.f(x)`, `a[i](x)`, `g()(x)`. The effects of a call are the effects in the type. Values cannot be compared.
 
-## Виды
+## Views
 
-`x := e`, где `e` это поле, элемент или срез локальной переменной, а тип владеет памятью, не копирует и не перемещает: `x` это вид только для чтения, а корень нельзя менять или перемещать до конца блока, в котором объявлен `x`. `[N]T` передаётся в параметр `[]T` как вид.
+`x := e`, where `e` is a field, an element or a slice of a local variable and the type owns memory, neither copies nor moves: `x` is a read-only view, and the root cannot be changed or moved until the end of the block where `x` is declared. `[N]T` is passed to a `[]T` parameter as a view.
 
-## Шаблоны
-Варианты тоже могут быть шаблонами: `type O[T] = S{v T} | N`. Тип берётся из контекста или пишется явно: `S[int]{1}`. Вариант без полей требует известного типа.
+## Generics
 
-Параметры типов пишутся с большой буквы. Для каждого использованного набора типов создаётся отдельная копия, и проверяется именно она. Параметры выводятся из значений аргументов; литерал влияет только если параметр больше ничем не определён.
+Variants can be generic too: `type O[T] = S{v T} | N`. The type comes from the context or is written out: `S[int]{1}`. A variant without fields needs a known type.
 
-## Модули
+Type parameters are written with a capital letter. A separate copy is made for every set of types that is used, and that copy is what gets checked. Parameters are inferred from the values of the arguments; a literal counts only if nothing else determines the parameter.
 
-Один файл это один модуль. `use a.b` ищет `a/b.claw` рядом с файлом, затем в `std`, затем в пакетах из `claw.pkg` (см. «Пакеты»). Имя модуля в коде: последний сегмент. Снаружи видно только `pub`. Функция без префикса ищется в текущем модуле, затем среди `pub`-функций модуля, объявившего тип первого аргумента. Неиспользованный `use` это ошибка.
+## Modules
 
-## Вызовы C
+One file is one module. `use a.b` looks for `a/b.claw` next to the file, then in `std`, then in the packages from `claw.pkg` (see "Packages"). The name of the module in code is its last segment. Only `pub` is visible from outside. A function without a prefix is looked up in the current module, then among the `pub` functions of the module that declared the type of the first argument. An unused `use` is an error.
 
-`extern fn` принимает и возвращает числа, `bool`, указатели и структуры из таких полей (и массивов и структур из них); `str`, `[]T`, `own`, варианты и `?T` в C не отдать (`E0149`). Строковый литерал там, где ждут `*u8`, передаётся как адрес байтов с нулём в конце. `...` в конце разрешает вариативные аргументы; `f32` при этом становится `f64`.
+## Calling C
 
-### Заголовки C и библиотеки
+`extern fn` takes and returns numbers, `bool`, pointers, and structs made of such fields (and arrays and structs of them); `str`, `[]T`, `own`, variants and `?T` cannot be given to C (`E0149`). A string literal where `*u8` is expected is passed as the address of its bytes with a terminating zero. `...` at the end allows variadic arguments; `f32` becomes `f64` there.
 
-`use c "zlib.h"` читает заголовок и превращает объявления в `extern fn`, `type` и `const` (имена констант в нижнем регистре: `Z_OK` становится `z_ok`; C `int` это `i32`, `long` это `int`, указатель на структуру это `*u8`-подобный указатель на тип). Мини-препроцессор понимает `#define`, `#if/#ifdef`, `#include`; чего не понимает, пропускает. Заголовок ищется рядом с файлом, в папках `-I dir` и в системных папках (SDK macOS, `/usr/include`); нет такого: `E0181`. Что получилось, показывает `claw cdecl zlib.h`.
+### C headers and libraries
 
-Библиотеку подключает `link "z"` в исходнике или `-l z` в командной строке (`-L dir` добавляет папку поиска). В Mach-O это `LC_LOAD_DYLIB` (системные библиотеки берутся по имени `/usr/lib/libNAME.dylib`: файла на диске у них нет, они в кэше dyld), в ELF это `DT_NEEDED`.
+`use c "zlib.h"` reads the header and turns its declarations into `extern fn`, `type` and `const` (constant names in lower case: `Z_OK` becomes `z_ok`; the C `int` is `i32`, `long` is `int`, a pointer to a struct is a pointer to that type). A mini preprocessor understands `#define`, `#if/#ifdef` and `#include`, and skips what it does not understand. The header is looked up next to the file, in the folders given with `-I dir` and in the system folders (the macOS SDK, `/usr/include`); if there is none, `E0181`. `claw cdecl zlib.h` shows the result.
 
-Колбэк: `cast[*u8](f)` отдаёт C функцию `f`, обычную `fn` или `claw fn` (до 6 параметров, числа, `bool` и указатели, без `own`, без шаблона; иначе `E0180`). Структура до 16 байт передаётся в C и возвращается из C по значению по правилам ABI цели (arm64: до четырёх одинаковых дробных полей идут в регистрах `v`, остальное в одном-двух регистрах `x`; x86-64: каждые 8 байт в регистре `rdi..` или `xmm`). Структура больше 16 байт только возвращается из C (память даёт вызывающий), как аргумент по значению недопустима (`E0149`: передай указатель). Если после раскладки структур на регистры аргументов больше, чем регистров у C, это тоже `E0149`. `claw why` не может проиграть такой вызов заново (интерпретатор их не исполняет).
+A library is linked with `link "z"` in the source or `-l z` on the command line (`-L dir` adds a search folder). In Mach-O this is `LC_LOAD_DYLIB` (system libraries are taken by name, `/usr/lib/libNAME.dylib`: they have no file on disk, they live in the dyld cache); in ELF it is `DT_NEEDED`.
 
-Заголовок читается с `sizeof` в размерах массивов и в `#define`; имена C, которые Claw пришлось переименовать (ключевое слово Claw, регистр), `static inline` функции и макросы, которых нет в Claw, `cdecl` показывает заметками, а при ошибке `E0101` называет причину. Незакрытый `#if` это `E0184`. Перед записью файла проверяется, что каждая вызываемая C-функция есть в одной из загружаемых библиотек: нет, это `E0185` (`static inline` в заголовке не символ библиотеки).
+A callback: `cast[*u8](f)` hands C the function `f`, an ordinary `fn` or a `claw fn` (up to 6 parameters, numbers, `bool` and pointers, no `own`, not generic; otherwise `E0180`). A struct of up to 16 bytes is passed to C and returned from C by value according to the ABI of the target (arm64: up to four identical floating-point fields go in `v` registers, the rest in one or two `x` registers; x86-64: every 8 bytes in a register `rdi..` or `xmm`). A struct larger than 16 bytes can only be returned from C (the caller supplies the memory); as an argument by value it is not allowed (`E0149`: pass a pointer). If after laying structs out in registers there are more arguments than C has registers, that is `E0149` as well. `claw why` cannot replay such a call (the interpreter does not run them).
 
-Структура, которую C раскладывает иначе, чем Claw (`packed`, `aligned`, `#pragma pack`, векторный тип, или структура, которая содержит такую по значению), не переводится. Если программа называет её по имени, это `E0182`; указатель на неё в прототипе становится `*u8`, и её поля читаются через `*u8` по смещениям.
+The header is read with `sizeof` in array sizes and in `#define`. C names that Claw had to rename (a Claw keyword, letter case), `static inline` functions and macros that Claw does not have are shown by `cdecl` as notes, and on an `E0101` error it names the reason. An unclosed `#if` is `E0184`. Before the file is written, the compiler checks that every C function that is called is in one of the loaded libraries; if not, that is `E0185` (a `static inline` in a header is not a symbol of the library).
 
-## Пакеты
+A struct that C lays out differently from Claw (`packed`, `aligned`, `#pragma pack`, a vector type, or a struct that contains such a struct by value) is not translated. If the program names it, that is `E0182`; a pointer to it in a prototype becomes `*u8`, and its fields are read through `*u8` at offsets.
 
-Файл `claw.pkg` рядом с главным файлом: строки `имя источник`, источник это папка или адрес git (`url#тег`). `claw get` скачивает git-пакеты в `.claw/pkg`, считает SHA-256 всего дерева и пишет `claw.lock`: строку `имя источник хэш` на пакет. Дальше `use имя` или `use имя.модуль`. `claw run`, `claw build` и `claw check` перед использованием проверяют пакет по `claw.pkg` и замку: если файлы изменились, источник сменился или пакета нет в замке, это `E0183` с подсказкой `claw get --update` (или `claw get`). `claw get` без `--update` не принимает новый источник из `claw.pkg`. Пакет может сам зависеть от других: его `claw.pkg` читается тоже (зависимости записываются в замок по полному пути), два разных источника одного имени отвергаются. Пустой пакет (нет файлов `.claw`) это ошибка. `claw fix` не трогает копии в `.claw/pkg`.
+## Packages
 
-## Чёрный ящик: `CLAW_RECORD` и `claw why x.clawtrace`
+A file `claw.pkg` next to the main file: lines `name source`, where the source is a folder or a git address (`url#tag`). `claw get` downloads git packages into `.claw/pkg`, computes the SHA-256 of the whole tree and writes `claw.lock`: one line `name source hash` per package. After that, `use name` or `use name.module`. Before using a package, `claw run`, `claw build` and `claw check` check it against `claw.pkg` and the lock: if the files changed, the source changed, or the package is not in the lock, that is `E0183` with the hint `claw get --update` (or `claw get`). `claw get` without `--update` does not accept a new source from `claw.pkg`. A package can itself depend on others: its `claw.pkg` is read as well (dependencies go into the lock under their full path), and two different sources for one name are rejected. An empty package (no `.claw` files) is an error. `claw fix` does not touch the copies in `.claw/pkg`.
 
-Программа, запущенная с переменной окружения `CLAW_RECORD=путь`, запоминает то, что пришло извне: аргументы (`os.args()` и `argv[0]`), переменные окружения, которые она спросила (`os.env`), и файлы, которые она прочитала целиком (`fs.read`, включая неудачи с кодом `errno`). Если программа завершается по `trap` (код 101), при выходе она пишет всё это в файл `путь`. Без переменной (и если программа завершилась хорошо) ничего не записывается и не пишется. Записанные входы занимают не больше 4 МБ; сверх этого файл получает пометку `truncated`.
+## The flight recorder: `CLAW_RECORD` and `claw why x.clawtrace`
 
-`claw why x.clawtrace [файл.claw]` исполняет `main` исходника в интерпретаторе, подставляя записанные аргументы, окружение и файлы вместо настоящих, и печатает обычный отчёт `why`. Перед ним одна строка: `replayed the recorded run: the same trap happens here`, если падение совпало с записанным текстом (файл, строка, колонка), иначе `not the same crash` или `not reproduced`: скорее всего, это не тот исходник. Исходник без указания ищется по `argv[0]` с `.claw`. Падения по сигналу (переполнение стека, плохой указатель) и ввод из C-функций не записываются. Формат файла описан в `compiler/src/trace.rs`.
+A program started with the environment variable `CLAW_RECORD=path` remembers what came in from outside: its arguments (`os.args()` and `argv[0]`), the environment variables it asked for (`os.env`), and the files it read whole (`fs.read`, failures included, with their `errno`). If the program ends in a trap (exit code 101), it writes all of this to the file `path` on the way out. Without the variable (and if the program ended well) nothing is recorded and nothing is written. The recorded inputs take at most 4 MB; beyond that the file is marked `truncated`.
 
-## Скрипты
+`claw why x.clawtrace [file.claw]` runs the `main` of the source in the interpreter, giving it the recorded arguments, environment and files instead of the real ones, and prints the usual `why` report. One line comes before it: `replayed the recorded run: the same trap happens here` if the failure matches the recorded text (file, line, column), otherwise `not the same crash` or `not reproduced`: most likely this is not the right source. Without a named source, it is looked up from `argv[0]` plus `.claw`. Crashes by signal (stack overflow, wild pointer) and input from C functions are not recorded. The format of the file is described in `compiler/src/trace.rs`.
 
-`claw file.claw arg1 arg2` собирает и сразу запускает файл, строка `#!/usr/bin/env claw` в начале допустима. Аргументы и окружение: `use os`, `os.args()`, `os.env(name)`, `os.exit(n)`.
+## Scripts
 
-## Векторы (SIMD)
+`claw file.claw arg1 arg2` builds and runs the file at once; a first line `#!/usr/bin/env claw` is allowed. Arguments and environment: `use os`, `os.args()`, `os.env(name)`, `os.exit(n)`.
 
-Только в `claw fn` (`E0905`). Типы `f64x2`, `f32x4`, `i32x4`: 128 бит, один регистр. Вектор бывает локальной переменной, временным значением, параметром (среди первых восьми) или результатом `claw fn`; полем, элементом, `?T`, целью указателя или частью типа функции он быть не может (`E0906`). Вектор передаётся и возвращается в регистрах `v0-v7`, `v0` (на x86-64: в двух слотах, результат в `rax`/`rdx`); в обычной `fn` и в `extern fn` его нет (`E0905`). Конструктор `f64x2(x)` размножает число по дорожкам.
+## Vectors (SIMD)
 
-`+ - *` и унарный `-` работают по дорожкам, `/` только у дробных (`E0909`). Операнды одного вектора, смешать вектор и число нельзя (`E0104`). Целые дорожки `i32x4` заворачиваются. `print` вектор не печатает (`E0909`).
+Only in `claw fn` (`E0905`). The types `f64x2`, `f32x4`, `i32x4` are 128 bits, one register. A vector can be a local variable, a temporary, a parameter (among the first eight) or the result of a `claw fn`; it cannot be a field, an element, `?T`, the target of a pointer or part of a function type (`E0906`). A vector is passed and returned in registers `v0-v7`, `v0` (on x86-64: in two slots, the result in `rax`/`rdx`); there are none in an ordinary `fn` or in an `extern fn` (`E0905`). The constructor `f64x2(x)` copies a number into all lanes.
 
-| Встроенная | Смысл |
+`+ - *` and unary `-` work lane by lane, `/` only on floating-point vectors (`E0909`). The operands must be the same vector type; a vector and a number cannot be mixed (`E0104`). The integer lanes of `i32x4` wrap. `print` does not print a vector (`E0909`).
+
+| Built-in | Meaning |
 |---|---|
-| `vload(p)` | прочитать 16 байт по указателю на `f64`, `f32` или `i32` (без выравнивания) |
-| `vstore(p, v)` | записать вектор |
-| `lane(v, i)` | дорожка `i`, число-литерал (`E0908`) |
-| `fma(a, b, c)` | `a * b + c` для `f64x2` и `f32x4` |
+| `vload(p)` | read 16 bytes from a pointer to `f64`, `f32` or `i32` (unaligned) |
+| `vstore(p, v)` | write a vector |
+| `lane(v, i)` | lane `i`, a number literal (`E0908`) |
+| `fma(a, b, c)` | `a * b + c` for `f64x2` and `f32x4` |
 
-В режиме проверки `vload` и `vstore` проверяют все 16 байт. Векторы работают на обеих целях macOS (NEON на arm64, SSE на x86-64; `i32x4 * i32x4` на x86-64 требует SSE4.1, `fma` требует FMA3). Для Linux векторы собираются как на arm64.
+In checked mode `vload` and `vstore` check all 16 bytes. Vectors work on both macOS targets (NEON on arm64, SSE on x86-64; `i32x4 * i32x4` on x86-64 needs SSE4.1, `fma` needs FMA3). For Linux, vectors are built as on arm64.
 
-## Потоки
+## Threads
 
-Потоки в Claw без общей памяти: нет мьютексов, атомиков и общих переменных, поэтому гонок нет по построению, а не по дисциплине. Три формы, все в `use par`.
+Threads in Claw have no shared memory: there are no mutexes, atomics or shared variables, so there are no data races by construction rather than by discipline. There are three forms, all in `use par`.
 
-`par.cores()` число ядер. `par.map(xs, f)`: `f` вызывается на каждом элементе (только чтение), результаты лежат в том же порядке. `par.build(n, f)`: `f(i)` для `i` от 0 до n, результаты по порядку. Работа делится на куски по ядрам, каждый кусок пишет в свой непересекающийся участок результата, поэтому ответ всегда тот же, что у обычного цикла.
+`par.cores()` is the number of cores. `par.map(xs, f)`: `f` is called on every element (read-only), and the results are in the same order. `par.build(n, f)`: `f(i)` for `i` from 0 to n, the results in order. The work is divided into chunks by cores and every chunk writes into its own separate part of the result, so the answer is always the same as that of a plain loop.
 
-`t := par.spawn(work, x)` и `par.join(t)` для одной отдельной задачи. `work` это именованная `fn(own T) R +mem`; без `+io`, без замыканий и глобальных переменных. Вход уходит в задачу через `own`, результат возвращается через `join`, поэтому гонок нет. `claw run` и `claw test` исполняют задачи по очереди, `claw build` запускает `pthread_create`.
+`t := par.spawn(work, x)` and `par.join(t)` are for one separate task. `work` is a named `fn(own T) R +mem`; no `+io`, no closures and no global variables. The input goes into the task through `own` and the result comes back through `join`, so there are no races. `claw run` and `claw test` run the tasks one after another, `claw build` starts them with `pthread_create`.
 
-## Цели сборки
+## Build targets
 
-`--target arm64` (по умолчанию, macOS), `x86_64` (macOS, запуск через Rosetta), `aarch64-linux` и `aarch64-linux-musl` (ELF, динамически с libc; только `build`). `-g` пишет DWARF: в `<out>.dSYM` для lldb на macOS (обе архитектуры), а в Linux-файл секции `.debug_*` встроены прямо в ELF.
+`--target arm64` (the default, macOS), `x86_64` (macOS, run through Rosetta), `aarch64-linux` and `aarch64-linux-musl` (ELF, dynamically linked with libc; `build` only). `-g` writes DWARF: into `<out>.dSYM` for lldb on macOS (both architectures), and on Linux the `.debug_*` sections are embedded in the ELF file itself.
 
-## Коды ошибок
+## Error codes
 
-| Код | Смысл |
+| Code | Meaning |
 |---|---|
-| E0001-E0005 | лексические: символ, строка, число, escape, символьный литерал |
-| E0101 | неизвестное имя |
-| E0102 | имя уже занято (в том числе `const` и функцией) |
-| E0103 | изменение неизменяемого |
-| E0104 | несовпадение типов |
-| E0105 | значение не читается |
-| E0106 | неверное число аргументов |
-| E0107 | функция может закончиться без `ret` |
-| E0108 | `break`/`continue` вне цикла |
-| E0109 | проблема с `main` |
-| E0110 | функция определена дважды |
-| E0111 | результат вызова не используется |
-| E0112 | неизвестный тип |
-| E0113 | недостижимый код |
-| E0114 | выражение ничего не делает |
-| E0115 | число не помещается в `int` |
-| E0116 | `mut` без изменений |
-| E0117 | блок `else` не выходит |
-| E0118 | образец не подходит к типу |
-| E0119 | неверное число имён в образце |
-| E0120 | `match` покрывает не всё |
-| E0121 | случай уже обработан |
-| E0122 | массив меняется во время обхода |
-| E0123 | тип нельзя определить из контекста |
-| E0124 | `?` или `fail` в неподходящей функции |
-| E0125 | ошибка проигнорирована |
-| E0126 | неверный размер массива |
-| E0127 | тип содержит сам себя |
-| E0128 | неверный регистр имени |
-| E0129 | нет такого поля или нельзя индексировать |
-| E0130 | постоянный индекс вне массива |
-| E0131 | сюда нельзя присвоить |
-| E0132 | неизвестный эффект |
-| E0133 | ошибка в `{...}` внутри строки |
-| E0134 | `??T` запрещён |
-| E0135 | диапазон с двумя переменными |
-| E0136 | `x...` должно быть единственным элементом |
-| E0137 | поле объявлено дважды |
-| E0138 | у `?T` нет значения ошибки |
-| E0139 | `const` нельзя вычислить при компиляции; с вызовом функции нужен явный тип |
-| E0140 | указатель или операция с памятью вне `claw fn` |
-| E0141 | `extern` вызван не из `claw fn` |
-| E0142 | `defer` вне `claw fn` |
-| E0143 | `defer` пытается выйти из функции |
-| E0144 | не удалось определить параметры шаблона или неверное их число |
-| E0145 | шаблон разворачивается бесконечно |
-| E0146 | модуль не найден, не импортирован или входит в цикл импорта |
-| E0147 | имя не объявлено `pub` |
-| E0148 | импорт не используется |
-| E0149 | тип нельзя передать в C |
-| E0150 | в Claw нет методов |
-| E0151 | значение уже перемещено |
-| E0152 | это нельзя переместить |
-| E0153 | `[x...]` для владеющего типа |
-| E0154 | тип со своим `drop` нельзя скопировать |
-| E0156 | неверный `drop` или его прямой вызов |
-| E0157 | неверное использование `&` |
-| E0158 | перекрывающиеся `&` |
-| E0160 | функция делает то, чего нет в её `+mem` / `+io` |
-| E0161 | контракт или `sure` с эффектами |
-| E0162 | `ret` в контракте там, где результата нет |
-| E0163 | неверный `old(...)` |
-| E0164 | контракт что-то меняет: `&`, перемещение, `?`, блок `else` |
-| E0165 | `sure` читает параметр `own` без `old` |
-| E0166 | контракт у `main` или `drop` |
-| E0167 | два теста с одним именем |
-| E0168 | `need` в теле функции |
-| E0171 | `const` с вызовом использует `+io` |
-| E0173 | вычисляемый `const` не может иметь такой тип: нужны простые данные или `str` |
-| E0174 | `const` не удалось вычислить: падение, нарушенный контракт, слишком долго, нужна функция C |
-| E0175 | вычисляемые `const` зависят друг от друга по кругу |
-| E0201-E0205 | синтаксис |
-| E0176 | шаблон или `extern fn` нельзя использовать как значение |
-| E0177 | функцию с `need` нельзя использовать как значение |
-| E0178 | у функции эффекты, которых нет в типе значения |
-| E0179 | значение, содержащее само себя, нельзя напечатать целиком |
-| E0180 | функцию нельзя отдать в C как колбэк: шаблон, `extern`, `need`, больше 6 параметров, не число и не указатель |
-| E0181 | заголовок C не найден: добавь его папку через `-I` |
-| E0182 | структура C раскладывается иначе, чем в Claw (`packed`, `aligned`, `#pragma pack`, векторный тип): её имя нельзя использовать, читай поля через `*u8` |
-| E0183 | пакет не совпадает с `claw.pkg` и `claw.lock`: изменены файлы или источник, либо пакета нет в замке; `claw get --update` (или `claw get`) |
-| E0184 | заголовок C сломан (например, не закрыт `#if`) |
-| E0185 | вызываемой C-функции нет ни в одной загружаемой библиотеке, либо это `static inline` из заголовка |
-| E0900 | не используется (раньше: зарезервированная возможность) |
-| E0901 | функция слишком велика для этой версии |
-| E0902 | форматтер отказался менять файл |
-| E0905 | вектор вне `claw fn` |
-| E0906 | вектор там, где ему нельзя быть: поле, элемент, указатель, `?T`, аргумент шаблона, параметр после восьмого |
-| E0907 | не используется (раньше: вектор на x86-64) |
-| E0908 | неверное использование `vload`, `vstore`, `lane`, `fma` |
-| E0909 | операция, которой у вектора нет: `/` для целых, `print` |
+| E0001-E0005 | lexical: a character, a string, a number, an escape, a character literal |
+| E0101 | unknown name |
+| E0102 | the name is already taken (by a `const` or a function too) |
+| E0103 | changing something immutable |
+| E0104 | type mismatch |
+| E0105 | the value is never read |
+| E0106 | wrong number of arguments |
+| E0107 | a function can end without `ret` |
+| E0108 | `break`/`continue` outside a loop |
+| E0109 | a problem with `main` |
+| E0110 | a function defined twice |
+| E0111 | the result of a call is not used |
+| E0112 | unknown type |
+| E0113 | unreachable code |
+| E0114 | the expression does nothing |
+| E0115 | the number does not fit in `int` |
+| E0116 | `mut` without a change |
+| E0117 | an `else` block does not leave |
+| E0118 | the pattern does not fit the type |
+| E0119 | wrong number of names in a pattern |
+| E0120 | `match` does not cover everything |
+| E0121 | the case is already handled |
+| E0122 | an array is changed while it is walked |
+| E0123 | the type cannot be determined from the context |
+| E0124 | `?` or `fail` in a function that cannot take it |
+| E0125 | an error is ignored |
+| E0126 | wrong array size |
+| E0127 | a type contains itself |
+| E0128 | wrong letter case of a name |
+| E0129 | no such field, or it cannot be indexed |
+| E0130 | a constant index outside the array |
+| E0131 | cannot assign here |
+| E0132 | unknown effect |
+| E0133 | an error inside `{...}` in a string |
+| E0134 | `??T` is forbidden |
+| E0135 | a range with two variables |
+| E0136 | `x...` must be the only element |
+| E0137 | a field declared twice |
+| E0138 | `?T` has no error value |
+| E0139 | a `const` cannot be computed at compile time; with a function call it needs an explicit type |
+| E0140 | a pointer or a memory operation outside `claw fn` |
+| E0141 | `extern` called from outside `claw fn` |
+| E0142 | `defer` outside `claw fn` |
+| E0143 | `defer` tries to leave the function |
+| E0144 | the generic parameters cannot be determined, or their number is wrong |
+| E0145 | a generic expands forever |
+| E0146 | module not found, not imported, or part of an import cycle |
+| E0147 | the name is not declared `pub` |
+| E0148 | an import is not used |
+| E0149 | the type cannot be passed to C |
+| E0150 | Claw has no methods |
+| E0151 | the value has already been moved |
+| E0152 | this cannot be moved |
+| E0153 | `[x...]` for an owning type |
+| E0154 | a type with its own `drop` cannot be copied |
+| E0156 | a wrong `drop`, or a direct call of it |
+| E0157 | wrong use of `&` |
+| E0158 | overlapping `&` |
+| E0160 | a function does something that its `+mem` / `+io` does not say |
+| E0161 | a contract or `sure` with effects |
+| E0162 | `ret` in a contract where there is no result |
+| E0163 | wrong `old(...)` |
+| E0164 | a contract changes something: `&`, a move, `?`, an `else` block |
+| E0165 | `sure` reads an `own` parameter without `old` |
+| E0166 | a contract on `main` or `drop` |
+| E0167 | two tests with the same name |
+| E0168 | `need` in the body of a function |
+| E0171 | a `const` with a call uses `+io` |
+| E0173 | a computed `const` cannot have this type: it needs plain data or `str` |
+| E0174 | a `const` could not be computed: a trap, a broken contract, too long, a C function is needed |
+| E0175 | computed `const`s depend on each other in a circle |
+| E0201-E0205 | syntax |
+| E0176 | a generic or an `extern fn` cannot be used as a value |
+| E0177 | a function with `need` cannot be used as a value |
+| E0178 | the function has effects that the type of the value does not have |
+| E0179 | a value that contains itself cannot be printed whole |
+| E0180 | the function cannot be given to C as a callback: a generic, an `extern`, a `need`, more than 6 parameters, not a number or a pointer |
+| E0181 | the C header was not found: add its folder with `-I` |
+| E0182 | the C struct is laid out differently than in Claw (`packed`, `aligned`, `#pragma pack`, a vector type): its name cannot be used, read the fields through `*u8` |
+| E0183 | the package does not match `claw.pkg` and `claw.lock`: files or source changed, or the package is not in the lock; `claw get --update` (or `claw get`) |
+| E0184 | the C header is broken (for example, an `#if` is not closed) |
+| E0185 | the C function that is called is in no loaded library, or it is a `static inline` from the header |
+| E0900 | not used (formerly: a reserved feature) |
+| E0901 | the function is too large for this version |
+| E0902 | the formatter refused to change the file |
+| E0905 | a vector outside `claw fn` |
+| E0906 | a vector where it cannot be: a field, an element, a pointer, `?T`, a generic argument, a parameter after the eighth |
+| E0907 | not used (formerly: a vector on x86-64) |
+| E0908 | wrong use of `vload`, `vstore`, `lane`, `fma` |
+| E0909 | an operation the vector does not have: `/` for integers, `print` |

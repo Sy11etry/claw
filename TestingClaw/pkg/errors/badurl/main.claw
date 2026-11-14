@@ -1,5 +1,0 @@
-use repo
-
-fn main() {
-    print("x")
-}

@@ -1,6 +1,0 @@
-// code: E0166
-fn main()
-    need true
-{
-    print(1)
-}

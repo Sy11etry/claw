@@ -1,5 +1,0 @@
-use tools
-
-fn main() {
-    print("double {tools.double(21)}")
-}

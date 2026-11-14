@@ -1,9 +1,0 @@
-use c "bad_no_endif.h"
-
-claw fn f() int {
-    ret int(no_endif_add(1, 2))
-}
-
-fn main() {
-    print("f {f()}")
-}

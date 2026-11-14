@@ -1,9 +1,0 @@
-use c "bad_unknown_type.h"
-
-claw fn f() int {
-    ret int(use_foo(1))
-}
-
-fn main() {
-    print("f {f()}")
-}

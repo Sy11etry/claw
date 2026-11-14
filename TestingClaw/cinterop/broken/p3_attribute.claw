@@ -1,9 +1,0 @@
-use c "bad_attribute.h"
-
-claw fn f() int {
-    ret 1
-}
-
-fn main() {
-    print("f {f()}")
-}

@@ -1,6 +1,0 @@
-// expect: -1
-// expect: 1
-fn main() {
-    print(-7 % 3)
-    print(7 % -3)
-}

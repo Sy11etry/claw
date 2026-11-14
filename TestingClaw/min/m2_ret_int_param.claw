@@ -1,7 +1,0 @@
-fn id(x int) int {
-    ret x
-}
-
-fn main() {
-    print(id(3))
-}

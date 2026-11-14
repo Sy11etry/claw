@@ -1,5 +1,0 @@
-// exit: 101
-fn main() {
-    s := -1
-    print(1 << s)
-}

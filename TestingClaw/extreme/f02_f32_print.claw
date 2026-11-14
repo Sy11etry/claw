@@ -1,8 +1,0 @@
-fn main() {
-    x f32 = 2.5
-    y f32 = 16777216.0
-    z f64 = 16777216.0
-    print(x)
-    print(y)
-    print(z)
-}

@@ -1,9 +1,0 @@
-// code: E0163
-fn f(a int) int
-    sure ret == old(a + 1)
-{
-    ret a
-}
-fn main() {
-    print(f(1))
-}

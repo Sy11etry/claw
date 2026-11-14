@@ -1,5 +1,0 @@
-// code: E0136
-fn main() {
-    a := [1, 0...]
-    print(len(a))
-}

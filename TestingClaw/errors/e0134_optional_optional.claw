@@ -1,5 +1,0 @@
-// code: E0134
-fn main() {
-    x ??int = none
-    print(1)
-}

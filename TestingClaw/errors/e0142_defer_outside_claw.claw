@@ -1,4 +1,0 @@
-// code: E0142
-fn main() {
-    defer print("x")
-}

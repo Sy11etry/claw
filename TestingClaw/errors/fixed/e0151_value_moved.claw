@@ -1,7 +1,0 @@
-// code: E0151
-fn main() {
-    a []int = []
-    b := copy(a)
-    print(len(a))
-    print(len(b))
-}

@@ -1,9 +1,0 @@
-// code: E0171
-fn printer() int +io {
-    print(1)
-    ret 1
-}
-const x int = printer()
-fn main() {
-    print(x)
-}

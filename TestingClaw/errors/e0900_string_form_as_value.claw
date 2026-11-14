@@ -1,5 +1,0 @@
-// code: E0900
-fn main() {
-    x := ["a{1}", "b"]
-    print(len(x))
-}

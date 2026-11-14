@@ -1,4 +1,0 @@
-fn main() {
-    s := "a\\"
-    print(s)
-}

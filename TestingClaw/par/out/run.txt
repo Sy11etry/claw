@@ -1,6 +1,0 @@
-n 0 ints true strs true items true
-n 1 ints true strs true items true
-n 2 ints true strs true items true
-n 7 ints true strs true items true
-n 1000 ints true strs true items true
-n 1000000 ints true strs true items true

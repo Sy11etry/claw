@@ -1,4 +1,0 @@
-fn main() {
-    x := -1
-    print(u64(x))
-}

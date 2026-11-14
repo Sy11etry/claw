@@ -1,7 +1,0 @@
-// code: E0908
-claw fn g() f64 {
-    ret lane(vload(1), 0)
-}
-fn main() {
-    print(1)
-}

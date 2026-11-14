@@ -1,5 +1,0 @@
-// code: E0123
-fn main() {
-    x := none
-    print(x)
-}

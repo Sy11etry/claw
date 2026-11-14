@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    # Claw builds for macOS on Apple Silicon only, and the runner is an Apple Silicon Mac.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the compiler (warnings are errors)
+        run: cargo build --release --manifest-path compiler/Cargo.toml
+        env:
+          RUSTFLAGS: -D warnings
+      - name: Version
+        run: compiler/target/release/claw --version
+      - name: Quick tests
+        run: python3 tools/quicktests.py

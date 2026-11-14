@@ -1,4 +1,0 @@
-linux: 247/247 programs gave the same output on Linux
-card: about 2493 tokens (budget 2500)
-2541/2541 passed
-done 0

@@ -1,7 +1,0 @@
-#!/usr/bin/env claw
-use fs
-
-fn main() {
-    text := fs.read("/dev/stdin") else ""
-    print("bytes {len(text)}")
-}

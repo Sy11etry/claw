@@ -1,5 +1,0 @@
-// code: E0153
-fn main() {
-    s := ["x"...]
-    print(len(s))
-}

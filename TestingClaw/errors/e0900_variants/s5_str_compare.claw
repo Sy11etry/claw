@@ -1,5 +1,0 @@
-fn main() {
-    x := 3
-    ok := "n{x}" == "n3"
-    print(ok)
-}

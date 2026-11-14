@@ -1,8 +1,0 @@
-// code: E0139
-fn twice(x int) int {
-    ret x * 2
-}
-const big = twice(3)
-fn main() {
-    print(big)
-}

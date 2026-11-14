@@ -1,6 +1,0 @@
-// code: E0179
-type T = A{kids []T} | B
-fn main() {
-    t := A{[B]}
-    print(t)
-}

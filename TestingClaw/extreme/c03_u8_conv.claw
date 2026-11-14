@@ -1,4 +1,0 @@
-fn main() {
-    x := 300
-    print(u8(x))
-}

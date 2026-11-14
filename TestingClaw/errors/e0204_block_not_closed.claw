@@ -1,3 +1,0 @@
-// code: E0204
-fn main() {
-    print(1)

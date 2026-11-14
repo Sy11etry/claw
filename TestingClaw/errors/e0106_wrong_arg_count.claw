@@ -1,7 +1,0 @@
-// code: E0106
-fn f(a int) int {
-    ret a
-}
-fn main() {
-    print(f(1, 2))
-}

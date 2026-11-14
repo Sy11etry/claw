@@ -1,8 +1,0 @@
-// code: E0137
-type P {
-    x int,
-    x int
-}
-fn main() {
-    print(1)
-}

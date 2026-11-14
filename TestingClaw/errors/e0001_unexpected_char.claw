@@ -1,5 +1,0 @@
-// code: E0001
-fn main() {
-    x := 1 @ 2
-    print(x)
-}

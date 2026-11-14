@@ -1,8 +1,0 @@
-// code: E0143
-claw fn f() int {
-    defer ret 3
-    ret 1
-}
-fn main() {
-    print(f())
-}

@@ -1,4 +1,0 @@
-fn main() {
-    x := 3
-    print(len("n{x}"))
-}

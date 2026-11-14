@@ -1,7 +1,0 @@
-fn show(s str) int {
-    ret len(s)
-}
-fn main() {
-    x := 3
-    print(show("n{x}"))
-}

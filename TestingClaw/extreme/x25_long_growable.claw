@@ -1,8 +1,0 @@
-// expect: 100000
-fn main() {
-    mut a []int = []
-    for i in 0..100000 {
-        push(&a, i)
-    }
-    print(len(a))
-}

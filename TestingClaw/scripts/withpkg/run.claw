@@ -1,6 +1,0 @@
-#!/usr/bin/env claw
-use geo
-
-fn main() {
-    print("sq {geo.square(5)}")
-}

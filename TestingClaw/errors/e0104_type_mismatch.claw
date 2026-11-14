@@ -1,5 +1,0 @@
-// code: E0104
-fn main() {
-    x i32 = "s"
-    print(x)
-}

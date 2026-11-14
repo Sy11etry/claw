@@ -1,4 +1,4 @@
-# Claw 0.13 card
+# Claw 1.0 card
 
 One statement per line, no `;`. A line ending in an operator, comma or open bracket continues.
 

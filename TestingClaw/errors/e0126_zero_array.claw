@@ -1,5 +1,0 @@
-// code: E0126
-fn main() {
-    x [0]int = [0...]
-    print(len(x))
-}

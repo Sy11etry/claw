@@ -1,7 +1,0 @@
-fn id(s str) str {
-    ret s
-}
-
-fn main() {
-    print(id("hi"))
-}

@@ -1,9 +1,0 @@
-// cmd: test
-// exit: nz
-fn ratio(a int, b int) int {
-    ret a / b
-}
-
-fn main() {
-    print(ratio(6, 3))
-}

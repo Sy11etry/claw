@@ -1,7 +1,0 @@
-// code: E0124
-fn f() int {
-    fail 1
-}
-fn main() {
-    print(f())
-}

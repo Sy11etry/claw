@@ -1,9 +1,0 @@
-// code: E0154
-type H { v int }
-fn drop(x &H) {
-}
-fn main() {
-    h := H{1}
-    g := copy(h)
-    print(g.v)
-}

@@ -1,9 +1,0 @@
-use c "sizes_plain.h"
-
-claw fn f() int {
-    ret 1
-}
-
-fn main() {
-    print("f {f()}")
-}

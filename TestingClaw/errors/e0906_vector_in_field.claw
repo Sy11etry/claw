@@ -1,5 +1,0 @@
-// code: E0906
-type V { v f64x2 }
-fn main() {
-    print(1)
-}

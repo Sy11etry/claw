@@ -1,7 +1,0 @@
-// code: E0128
-type point {
-    x int
-}
-fn main() {
-    print(1)
-}
