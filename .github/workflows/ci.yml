@@ -7,8 +7,8 @@ on:
 
 jobs:
   build-and-test:
-    # Claw builds for macOS on Apple Silicon only, and the runner is an Apple Silicon Mac.
-    runs-on: macos-14
+    # Claw builds for macOS on Apple Silicon only, and the latest macOS runner is an Apple Silicon Mac.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build the compiler (warnings are errors)
